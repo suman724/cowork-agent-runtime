@@ -12,6 +12,9 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     "structlog>=24.0,<26.0",
     "cowork-platform[sdk]",
+    "google-adk>=1.0,<2.0",
+    "litellm",
+    "tenacity>=9.0,<10.0",
 ]
 
 [project.optional-dependencies]
@@ -24,7 +27,7 @@ dev = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/tool_runtime"]
+packages = ["src/tool_runtime", "src/agent_host"]
 
 [tool.ruff]
 line-length = 100
@@ -35,7 +38,9 @@ src = ["src", "tests"]
 select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "SIM", "TCH", "ARG", "PTH", "RUF"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["S101", "S108", "ARG001", "ARG002", "TCH"]
+"tests/**" = ["S101", "S106", "S108", "ARG001", "ARG002", "TCH"]
+"src/agent_host/session/checkpoint_session_service.py" = ["ARG002"]
+"src/agent_host/server/handlers.py" = ["ARG002"]
 
 [tool.mypy]
 python_version = "3.12"
@@ -49,6 +54,11 @@ module = ["cowork_platform", "cowork_platform.*", "cowork_platform_sdk", "cowork
 ignore_missing_imports = true
 follow_untyped_imports = true
 
+[[tool.mypy.overrides]]
+module = ["google.*", "google.adk.*", "google.genai.*", "litellm", "litellm.*", "tenacity", "tenacity.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
@@ -59,10 +69,11 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["tool_runtime"]
+source = ["tool_runtime", "agent_host"]
 omit = [
     "src/tool_runtime/platform/base.py",
     "src/tool_runtime/platform/windows.py",
+    "src/agent_host/main.py",
 ]
 
 [tool.coverage.report]
