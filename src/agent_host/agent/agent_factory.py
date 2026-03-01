@@ -67,9 +67,8 @@ def create_agent(
     """
     # Initialize policy enforcer and token budget
     policy_enforcer = PolicyEnforcer(policy_bundle)
-    token_budget = TokenBudget(
-        max_session_tokens=policy_bundle.llmPolicy.maxSessionTokens,
-    )
+    max_tokens = policy_bundle.llmPolicy.maxSessionTokens if policy_bundle.llmPolicy else 100_000
+    token_budget = TokenBudget(max_session_tokens=max_tokens)
 
     # Configure LLM model via LiteLLM
     model = LiteLlm(
@@ -95,6 +94,7 @@ def create_agent(
     before_model = make_before_model_callback(
         policy_enforcer=policy_enforcer,
         token_budget=token_budget,
+        event_emitter=event_emitter,
     )
     after_tool = make_after_tool_callback(
         workspace_client=workspace_client,

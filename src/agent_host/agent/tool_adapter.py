@@ -51,7 +51,7 @@ def adapt_tools(
         # Check if this tool requires approval
         requires_approval = False
         if capability_name:
-            cap = policy_enforcer._capabilities.get(capability_name)
+            cap = policy_enforcer.get_capability(capability_name)
             if cap and cap.requiresApproval:
                 requires_approval = True
 
@@ -59,6 +59,7 @@ def adapt_tools(
         exec_fn = _make_tool_function(
             tool_router=tool_router,
             tool_name=tool_name,
+            capability_name=capability_name,
             description=tool_def.description,
             execution_context=execution_context,
             session_id=session_id,
@@ -76,6 +77,7 @@ def adapt_tools(
 def _make_tool_function(
     tool_router: ToolRouter,
     tool_name: str,
+    capability_name: str,
     description: str,
     execution_context: ExecutionContext | None,
     session_id: str,
@@ -94,13 +96,23 @@ def _make_tool_function(
             sessionId=session_id,
             taskId=task_id,
             stepId="",
+            capability=capability_name or None,
         )
-        result = await tool_router.execute(request, execution_context)
-        return {
-            "status": result.tool_result.status,
-            "output": result.tool_result.outputText or "",
-            "error": (result.tool_result.error.model_dump() if result.tool_result.error else None),
-        }
+        try:
+            result = await tool_router.execute(request, execution_context)
+            return {
+                "status": result.tool_result.status,
+                "output": result.tool_result.outputText or "",
+                "error": (
+                    result.tool_result.error.model_dump() if result.tool_result.error else None
+                ),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "output": "",
+                "error": {"code": "TOOL_EXECUTION_FAILED", "message": str(exc)},
+            }
 
     # Set function metadata for ADK
     tool_fn.__name__ = tool_name

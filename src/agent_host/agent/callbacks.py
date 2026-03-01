@@ -65,6 +65,13 @@ def make_before_tool_callback(
                 capability=capability_name,
                 risk_level=result.risk_level,
             )
+            if event_emitter:
+                event_emitter.emit_approval_requested(
+                    approval_id=result.approval_rule_id or "",
+                    risk_level=result.risk_level or "medium",
+                    tool_name=tool_name,
+                    action_summary=f"{tool_name} ({capability_name})",
+                )
 
         if event_emitter:
             event_emitter.emit_tool_requested(tool_name, capability_name, tool_input)
@@ -77,6 +84,7 @@ def make_before_tool_callback(
 def make_before_model_callback(
     policy_enforcer: PolicyEnforcer,
     token_budget: TokenBudget,
+    event_emitter: EventEmitter | None = None,
 ) -> Any:
     """Create a before_model_callback for policy and budget enforcement.
 
@@ -90,6 +98,8 @@ def make_before_model_callback(
         # Check policy (LLM.Call capability + not expired)
         result = policy_enforcer.check_llm_call()
         if result.decision == "DENIED":
+            if event_emitter:
+                event_emitter.emit_policy_expired()
             raise PolicyExpiredError(result.reason)
 
         # Check token budget

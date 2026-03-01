@@ -91,6 +91,42 @@ class TestSessionClient:
         await client.close()
 
     @pytest.mark.asyncio
+    async def test_create_session_invalid_json(self) -> None:
+        """Raises AgentHostError on malformed JSON response."""
+        from agent_host.exceptions import AgentHostError
+
+        mock_response = httpx.Response(
+            200,
+            content=b"not-json",
+            request=httpx.Request("POST", "http://test/sessions"),
+        )
+
+        client = SessionClient("http://test")
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+            with pytest.raises(AgentHostError, match="Invalid response"):
+                await client.create_session(_make_session_request())
+        await client.close()
+
+    @pytest.mark.asyncio
+    async def test_create_session_invalid_schema(self) -> None:
+        """Raises AgentHostError on response that doesn't match schema."""
+        from agent_host.exceptions import AgentHostError
+
+        mock_response = httpx.Response(
+            200,
+            json={"unexpected": "shape"},
+            request=httpx.Request("POST", "http://test/sessions"),
+        )
+
+        client = SessionClient("http://test")
+        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
+            mock_post.return_value = mock_response
+            with pytest.raises(AgentHostError, match="Invalid response"):
+                await client.create_session(_make_session_request())
+        await client.close()
+
+    @pytest.mark.asyncio
     async def test_close_client(self) -> None:
         """Client can be closed."""
         client = SessionClient("http://test")

@@ -130,3 +130,27 @@ class TestAdaptTools:
         assert result["status"] == "succeeded"
         assert result["output"] == "file contents"
         router.execute.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_tool_function_handles_execution_error(self) -> None:
+        """Adapted tool function catches exceptions and returns error dict."""
+        router = MagicMock()
+        router.get_available_tools.return_value = [
+            ToolDefinition(
+                toolName="ReadFile",
+                description="Read a file",
+                inputSchema={"type": "object", "properties": {"path": {"type": "string"}}},
+            ),
+        ]
+        router.execute = AsyncMock(side_effect=RuntimeError("disk error"))
+
+        bundle = make_policy_bundle()
+        enforcer = PolicyEnforcer(bundle)
+
+        tools = adapt_tools(router, enforcer, session_id="sess-1", task_id="task-1")
+        fn = tools[0].func
+        result = await fn(path="/tmp/test.txt")
+
+        assert result["status"] == "failed"
+        assert "disk error" in result["error"]["message"]
+        assert result["error"]["code"] == "TOOL_EXECUTION_FAILED"

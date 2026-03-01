@@ -21,6 +21,7 @@ from google.adk.runners import Runner
 from google.genai import types
 
 from agent_host.agent.agent_factory import create_agent
+from agent_host.agent.tool_adapter import TOOL_CAPABILITY_MAP
 from agent_host.exceptions import (
     NoActiveTaskError,
     SessionNotFoundError,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from agent_host.budget.token_budget import TokenBudget
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
+    from agent_host.server.stdio_transport import StdioTransport
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -52,11 +54,11 @@ class SessionManager:
         self,
         config: AgentHostConfig,
         tool_router: ToolRouter,
-        event_emitter: EventEmitter | None = None,
+        transport: StdioTransport | None = None,
     ) -> None:
         self._config = config
         self._tool_router = tool_router
-        self._event_emitter = event_emitter
+        self._transport = transport
 
         # Service clients
         self._session_client = SessionClient(config.session_service_url)
@@ -66,6 +68,9 @@ class SessionManager:
         self._checkpoint_service = CheckpointSessionService(config.checkpoint_dir)
         self._runner: Runner | None = None
         self._token_budget: TokenBudget | None = None
+
+        # Event emitter (created lazily after session context is available)
+        self._event_emitter: EventEmitter | None = None
 
         # Session state
         self._session_context: SessionContext | None = None
@@ -94,17 +99,21 @@ class SessionManager:
         workspace_hint = None
         hint_data = params.get("workspaceHint")
         if hint_data and isinstance(hint_data, dict):
-            workspace_hint = WorkspaceHint(**hint_data)
+            try:
+                workspace_hint = WorkspaceHint.model_validate(hint_data)
+            except Exception:
+                logger.warning("invalid_workspace_hint", hint_data=hint_data, exc_info=True)
 
-        # Build capabilities list from available tools
-        capabilities = [
-            CapabilityName.FILE_READ,
-            CapabilityName.FILE_WRITE,
-            CapabilityName.FILE_DELETE,
-            CapabilityName.SHELL_EXEC,
-            CapabilityName.NETWORK_HTTP,
-            CapabilityName.LLM_CALL,
-        ]
+        # Derive capabilities from actual tools available in the router
+        available_tools = self._tool_router.get_available_tools()
+        capability_set: set[str] = set()
+        for tool_def in available_tools:
+            cap = TOOL_CAPABILITY_MAP.get(tool_def.toolName)
+            if cap:
+                capability_set.add(cap)
+        # LLM.Call is always needed for the agent loop
+        capability_set.add(CapabilityName.LLM_CALL)
+        capabilities = sorted(capability_set)
 
         request = SessionCreateRequest(
             tenantId=tenant_id,
@@ -138,6 +147,11 @@ class SessionManager:
             tenant_id=tenant_id,
             user_id=user_id,
         )
+
+        # Create EventEmitter now that session context is available
+        from agent_host.events.event_emitter import EventEmitter
+
+        self._event_emitter = EventEmitter(self._session_context, self._transport)
 
         # Initialize ADK agent with policy bundle
         if response.policyBundle:
@@ -198,12 +212,12 @@ class SessionManager:
 
         task_id = params.get("taskId", "")
         prompt = params.get("prompt", "")
-        self._current_task_id = task_id
 
-        # Spawn the runner as a background asyncio task
-        self._current_task = asyncio.create_task(
-            self._run_agent(prompt, task_id),
-        )
+        # Spawn the runner as a background asyncio task.
+        # Assign both fields together so cancel_task() never sees a partial state.
+        task = asyncio.create_task(self._run_agent(prompt, task_id))
+        self._current_task = task
+        self._current_task_id = task_id
 
         return {"taskId": task_id, "status": "running"}
 
@@ -229,9 +243,17 @@ class SessionManager:
                         if hasattr(part, "text") and part.text:
                             self._event_emitter.emit_text_chunk(task_id, part.text)
 
-                # Track token usage from final response
-                if event.is_final_response() and self._event_emitter:
-                    self._event_emitter.emit_task_completed(task_id)
+                # Record token usage from LLM responses
+                if self._token_budget and hasattr(event, "usage_metadata") and event.usage_metadata:
+                    usage = event.usage_metadata
+                    input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                    output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                    if input_tokens or output_tokens:
+                        self._token_budget.record_usage(input_tokens, output_tokens)
+
+            # Emit task_completed after the loop finishes normally
+            if self._event_emitter:
+                self._event_emitter.emit_task_completed(task_id)
 
             logger.info("task_completed", task_id=task_id)
 

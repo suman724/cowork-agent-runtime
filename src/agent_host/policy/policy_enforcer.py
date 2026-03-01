@@ -51,6 +51,10 @@ class PolicyEnforcer:
         """Check if the policy bundle has expired."""
         return datetime.now(tz=UTC) >= self._policy_bundle.expiresAt
 
+    def get_capability(self, capability_name: str) -> Capability | None:
+        """Return the Capability for a given name, or None if not granted."""
+        return self._capabilities.get(capability_name)
+
     def check_tool_call(
         self,
         tool_name: str,

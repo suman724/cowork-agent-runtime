@@ -104,6 +104,21 @@ class TestCheckpointSessionService:
         assert not checkpoint.exists()
 
     @pytest.mark.asyncio
+    async def test_binary_checkpoint_deleted(self, tmp_path: object) -> None:
+        """Binary (non-UTF-8) checkpoint file is deleted and None returned."""
+        service = CheckpointSessionService(str(tmp_path))
+
+        # Write binary content that is not valid UTF-8
+        checkpoint = tmp_path / "test_sess-binary.json"
+        checkpoint.write_bytes(b"\x80\x81\x82\xff\xfe")
+
+        session = await service.get_session(
+            app_name="test", user_id="user-1", session_id="sess-binary"
+        )
+        assert session is None
+        assert not checkpoint.exists()
+
+    @pytest.mark.asyncio
     async def test_list_sessions(self, tmp_path: object) -> None:
         """list_sessions returns all in-memory sessions."""
         service = CheckpointSessionService(str(tmp_path))

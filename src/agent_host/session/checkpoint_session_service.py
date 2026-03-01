@@ -87,7 +87,7 @@ class CheckpointSessionService(BaseSessionService):
                 last_update_time=data.get("last_update_time", 0.0),
             )
             return session
-        except (json.JSONDecodeError, KeyError, TypeError):
+        except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError):
             logger.warning(
                 "checkpoint_corrupt_deleting",
                 session_id=session_id,
