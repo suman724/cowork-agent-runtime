@@ -71,3 +71,23 @@ class TestTokenBudget:
             budget.pre_check()
         assert exc_info.value.details["total_used"] == 1000
         assert exc_info.value.details["max_allowed"] == 1000
+
+    def test_restore_usage(self) -> None:
+        """restore_usage sets absolute values (not additive)."""
+        budget = TokenBudget(max_session_tokens=10000)
+        budget.record_usage(input_tokens=100, output_tokens=50)
+        budget.restore_usage(input_tokens=500, output_tokens=200)
+        assert budget.input_tokens_used == 500
+        assert budget.output_tokens_used == 200
+        assert budget.total_tokens_used == 700
+        assert budget.remaining == 9300
+
+    def test_restore_then_record(self) -> None:
+        """restore_usage followed by record_usage is cumulative."""
+        budget = TokenBudget(max_session_tokens=10000)
+        budget.restore_usage(input_tokens=500, output_tokens=200)
+        budget.record_usage(input_tokens=100, output_tokens=50)
+        assert budget.input_tokens_used == 600
+        assert budget.output_tokens_used == 250
+        assert budget.total_tokens_used == 850
+        assert budget.remaining == 9150

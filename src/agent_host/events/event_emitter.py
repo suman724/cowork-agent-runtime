@@ -93,7 +93,7 @@ class EventEmitter:
 
     def emit_session_failed(self, reason: str) -> None:
         """Emit session_failed event on session failure."""
-        self.emit(EventType.SESSION_FAILED, payload={"reason": reason}, severity="error")
+        self.emit(EventType.SESSION_FAILED, payload={"message": reason}, severity="error")
 
     def emit_text_chunk(self, task_id: str, text: str) -> None:
         """Emit a text_chunk event (streaming LLM output)."""
@@ -141,6 +141,27 @@ class EventEmitter:
                 "toolName": tool_name,
                 "actionSummary": action_summary,
             },
+        )
+
+    def emit_llm_retry(
+        self,
+        task_id: str,
+        attempt: int,
+        max_retries: int,
+        error_message: str,
+        delay_seconds: float,
+    ) -> None:
+        """Emit llm_retry event when retrying a transient LLM error."""
+        self.emit(
+            EventType.LLM_RETRY,
+            task_id=task_id,
+            payload={
+                "attempt": attempt,
+                "maxRetries": max_retries,
+                "errorMessage": error_message,
+                "delaySeconds": delay_seconds,
+            },
+            severity="warning",
         )
 
     def emit_policy_expired(self) -> None:

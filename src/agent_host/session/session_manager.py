@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import platform
+import random
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -23,9 +24,12 @@ from google.genai import types
 from agent_host.agent.agent_factory import create_agent
 from agent_host.agent.tool_adapter import TOOL_CAPABILITY_MAP
 from agent_host.exceptions import (
+    CheckpointError,
     NoActiveTaskError,
+    PolicyExpiredError,
     SessionNotFoundError,
 )
+from agent_host.llm.error_classifier import is_transient_llm_error
 from agent_host.models import SessionContext
 from agent_host.session.checkpoint_session_service import CheckpointSessionService
 from agent_host.session.session_client import SessionClient
@@ -186,6 +190,9 @@ class SessionManager:
                 },
             )
 
+        # Restore token budget from checkpoint (crash recovery)
+        self._restore_token_budget_from_checkpoint()
+
         # Emit session_created event
         if self._event_emitter:
             self._event_emitter.emit_session_created()
@@ -223,53 +230,130 @@ class SessionManager:
         return {"taskId": task_id, "status": "running"}
 
     async def _run_agent(self, prompt: str, task_id: str) -> None:
-        """Run the ADK agent loop for a single task."""
+        """Run the ADK agent loop for a single task with retry on transient errors."""
         if not self._runner or not self._session_context:
             return
 
-        try:
-            message = types.Content(
-                role="user",
-                parts=[types.Part(text=prompt)],
+        max_retries = self._config.llm_max_retries
+        base_delay = self._config.llm_retry_base_delay
+        max_delay = self._config.llm_retry_max_delay
+
+        message = types.Content(
+            role="user",
+            parts=[types.Part(text=prompt)],
+        )
+
+        for attempt in range(max_retries + 1):
+            try:
+                assistant_text_parts: list[str] = []
+
+                async for event in self._runner.run_async(
+                    user_id=self._session_context.user_id,
+                    session_id=self._session_context.session_id,
+                    new_message=message if attempt == 0 else None,
+                ):
+                    # Forward streaming events
+                    if self._event_emitter and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if hasattr(part, "text") and part.text:
+                                self._event_emitter.emit_text_chunk(task_id, part.text)
+                                assistant_text_parts.append(part.text)
+
+                    # Record token usage from LLM responses
+                    if (
+                        self._token_budget
+                        and hasattr(event, "usage_metadata")
+                        and event.usage_metadata
+                    ):
+                        usage = event.usage_metadata
+                        input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                        output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                        if input_tokens or output_tokens:
+                            self._token_budget.record_usage(input_tokens, output_tokens)
+                            self._persist_token_budget()
+
+                # Upload session history (best-effort)
+                await self._upload_history(prompt, "".join(assistant_text_parts), task_id)
+
+                # Emit task_completed after the loop finishes normally
+                if self._event_emitter:
+                    self._event_emitter.emit_task_completed(task_id)
+
+                logger.info("task_completed", task_id=task_id)
+                return
+
+            except asyncio.CancelledError:
+                logger.info("task_cancelled", task_id=task_id)
+                return
+
+            except Exception as exc:
+                if is_transient_llm_error(exc) and attempt < max_retries:
+                    delay = min(base_delay * (2**attempt), max_delay)
+                    jitter = random.uniform(0, delay * 0.25)  # noqa: S311
+                    delay += jitter
+                    logger.warning(
+                        "llm_transient_error_retrying",
+                        task_id=task_id,
+                        attempt=attempt + 1,
+                        max_retries=max_retries,
+                        delay=delay,
+                        error=str(exc),
+                    )
+                    if self._event_emitter:
+                        self._event_emitter.emit_llm_retry(
+                            task_id=task_id,
+                            attempt=attempt + 1,
+                            max_retries=max_retries,
+                            error_message=str(exc),
+                            delay_seconds=delay,
+                        )
+                    await asyncio.sleep(delay)
+                    continue
+
+                # Unrecoverable — classify as session-level or task-level failure
+                if isinstance(exc, (PolicyExpiredError, CheckpointError)):
+                    logger.exception("session_failed", task_id=task_id)
+                    if self._event_emitter:
+                        self._event_emitter.emit_session_failed(str(exc))
+                else:
+                    logger.exception("task_failed", task_id=task_id)
+                    if self._event_emitter:
+                        self._event_emitter.emit_task_failed(task_id, reason=str(exc))
+                return
+
+    def _persist_token_budget(self) -> None:
+        """Persist current token usage into the ADK session checkpoint."""
+        if not self._token_budget or not self._session_context:
+            return
+
+        session_id = self._session_context.session_id
+        session = self._checkpoint_service._sessions.get(session_id)
+        if not session:
+            return
+
+        session.state["_token_input_used"] = self._token_budget.input_tokens_used
+        session.state["_token_output_used"] = self._token_budget.output_tokens_used
+        self._checkpoint_service._write_checkpoint(APP_NAME, session)
+
+    def _restore_token_budget_from_checkpoint(self) -> None:
+        """Restore token usage from checkpoint state if available."""
+        if not self._token_budget or not self._session_context:
+            return
+
+        session_id = self._session_context.session_id
+        session = self._checkpoint_service._sessions.get(session_id)
+        if not session:
+            return
+
+        input_used = session.state.get("_token_input_used")
+        output_used = session.state.get("_token_output_used")
+        if isinstance(input_used, int) and isinstance(output_used, int):
+            self._token_budget.restore_usage(input_used, output_used)
+            logger.info(
+                "token_budget_restored",
+                input_tokens=input_used,
+                output_tokens=output_used,
             )
-
-            assistant_text_parts: list[str] = []
-
-            async for event in self._runner.run_async(
-                user_id=self._session_context.user_id,
-                session_id=self._session_context.session_id,
-                new_message=message,
-            ):
-                # Forward streaming events
-                if self._event_emitter and event.content and event.content.parts:
-                    for part in event.content.parts:
-                        if hasattr(part, "text") and part.text:
-                            self._event_emitter.emit_text_chunk(task_id, part.text)
-                            assistant_text_parts.append(part.text)
-
-                # Record token usage from LLM responses
-                if self._token_budget and hasattr(event, "usage_metadata") and event.usage_metadata:
-                    usage = event.usage_metadata
-                    input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                    output_tokens = getattr(usage, "candidates_token_count", 0) or 0
-                    if input_tokens or output_tokens:
-                        self._token_budget.record_usage(input_tokens, output_tokens)
-
-            # Upload session history (best-effort)
-            await self._upload_history(prompt, "".join(assistant_text_parts), task_id)
-
-            # Emit task_completed after the loop finishes normally
-            if self._event_emitter:
-                self._event_emitter.emit_task_completed(task_id)
-
-            logger.info("task_completed", task_id=task_id)
-
-        except asyncio.CancelledError:
-            logger.info("task_cancelled", task_id=task_id)
-        except Exception as exc:
-            logger.exception("task_failed", task_id=task_id)
-            if self._event_emitter:
-                self._event_emitter.emit_task_failed(task_id, reason=str(exc))
 
     async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
         """Upload session history to workspace service (best-effort)."""
