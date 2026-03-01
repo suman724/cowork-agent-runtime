@@ -33,6 +33,9 @@ coverage.xml
 # Environment
 .env
 
+# Runtime logs
+agent_stderr.log
+
 # OS
 .DS_Store
 Thumbs.db
