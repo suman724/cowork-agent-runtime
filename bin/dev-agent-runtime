@@ -1,0 +1,15 @@
+#!/bin/bash
+# Dev wrapper: activates venv and runs agent_host in stdio mode.
+# Used by cowork-desktop-app to spawn the agent-runtime during development.
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+# Source project .env if it exists
+if [ -f "$PROJECT_DIR/.env" ]; then
+  set -a
+  . "$PROJECT_DIR/.env"
+  set +a
+fi
+
+exec "$PROJECT_DIR/.venv/bin/python" -m agent_host.main

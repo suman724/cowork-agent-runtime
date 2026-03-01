@@ -79,12 +79,21 @@ class EventEmitter:
         self.emit(EventType.SESSION_CREATED)
 
     def emit_task_completed(self, task_id: str) -> None:
-        """Emit session_completed event for a task."""
-        self.emit(EventType.SESSION_COMPLETED, task_id=task_id)
+        """Emit task_completed event when a single task finishes successfully."""
+        self.emit(EventType.TASK_COMPLETED, task_id=task_id)
 
-    def emit_task_failed(self, task_id: str) -> None:
-        """Emit session_failed event for a task."""
-        self.emit(EventType.SESSION_FAILED, task_id=task_id, severity="error")
+    def emit_task_failed(self, task_id: str, reason: str | None = None) -> None:
+        """Emit task_failed event when a single task fails."""
+        payload = {"message": reason} if reason else {}
+        self.emit(EventType.TASK_FAILED, task_id=task_id, payload=payload, severity="error")
+
+    def emit_session_completed(self) -> None:
+        """Emit session_completed event on clean session shutdown."""
+        self.emit(EventType.SESSION_COMPLETED)
+
+    def emit_session_failed(self, reason: str) -> None:
+        """Emit session_failed event on session failure."""
+        self.emit(EventType.SESSION_FAILED, payload={"reason": reason}, severity="error")
 
     def emit_text_chunk(self, task_id: str, text: str) -> None:
         """Emit a text_chunk event (streaming LLM output)."""

@@ -86,16 +86,20 @@ class WorkspaceClient:
         session_id: str,
         messages: list[ConversationMessage],
         task_id: str | None = None,
-    ) -> Artifact | None:
+    ) -> dict[str, str] | None:
         """Upload session history as an artifact. Best-effort — returns None on failure."""
         try:
+            # Convert messages to dicts because ArtifactUploadRequest has its
+            # own generated ConversationMessage class (separate from
+            # cowork_platform.conversation_message.ConversationMessage).
+            message_dicts = [m.model_dump(mode="json") for m in messages]
             request = ArtifactUploadRequest(
                 sessionId=session_id,
                 taskId=task_id,
                 artifactType="session_history",
                 artifactName=f"history-{session_id}",
                 contentType="application/json",
-                messages=messages,
+                messages=message_dicts,
                 snapshotAt=datetime.now(tz=UTC),
             )
             response = await self._client.post(
@@ -103,7 +107,8 @@ class WorkspaceClient:
                 content=request.model_dump_json(),
             )
             await raise_for_status(response)
-            return Artifact.model_validate(response.json())
+            # Workspace service returns {"artifactId": "...", "artifactUri": "..."}
+            return response.json()
         except Exception:
             logger.warning(
                 "workspace_client.upload_session_history_failed",

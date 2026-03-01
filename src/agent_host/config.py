@@ -22,6 +22,21 @@ def _default_checkpoint_dir() -> str:
     return str(base / "agent-runtime" / "checkpoints")
 
 
+def _default_log_dir() -> str:
+    """Return platform-appropriate log directory."""
+    system = platform.system()
+    if system == "Darwin":
+        base = Path.home() / "Library" / "Logs" / "cowork"
+    elif system == "Windows":
+        appdata = os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming"))
+        base = Path(appdata) / "cowork" / "agent-runtime" / "logs"
+        return str(base)
+    else:
+        # Linux / other
+        base = Path.home() / ".local" / "state" / "cowork"
+    return str(base / "agent-runtime")
+
+
 @dataclass(frozen=True)
 class AgentHostConfig:
     """Configuration for the Local Agent Host, loaded from environment variables."""
@@ -34,6 +49,7 @@ class AgentHostConfig:
 
     # Optional with defaults
     checkpoint_dir: str = field(default_factory=_default_checkpoint_dir)
+    log_dir: str = field(default_factory=_default_log_dir)
     approval_timeout_seconds: int = 300
     log_level: str = "info"
     llm_model: str = "openai/gpt-4o"
@@ -50,6 +66,7 @@ class AgentHostConfig:
 
         Optional env vars:
             CHECKPOINT_DIR
+            LOG_DIR
             APPROVAL_TIMEOUT_SECONDS (default: 300)
             LOG_LEVEL (default: info)
             LLM_MODEL (default: openai/gpt-4o)
@@ -68,6 +85,7 @@ class AgentHostConfig:
             session_service_url=_require("SESSION_SERVICE_URL"),
             workspace_service_url=_require("WORKSPACE_SERVICE_URL"),
             checkpoint_dir=os.environ.get("CHECKPOINT_DIR", _default_checkpoint_dir()),
+            log_dir=os.environ.get("LOG_DIR", _default_log_dir()),
             approval_timeout_seconds=int(os.environ.get("APPROVAL_TIMEOUT_SECONDS", "300")),
             log_level=os.environ.get("LOG_LEVEL", "info"),
             llm_model=os.environ.get("LLM_MODEL", "openai/gpt-4o"),
