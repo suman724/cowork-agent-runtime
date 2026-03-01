@@ -175,6 +175,23 @@ class EventEmitter:
             severity="warning",
         )
 
+    def emit_step_limit_approaching(
+        self,
+        task_id: str,
+        step_count: int,
+        max_steps: int,
+    ) -> None:
+        """Emit step_limit_approaching event when nearing step budget."""
+        self.emit(
+            EventType.STEP_LIMIT_APPROACHING,
+            task_id=task_id,
+            payload={
+                "currentStep": step_count,
+                "maxSteps": max_steps,
+            },
+            severity="warning",
+        )
+
     def emit_policy_expired(self) -> None:
         """Emit policy_expired event."""
         self.emit(EventType.POLICY_EXPIRED, severity="warning")

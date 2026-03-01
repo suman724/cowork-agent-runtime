@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import platform
 import random
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from cowork_platform.conversation_message import ConversationMessage
 from cowork_platform.policy_bundle import PolicyBundle
 from cowork_platform.session_cancel_request import SessionCancelRequest
 from cowork_platform.session_create_request import (
@@ -94,6 +96,13 @@ class SessionManager:
 
         # Rich history: tool messages collected during a task
         self._task_tool_messages: list[dict[str, str]] = []
+
+        # Cumulative session history (across tasks)
+        self._session_messages: list[ConversationMessage] = []
+
+        # Step tracking for current task
+        self._current_max_steps: int = config.default_max_steps
+        self._current_step_count: int = 0
 
     @property
     def session_context(self) -> SessionContext | None:
@@ -206,8 +215,9 @@ class SessionManager:
                 },
             )
 
-        # Restore token budget from checkpoint (crash recovery)
+        # Restore token budget and session messages from checkpoint (crash recovery)
         self._restore_token_budget_from_checkpoint()
+        self._restore_session_messages_from_checkpoint()
 
         # Emit session_created event
         if self._event_emitter:
@@ -237,15 +247,26 @@ class SessionManager:
         task_id = params.get("taskId", "")
         prompt = params.get("prompt", "")
 
+        # Parse taskOptions - extract maxSteps (clamped 1-200)
+        task_options = params.get("taskOptions") or {}
+        raw_max_steps = task_options.get("maxSteps", self._config.default_max_steps)
+        try:
+            max_steps = int(raw_max_steps)
+        except (TypeError, ValueError):
+            max_steps = self._config.default_max_steps
+        max_steps = max(1, min(200, max_steps))
+        self._current_max_steps = max_steps
+        self._current_step_count = 0
+
         # Spawn the runner as a background asyncio task.
         # Assign both fields together so cancel_task() never sees a partial state.
-        task = asyncio.create_task(self._run_agent(prompt, task_id))
+        task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))
         self._current_task = task
         self._current_task_id = task_id
 
         return {"taskId": task_id, "status": "running"}
 
-    async def _run_agent(self, prompt: str, task_id: str) -> None:
+    async def _run_agent(self, prompt: str, task_id: str, max_steps: int = 50) -> None:
         """Run the ADK agent loop for a single task with retry on transient errors."""
         if not self._runner or not self._session_context:
             return
@@ -305,18 +326,37 @@ class SessionManager:
                                     }
                                 )
 
-                    # Record token usage from LLM responses
-                    if (
-                        self._token_budget
-                        and hasattr(event, "usage_metadata")
-                        and event.usage_metadata
-                    ):
-                        usage = event.usage_metadata
-                        input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                        output_tokens = getattr(usage, "candidates_token_count", 0) or 0
-                        if input_tokens or output_tokens:
-                            self._token_budget.record_usage(input_tokens, output_tokens)
-                            self._persist_token_budget()
+                    # Record token usage and count steps from LLM responses
+                    if hasattr(event, "usage_metadata") and event.usage_metadata:
+                        if self._token_budget:
+                            usage = event.usage_metadata
+                            input_tokens = getattr(usage, "prompt_token_count", 0) or 0
+                            output_tokens = getattr(usage, "candidates_token_count", 0) or 0
+                            if input_tokens or output_tokens:
+                                self._token_budget.record_usage(input_tokens, output_tokens)
+                                self._persist_token_budget()
+
+                        # Step counting: each usage_metadata = one LLM call = one step
+                        self._current_step_count += 1
+                        step_count = self._current_step_count
+                        warning_threshold = math.floor(max_steps * 0.8)
+                        if step_count == warning_threshold and self._event_emitter:
+                            self._event_emitter.emit_step_limit_approaching(
+                                task_id, step_count, max_steps
+                            )
+                        if step_count >= max_steps:
+                            if self._event_emitter:
+                                self._event_emitter.emit_task_failed(
+                                    task_id,
+                                    reason=f"Step limit reached ({step_count}/{max_steps})",
+                                )
+                            logger.warning(
+                                "step_limit_reached",
+                                task_id=task_id,
+                                step_count=step_count,
+                                max_steps=max_steps,
+                            )
+                            return
 
                 # Upload session history (best-effort)
                 await self._upload_history(prompt, "".join(assistant_text_parts), task_id)
@@ -401,10 +441,49 @@ class SessionManager:
                 output_tokens=output_used,
             )
 
-    async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
-        """Upload session history to workspace service (best-effort).
+    def _persist_session_messages(self) -> None:
+        """Persist cumulative session messages into the ADK session checkpoint."""
+        if not self._session_context:
+            return
 
-        Includes user prompt, tool call/result messages, and assistant response.
+        session_id = self._session_context.session_id
+        session = self._checkpoint_service._sessions.get(session_id)
+        if not session:
+            return
+
+        session.state["_session_messages"] = [
+            msg.model_dump(mode="json") for msg in self._session_messages
+        ]
+        self._checkpoint_service._write_checkpoint(APP_NAME, session)
+
+    def _restore_session_messages_from_checkpoint(self) -> None:
+        """Restore cumulative session messages from checkpoint state if available."""
+        if not self._session_context:
+            return
+
+        session_id = self._session_context.session_id
+        session = self._checkpoint_service._sessions.get(session_id)
+        if not session:
+            return
+
+        raw = session.state.get("_session_messages")
+        if isinstance(raw, list):
+            try:
+                self._session_messages = [
+                    ConversationMessage.model_validate(msg) for msg in raw
+                ]
+                logger.info(
+                    "session_messages_restored",
+                    count=len(self._session_messages),
+                )
+            except Exception:
+                logger.warning("session_messages_restore_failed", exc_info=True)
+
+    async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
+        """Upload cumulative session history to workspace service (best-effort).
+
+        Appends this task's messages to _session_messages, then uploads the full list.
+        Caps at 500 messages (drops oldest, keeps first system message).
         """
         if not self._session_context:
             return
@@ -412,10 +491,8 @@ class SessionManager:
         try:
             from datetime import UTC, datetime
 
-            from cowork_platform.conversation_message import ConversationMessage
-
             now = datetime.now(tz=UTC)
-            messages: list[ConversationMessage] = [
+            task_messages: list[ConversationMessage] = [
                 ConversationMessage(
                     messageId=f"{task_id}-user",
                     sessionId=self._session_context.session_id,
@@ -428,7 +505,7 @@ class SessionManager:
 
             # Insert tool call/result messages
             for i, tool_msg in enumerate(self._task_tool_messages):
-                messages.append(
+                task_messages.append(
                     ConversationMessage(
                         messageId=f"{task_id}-tool-{i}",
                         sessionId=self._session_context.session_id,
@@ -439,7 +516,7 @@ class SessionManager:
                     )
                 )
 
-            messages.append(
+            task_messages.append(
                 ConversationMessage(
                     messageId=f"{task_id}-assistant",
                     sessionId=self._session_context.session_id,
@@ -450,12 +527,26 @@ class SessionManager:
                 ),
             )
 
+            # Accumulate into session-level history
+            self._session_messages.extend(task_messages)
+
+            # Cap at 500 messages (drop oldest, keep first)
+            max_history = 500
+            if len(self._session_messages) > max_history:
+                self._session_messages = (
+                    self._session_messages[:1] + self._session_messages[-(max_history - 1) :]
+                )
+
             await self._workspace_client.upload_session_history(
                 workspace_id=self._session_context.workspace_id,
                 session_id=self._session_context.session_id,
-                messages=messages,
+                messages=self._session_messages,
                 task_id=task_id,
             )
+
+            # Persist to checkpoint for crash recovery
+            self._persist_session_messages()
+
             logger.info("session_history_uploaded", task_id=task_id)
         except Exception:
             logger.warning("session_history_upload_failed", task_id=task_id, exc_info=True)
@@ -521,6 +612,8 @@ class SessionManager:
             "workspaceId": self._session_context.workspace_id,
             "hasActiveTask": self._current_task is not None and not self._current_task.done(),
             "currentTaskId": self._current_task_id,
+            "currentStep": self._current_step_count,
+            "maxSteps": self._current_max_steps,
         }
 
         if self._token_budget:

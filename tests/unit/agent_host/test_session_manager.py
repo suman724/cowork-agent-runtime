@@ -952,6 +952,307 @@ class TestSessionManagerRichHistory:
         await manager._workspace_client.close()
 
 
+class TestSessionManagerMaxSteps:
+    @pytest.mark.asyncio
+    async def test_start_task_parses_task_options(self, tmp_path: object) -> None:
+        """start_task extracts maxSteps from taskOptions."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+        manager._runner = MagicMock()
+        manager._runner.run_async = MagicMock(return_value=_async_iter([]))
+
+        result = await manager.start_task({
+            "taskId": "task-1",
+            "prompt": "hello",
+            "taskOptions": {"maxSteps": 10},
+        })
+
+        assert result["status"] == "running"
+        assert manager._current_max_steps == 10
+
+        manager._current_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await manager._current_task
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_default_max_steps(self, tmp_path: object) -> None:
+        """No taskOptions → config default used."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+        manager._runner = MagicMock()
+        manager._runner.run_async = MagicMock(return_value=_async_iter([]))
+
+        await manager.start_task({"taskId": "task-1", "prompt": "hello"})
+
+        assert manager._current_max_steps == config.default_max_steps
+
+        manager._current_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await manager._current_task
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_max_steps_clamped(self, tmp_path: object) -> None:
+        """Values outside 1-200 are clamped."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+        manager._runner = MagicMock()
+        manager._runner.run_async = MagicMock(return_value=_async_iter([]))
+
+        # Over 200
+        await manager.start_task({
+            "taskId": "task-1",
+            "prompt": "hello",
+            "taskOptions": {"maxSteps": 999},
+        })
+        assert manager._current_max_steps == 200
+        manager._current_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await manager._current_task
+
+        # Under 1
+        await manager.start_task({
+            "taskId": "task-2",
+            "prompt": "hello",
+            "taskOptions": {"maxSteps": -5},
+        })
+        assert manager._current_max_steps == 1
+        manager._current_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await manager._current_task
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_step_limit_stops_agent(self, tmp_path: object) -> None:
+        """Agent stops when step limit is reached."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        # Create mock events: 5 usage_metadata events
+        events = []
+        for _ in range(5):
+            event = MagicMock()
+            event.content = None
+            event.usage_metadata = MagicMock()
+            event.usage_metadata.prompt_token_count = 100
+            event.usage_metadata.candidates_token_count = 50
+            events.append(event)
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = MagicMock(return_value=_async_iter(events))
+        manager._event_emitter = MagicMock()
+
+        # Run with max_steps=3 — should stop after 3 steps
+        await manager._run_agent("hello", "task-1", max_steps=3)
+
+        manager._event_emitter.emit_task_failed.assert_called_once()
+        call_args = manager._event_emitter.emit_task_failed.call_args
+        # emit_task_failed(task_id, reason=...) — check positional or keyword
+        all_args = list(call_args[0]) + list(call_args[1].values())
+        assert any("Step limit reached" in str(a) for a in all_args)
+        # task_completed should NOT be called
+        manager._event_emitter.emit_task_completed.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_step_limit_approaching_event(self, tmp_path: object) -> None:
+        """80% threshold emits step_limit_approaching warning."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        # 10 max_steps → warning at step 8 (floor(10 * 0.8))
+        events = []
+        for _ in range(10):
+            event = MagicMock()
+            event.content = None
+            event.usage_metadata = MagicMock()
+            event.usage_metadata.prompt_token_count = 10
+            event.usage_metadata.candidates_token_count = 5
+            events.append(event)
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = MagicMock(return_value=_async_iter(events))
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1", max_steps=10)
+
+        # Step 8 = floor(10*0.8) should trigger warning
+        manager._event_emitter.emit_step_limit_approaching.assert_called_once_with(
+            "task-1", 8, 10
+        )
+        # Step 10 = limit reached
+        manager._event_emitter.emit_task_failed.assert_called_once()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_get_session_state_includes_step_info(self, tmp_path: object) -> None:
+        """get_session_state includes currentStep and maxSteps."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+        state = await manager.get_session_state()
+
+        assert "currentStep" in state
+        assert "maxSteps" in state
+        assert state["currentStep"] == 0
+        assert state["maxSteps"] == config.default_max_steps
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerCumulativeHistory:
+    @pytest.mark.asyncio
+    async def test_cumulative_history_across_tasks(self, tmp_path: object) -> None:
+        """Second upload contains both tasks' messages."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        with patch.object(
+            manager._workspace_client,
+            "upload_session_history",
+            new_callable=AsyncMock,
+        ) as mock_upload:
+            # First task
+            manager._task_tool_messages = []
+            await manager._upload_history("hello", "Hi there!", "task-1")
+
+            # Second task
+            manager._task_tool_messages = [
+                {"type": "tool_call", "toolName": "ReadFile", "arguments": "{}"},
+            ]
+            await manager._upload_history("read file", "Done.", "task-2")
+
+            # Second upload should have messages from both tasks
+            assert mock_upload.call_count == 2
+            second_messages = mock_upload.call_args_list[1][1]["messages"]
+            # task-1: user + assistant = 2, task-2: user + tool + assistant = 3
+            assert len(second_messages) == 5
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_session_messages_checkpoint_persistence(self, tmp_path: object) -> None:
+        """Messages are saved to and restored from checkpoint."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        with patch.object(
+            manager._workspace_client,
+            "upload_session_history",
+            new_callable=AsyncMock,
+        ):
+            manager._task_tool_messages = []
+            await manager._upload_history("hello", "world", "task-1")
+
+        # Verify persistence
+        session = manager._checkpoint_service._sessions.get("sess-123")
+        assert session is not None
+        assert "_session_messages" in session.state
+        assert len(session.state["_session_messages"]) == 2  # user + assistant
+
+        # Clear and restore
+        manager._session_messages = []
+        manager._restore_session_messages_from_checkpoint()
+        assert len(manager._session_messages) == 2
+        assert manager._session_messages[0].role == "user"
+        assert manager._session_messages[1].role == "assistant"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_history_cap_at_500(self, tmp_path: object) -> None:
+        """Oldest messages dropped when exceeding 500."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        from datetime import UTC, datetime
+
+        from cowork_platform.conversation_message import ConversationMessage
+
+        # Pre-fill with 499 messages
+        now = datetime.now(tz=UTC)
+        manager._session_messages = [
+            ConversationMessage(
+                messageId=f"old-{i}",
+                sessionId="sess-123",
+                taskId="old-task",
+                role="user" if i % 2 == 0 else "assistant",
+                content=f"msg-{i}",
+                timestamp=now,
+            )
+            for i in range(499)
+        ]
+
+        with patch.object(
+            manager._workspace_client,
+            "upload_session_history",
+            new_callable=AsyncMock,
+        ) as mock_upload:
+            # This adds 2 more (user + assistant) → 501 total → should cap at 500
+            manager._task_tool_messages = []
+            await manager._upload_history("new prompt", "new response", "task-new")
+
+            messages = mock_upload.call_args[1]["messages"]
+            assert len(messages) == 500
+
+            # First message is still the original first
+            assert messages[0].messageId == "old-0"
+            # Last message is the new assistant
+            assert messages[-1].messageId == "task-new-assistant"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
 async def _async_iter(items: list[object]) -> object:  # type: ignore[misc]
     """Create an async iterator from a list."""
     for item in items:

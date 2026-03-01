@@ -135,6 +135,7 @@ def create_agent(
         policy_enforcer=policy_enforcer,
         token_budget=token_budget,
         event_emitter=event_emitter,
+        max_context_tokens=config.max_context_tokens,
     )
     after_tool = make_after_tool_callback(
         workspace_client=workspace_client,
