@@ -199,6 +199,7 @@ class SessionManager:
         return {
             "sessionId": response.sessionId,
             "workspaceId": response.workspaceId,
+            "logDir": self._config.log_dir,
             "status": "ready",
         }
 
@@ -270,9 +271,7 @@ class SessionManager:
             if self._event_emitter:
                 self._event_emitter.emit_task_failed(task_id, reason=str(exc))
 
-    async def _upload_history(
-        self, prompt: str, assistant_text: str, task_id: str
-    ) -> None:
+    async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
         """Upload session history to workspace service (best-effort)."""
         if not self._session_context:
             return

@@ -7,12 +7,13 @@ loop until Shutdown or EOF.
 from __future__ import annotations
 
 import asyncio
-import logging
 import sys
+from pathlib import Path
 
 import structlog
 
 from agent_host.config import AgentHostConfig
+from agent_host.logging import configure_logging
 from agent_host.server.handlers import Handlers
 from agent_host.server.json_rpc import (
     JsonRpcError,
@@ -28,27 +29,11 @@ from tool_runtime import ToolRouter
 logger = structlog.get_logger()
 
 
-def _configure_logging(log_level: str) -> None:
-    """Configure structlog for stderr output."""
-    structlog.configure(
-        processors=[
-            structlog.contextvars.merge_contextvars,
-            structlog.processors.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.make_filtering_bound_logger(
-            logging.getLevelName(log_level.upper()),
-        ),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
-    )
-
-
 async def run() -> None:
     """Main async entry point — runs the JSON-RPC server loop."""
     # Load configuration
     config = AgentHostConfig.from_env()
-    _configure_logging(config.log_level)
+    configure_logging(config.log_level, Path(config.log_dir))
 
     logger.info("agent_host_starting", model=config.llm_model)
 
