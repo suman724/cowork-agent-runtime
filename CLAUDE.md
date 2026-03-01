@@ -11,15 +11,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two top-level packages with a **strict boundary** — no cross-imports allowed:
 
 ```
-agent_host/     ← Local Agent Host (agent loop orchestration)
-  server/       — JSON-RPC 2.0 server (stdio Phase 1, local socket Phase 2+)
-  session/      — Session client (calls Session Service over HTTPS)
-  loop/         — Core agent loop: plan → LLM call → tool exec → checkpoint → repeat
-  routing/      — Tool routing: capability check → approval gate → dispatch to ToolRouter
-  policy/       — Local Policy Enforcer: capability validation, path/command restrictions
-  llm/          — LLM Gateway client (HTTP streaming via httpx)
-  state/        — Local State Store: SQLite checkpoint per step for crash recovery
-  events/       — Event emitter: SessionEvent notifications to Desktop App + audit/telemetry
+agent_host/     ← Local Agent Host (agent loop orchestration via Google ADK)
+  server/       — JSON-RPC 2.0 server over stdio (parse, serialize, dispatch, handlers)
+  session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint service, SessionManager
+  agent/        — ADK agent factory, tool adapter (ToolRouter→FunctionTool), callbacks
+  policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
+  budget/       — Token budget tracking (pre-check + record_usage)
+  events/       — Event emitter: SessionEvent notifications + structured logging
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
   router/       — ToolRouter implementation, tool registry, dispatch
@@ -32,22 +30,42 @@ tool_runtime/   ← Local Tool Runtime (tool execution)
   output/       — Output formatting, truncation, artifact extraction
 ```
 
-**Communication boundary:** `agent_host/` calls `tool_runtime/` only through the `ToolRouter` interface:
+**Communication boundary:** `agent_host/` calls `tool_runtime/` only through `ToolRouter` and `ExecutionContext`:
 ```python
-interface ToolRouter:
-    execute(request: ToolRequest) -> ToolResult
-    getAvailableTools() -> list[ToolDefinition]
+from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
+# ToolRouter.execute(request: ToolRequest, context: ExecutionContext | None) -> ToolExecutionResult
+# ToolRouter.get_available_tools() -> list[ToolDefinition]
 ```
 
 ## Key Patterns
 
-- **Python asyncio** throughout — the agent loop is I/O-bound (LLM streaming, file ops, shell commands).
-- **Pydantic models** from `cowork-platform` for all data contracts (ToolRequest, ToolResult, PolicyBundle, etc.).
-- **httpx** for async HTTP (LLM Gateway streaming, backend service calls).
-- Agent loop per step: LLM call → parse tool calls → for each tool call: policy check → approval if needed → execute → collect result → checkpoint → next step.
-- **Local Policy Enforcer** validates every tool call against the policy bundle before execution (capabilities, allowedPaths, allowedCommands, allowedDomains).
-- **Local State Store** writes a SQLite checkpoint after each step. Cleared on clean session end. Used only for crash recovery.
-- **Message thread** is held in memory for the session lifetime. Uploaded to Workspace Service as `session_history` artifact after each task.
+- **Google ADK** (`google-adk`) as the agent loop framework — handles LLM calls, tool execution, session/state, streaming via `LlmAgent`, `Runner`, `FunctionTool`, `LongRunningFunctionTool`.
+- **LiteLLM** for OpenAI-compatible LLM Gateway: `LiteLlm(model="openai/model", api_base=gateway_url)`.
+- **ADK callbacks** for policy/budget enforcement:
+  - `before_tool_callback` — global policy check, blocks DENIED calls
+  - `before_model_callback` — checks policy expiry and token budget
+  - `after_tool_callback` — event emission, artifact upload
+- **Custom JSON-RPC 2.0 server** (~200 lines) — ADK has no stdio transport. Newline-delimited JSON with write lock.
+- **Custom `CheckpointSessionService`** — ADK `BaseSessionService` impl backed by atomic JSON file writes (tempfile + os.replace) for crash recovery.
+- **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
+- **Pydantic models** from `cowork-platform` for all data contracts.
+- **httpx** with `tenacity` retry for async HTTP to backend services.
+- **structlog** to stderr for structured logging; stdout reserved for JSON-RPC.
+
+## How Cowork Maps to ADK
+
+```
+ADK Concept              → Cowork Component
+─────────────────────────────────────────────
+LlmAgent                 → Orchestrator agent with system prompt + tools
+FunctionTool             → Wrapper around each ToolRouter tool
+LongRunningFunctionTool  → Tools requiring approval (policy says APPROVAL_REQUIRED)
+before_tool_callback     → PolicyEnforcer.check_tool_call() — global, blocks DENIED
+before_model_callback    → TokenBudget.pre_check() + PolicyEnforcer.check_llm_call()
+after_tool_callback      → Event emission, artifact upload (best-effort)
+BaseSessionService       → CheckpointSessionService (JSON file persistence)
+Runner.run_async()       → Called from StartTask JSON-RPC handler
+```
 
 ## Tool-to-Capability Mapping
 
@@ -59,6 +77,17 @@ interface ToolRouter:
 | `RunCommand` | `Shell.Exec` |
 | `HttpRequest` | `Network.Http` |
 
+## Environment Variables
+
+- `LLM_GATEWAY_ENDPOINT` — LLM Gateway URL (required)
+- `LLM_GATEWAY_AUTH_TOKEN` — LLM Gateway auth token (required)
+- `SESSION_SERVICE_URL` — Session Service URL (required)
+- `WORKSPACE_SERVICE_URL` — Workspace Service URL (required)
+- `CHECKPOINT_DIR` — Checkpoint directory (default: platform app data)
+- `APPROVAL_TIMEOUT_SECONDS` — Approval timeout (default: 300)
+- `LOG_LEVEL` — Logging level (default: info)
+- `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
+
 ## Platform Adapters
 
 `tool_runtime/platform/` abstracts macOS vs Windows differences:
@@ -69,12 +98,6 @@ interface ToolRouter:
 ## Output Truncation
 
 When tool output exceeds `maxOutputBytes`: keep first 80% (head) + last 20% (tail) with a marker between. Outputs >10KB become artifacts uploaded to Workspace Service; the LLM sees the truncated version.
-
-## Environment Variables
-
-- `LLM_GATEWAY_ENDPOINT` — LLM Gateway URL
-- `LLM_GATEWAY_AUTH_TOKEN` — LLM Gateway auth token
-- These are NOT received from the Session Service — read from local env only.
 
 ## Design Doc
 
@@ -97,13 +120,15 @@ cowork-agent-runtime/
   src/
     agent_host/
       __init__.py
-      server/                 # JSON-RPC 2.0 server
-      session/                # Session Service client
-      loop/                   # Core agent loop
-      routing/                # Tool routing + capability check + approval gate
-      policy/                 # Local Policy Enforcer
-      llm/                    # LLM Gateway streaming client
-      state/                  # Local State Store (SQLite)
+      exceptions.py           # AgentHostError hierarchy → JSON-RPC error codes
+      models.py               # SessionContext, PolicyCheckResult
+      config.py               # AgentHostConfig from env vars
+      main.py                 # Process entry point
+      server/                 # JSON-RPC 2.0 server (parse, transport, dispatch, handlers)
+      session/                # Session/Workspace clients, checkpoint service, SessionManager
+      agent/                  # ADK agent factory, tool adapter, callbacks
+      policy/                 # Policy enforcer, path/command/domain matchers, risk assessor
+      budget/                 # Token budget tracking
       events/                 # Event emitter
     tool_runtime/
       __init__.py
@@ -134,13 +159,23 @@ cowork-agent-runtime/
   - `S` (bandit) rules are critical here — this code executes shell commands and file operations
 - **Type checking**: `mypy --strict`
 - **Testing**: `pytest` with `pytest-asyncio`
-- **Coverage**: 90% for agent_host/, 90% for tool_runtime/
+- **Coverage**: 90% combined for agent_host/ + tool_runtime/
+
+### Dependencies
+
+| Library | Purpose |
+|---------|---------|
+| `google-adk>=1.0,<2.0` | Agent loop framework (LlmAgent, Runner, FunctionTool, SessionService) |
+| `litellm` | OpenAI-compatible LLM Gateway routing (used by ADK) |
+| `tenacity>=9.0,<10.0` | Retry with exponential backoff for HTTP clients |
+| `httpx>=0.27,<1.0` | Async HTTP for backend service calls |
+| `pydantic>=2.0,<3.0` | Data validation (from cowork-platform contracts) |
+| `structlog>=24.0,<26.0` | Structured logging to stderr |
 
 ### Package Boundary Enforcement
 
-**`agent_host/` and `tool_runtime/` must NEVER cross-import.** The only interface between them is `ToolRouter` (Protocol class). Enforce with:
-- Separate `__init__.py` exports — `tool_runtime` exports only `ToolRouter` implementation and `ToolDefinition`
-- CI check: `ruff` rule or custom lint to detect cross-package imports
+**`agent_host/` and `tool_runtime/` must NEVER cross-import.** The only interface between them is `ToolRouter` and `ExecutionContext`. Enforce with:
+- Separate `__init__.py` exports — `tool_runtime` exports only `ToolRouter`, `ExecutionContext`, `ToolExecutionResult`
 - Test structure mirrors the package boundary — separate test directories
 
 ### Makefile Targets
@@ -153,9 +188,7 @@ make format              # Run ruff format
 make format-check        # Check formatting
 make typecheck           # Run mypy --strict
 make test                # Run all unit tests
-make test-unit           # Unit tests only (pytest -m unit)
 make test-integration    # Integration tests (pytest -m integration)
-make test-platform       # Platform-specific tests (macOS or Windows)
 make coverage            # Run tests with coverage report
 make check               # CI gate: lint + format-check + typecheck + test
 make clean               # Remove build artifacts and caches
@@ -163,35 +196,32 @@ make clean               # Remove build artifacts and caches
 
 ### Error Handling
 
-Custom exception hierarchy:
+Custom exception hierarchy mapping to JSON-RPC error codes:
 ```
-AgentRuntimeError (base)
-  ├── SessionError
-  │     ├── SessionNotFoundError
-  │     ├── SessionExpiredError
-  │     └── PolicyExpiredError
-  ├── ToolExecutionError
-  │     ├── ToolNotFoundError
-  │     ├── ToolTimeoutError
-  │     └── ToolPermissionError
-  ├── LLMError
-  │     ├── LLMGatewayError
-  │     ├── LLMBudgetExceededError
-  │     └── LLMGuardrailBlockedError
-  └── PolicyViolationError
-        ├── CapabilityDeniedError
-        └── ApprovalRequiredError
+AgentHostError (base, json_rpc_code=-32000)
+  ├── SessionNotFoundError (-32001)
+  ├── SessionExpiredError (-32002)
+  ├── PolicyExpiredError (-32003)
+  ├── LLMGatewayError (-32010)
+  ├── LLMBudgetExceededError (-32011)
+  ├── LLMGuardrailBlockedError (-32012)
+  ├── CapabilityDeniedError (-32020)
+  ├── ApprovalRequiredError (-32021, carries approval_rule_id + risk_level)
+  ├── ApprovalTimeoutError (-32022)
+  ├── CheckpointError (-32030)
+  ├── TaskCancelledError (-32040)
+  └── NoActiveTaskError (-32041)
 ```
 
-All exceptions carry structured context (session_id, tool_name, etc.) for logging. Map to JSON-RPC error codes when returning to the Desktop App.
+All exceptions carry structured context for logging. The `MethodDispatcher` catches `AgentHostError` and maps `json_rpc_code` to JSON-RPC error responses; unexpected exceptions become `-32603 Internal error`.
 
 ### Async Patterns
 
 - **All I/O is async**: `async def` for every function that does I/O (file, network, subprocess).
-- **httpx.AsyncClient** with connection pooling for all outbound HTTP (Session Service, Workspace Service, LLM Gateway). Create one client per session, close on session end.
-- **LLM streaming**: `httpx.AsyncClient.stream()` with SSE parsing. Yield chunks to the event emitter for real-time UI updates.
+- **httpx.AsyncClient** with connection pooling for all outbound HTTP. Create one client per session, close on shutdown.
+- **LLM streaming**: ADK + LiteLLM handle streaming internally. Events forwarded via `EventEmitter`.
 - **Never use `time.sleep()`** — use `asyncio.sleep()`.
-- **Structured concurrency**: Use `asyncio.TaskGroup` for parallel tool executions within a step (when multiple tool calls are independent).
+- **Background tasks**: `asyncio.create_task()` for agent loop execution from `start_task()`.
 
 ### Subprocess Management (RunCommand)
 
@@ -201,19 +231,20 @@ All exceptions carry structured context (session_id, tool_name, etc.) for loggin
 - Process tree kill on timeout: send SIGTERM to process group, wait 5s, then SIGKILL.
 - Platform-specific kill: `os.killpg` on macOS, `taskkill /T /F` on Windows — handled by `platform/` module.
 
-### Checkpoint / Recovery (Local State Store)
+### Checkpoint / Recovery
 
-- SQLite database in user's app data directory.
-- Write checkpoint after each step: session state, message thread cursor, current task/step IDs.
-- Use WAL mode for concurrent read/write safety.
-- On clean session end: delete checkpoint file.
-- On crash recovery: load checkpoint, call Session Service `/resume`, reconstruct message thread, continue from last step.
+- JSON file per session in user's app data directory (atomic write via tempfile + os.replace).
+- `CheckpointSessionService` implements ADK's `BaseSessionService` interface.
+- Write checkpoint after each ADK event (state changes, new messages).
+- On clean session end (Shutdown): delete checkpoint file.
+- On crash recovery: load checkpoint, restore session state.
 
 ### Testing
 
 - **Pytest markers**: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.platform`
-- **Agent loop tests**: Mock LLM client + mock ToolRouter → test step progression, checkpointing, error recovery
+- **Agent setup tests**: Mock ToolRouter + mock policy → test tool adaptation, callbacks, agent factory
 - **Tool tests**: Real filesystem operations in temp directories, real subprocess execution with simple commands
 - **Policy enforcer tests**: Various policy bundles × tool requests → verify allow/deny/approval-required
+- **Session manager tests**: Mock HTTP clients + mock ADK runner → test lifecycle
 - **Platform tests**: `@pytest.mark.skipif(sys.platform != 'darwin')` for macOS-specific, similar for Windows
-- **Fixtures**: Pre-built policy bundles, tool requests, LLM responses in `tests/fixtures/`
+- **Fixtures**: Pre-built policy bundles in `tests/fixtures/policy_bundles.py`
