@@ -1,0 +1,70 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "cowork-agent-runtime"
+version = "0.1.0"
+description = "Local Agent Host and Tool Runtime for the cowork desktop agent system."
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27,<1.0",
+    "pydantic>=2.0,<3.0",
+    "structlog>=24.0,<26.0",
+    "cowork-platform[sdk]",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ruff>=0.8,<1.0",
+    "mypy>=1.13,<2.0",
+    "pytest>=8.0,<9.0",
+    "pytest-asyncio>=0.24,<1.0",
+    "coverage>=7.0,<8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tool_runtime"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "SIM", "TCH", "ARG", "PTH", "RUF"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "S108", "ARG001", "ARG002", "TCH"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+mypy_path = "src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+module = ["cowork_platform", "cowork_platform.*", "cowork_platform_sdk", "cowork_platform_sdk.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+markers = [
+    "unit: Unit tests (no infrastructure)",
+    "integration: Integration tests",
+    "platform: Platform-specific tests",
+]
+
+[tool.coverage.run]
+source = ["tool_runtime"]
+omit = [
+    "src/tool_runtime/platform/base.py",
+    "src/tool_runtime/platform/windows.py",
+]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
