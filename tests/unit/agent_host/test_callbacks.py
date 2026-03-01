@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from agent_host.agent.artifact_store import PendingArtifactStore
 from agent_host.agent.callbacks import (
     make_after_tool_callback,
     make_before_model_callback,
@@ -18,6 +19,7 @@ from tests.fixtures.policy_bundles import (
     make_policy_bundle,
     make_restrictive_bundle,
 )
+from tool_runtime.models import ArtifactData
 
 
 class TestBeforeToolCallback:
@@ -63,7 +65,7 @@ class TestBeforeToolCallback:
         assert result is None
 
     def test_approval_required_passes_through(self) -> None:
-        """Tools requiring approval return None (LongRunningFunctionTool handles it)."""
+        """Tools requiring approval return None (ApprovalGate handles it in tool_fn)."""
         bundle = make_restrictive_bundle(requires_approval=True)
         enforcer = PolicyEnforcer(bundle)
         callback = make_before_tool_callback(enforcer)
@@ -81,17 +83,17 @@ class TestBeforeToolCallback:
         callback(MagicMock(), "ReadFile", {"path": "/tmp/test"})
         emitter.emit_tool_requested.assert_called_once()
 
-    def test_emits_approval_requested_event(self) -> None:
-        """Emits approval_requested event when tool requires approval."""
+    def test_approval_required_emits_tool_requested(self) -> None:
+        """Approval-required tools still emit tool_requested (approval in tool_fn)."""
         bundle = make_restrictive_bundle(requires_approval=True)
         enforcer = PolicyEnforcer(bundle)
         emitter = MagicMock()
         callback = make_before_tool_callback(enforcer, event_emitter=emitter)
 
         callback(MagicMock(), "ReadFile", {"path": "/tmp/x"})
-        emitter.emit_approval_requested.assert_called_once()
-        call_kwargs = emitter.emit_approval_requested.call_args
-        assert call_kwargs[1]["tool_name"] == "ReadFile"
+        emitter.emit_tool_requested.assert_called_once()
+        # Approval is no longer emitted from before_tool_callback
+        emitter.emit_approval_requested.assert_not_called()
 
 
 class TestBeforeModelCallback:
@@ -155,3 +157,43 @@ class TestAfterToolCallback:
         callback = make_after_tool_callback(event_emitter=emitter)
         callback(MagicMock(), "ReadFile", {"status": "succeeded"})
         emitter.emit_tool_completed.assert_called_once_with("ReadFile", "succeeded")
+
+    def test_uploads_artifacts_from_store(self) -> None:
+        """Artifacts in the store are uploaded via workspace_client."""
+        store = PendingArtifactStore()
+        artifact = ArtifactData(
+            artifact_type="tool_output",
+            artifact_name="test.txt",
+            data=b"test data",
+            media_type="text/plain",
+        )
+        store.store("ReadFile", [artifact])
+
+        workspace_client = MagicMock()
+        workspace_client.upload_artifact = AsyncMock()
+
+        callback = make_after_tool_callback(
+            workspace_client=workspace_client,
+            artifact_store=store,
+            session_id="sess-1",
+            workspace_id="ws-1",
+        )
+        callback(MagicMock(), "ReadFile", {"status": "succeeded"})
+
+        # Artifact should have been popped from the store
+        assert store.pop("ReadFile") == []
+
+    def test_no_artifacts_no_upload(self) -> None:
+        """No artifacts in store means no upload calls."""
+        store = PendingArtifactStore()
+        workspace_client = MagicMock()
+        workspace_client.upload_artifact = AsyncMock()
+
+        callback = make_after_tool_callback(
+            workspace_client=workspace_client,
+            artifact_store=store,
+            session_id="sess-1",
+            workspace_id="ws-1",
+        )
+        callback(MagicMock(), "ReadFile", {"status": "succeeded"})
+        workspace_client.upload_artifact.assert_not_called()

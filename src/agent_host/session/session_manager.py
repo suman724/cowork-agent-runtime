@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import platform
 import random
 from typing import TYPE_CHECKING, Any
@@ -36,6 +37,8 @@ from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
 
 if TYPE_CHECKING:
+    from agent_host.agent.file_change_tracker import FileChangeTracker
+    from agent_host.approval.approval_gate import ApprovalGate
     from agent_host.budget.token_budget import TokenBudget
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
@@ -46,6 +49,9 @@ logger = structlog.get_logger()
 
 APP_NAME = "cowork"
 VERSION = "0.1.0"
+
+# Maximum length for tool output stored in history messages
+_MAX_TOOL_OUTPUT_LENGTH = 4000
 
 
 class SessionManager:
@@ -76,11 +82,18 @@ class SessionManager:
         # Event emitter (created lazily after session context is available)
         self._event_emitter: EventEmitter | None = None
 
+        # Approval and file tracking (set after create_agent)
+        self._approval_gate: ApprovalGate | None = None
+        self._file_change_tracker: FileChangeTracker | None = None
+
         # Session state
         self._session_context: SessionContext | None = None
         self._session_response: SessionCreateResponse | None = None
         self._current_task: asyncio.Task[None] | None = None
         self._current_task_id: str | None = None
+
+        # Rich history: tool messages collected during a task
+        self._task_tool_messages: list[dict[str, str]] = []
 
     @property
     def session_context(self) -> SessionContext | None:
@@ -162,19 +175,22 @@ class SessionManager:
             # Cast to canonical PolicyBundle type — both classes are structurally
             # identical but codegen produces separate types in each response model.
             canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
-            agent, token_budget = create_agent(
+            components = create_agent(
                 config=self._config,
                 policy_bundle=canonical_bundle,
                 tool_router=self._tool_router,
                 event_emitter=self._event_emitter,
                 workspace_client=self._workspace_client,
                 session_id=response.sessionId,
+                workspace_id=response.workspaceId,
             )
-            self._token_budget = token_budget
+            self._token_budget = components.token_budget
+            self._approval_gate = components.approval_gate
+            self._file_change_tracker = components.file_change_tracker
 
             # Create ADK Runner
             self._runner = Runner(
-                agent=agent,
+                agent=components.agent,
                 app_name=APP_NAME,
                 session_service=self._checkpoint_service,
             )
@@ -234,6 +250,9 @@ class SessionManager:
         if not self._runner or not self._session_context:
             return
 
+        # Clear tool messages for this task
+        self._task_tool_messages = []
+
         max_retries = self._config.llm_max_retries
         base_delay = self._config.llm_retry_base_delay
         max_delay = self._config.llm_retry_max_delay
@@ -258,6 +277,33 @@ class SessionManager:
                             if hasattr(part, "text") and part.text:
                                 self._event_emitter.emit_text_chunk(task_id, part.text)
                                 assistant_text_parts.append(part.text)
+
+                            # Track tool calls for rich history
+                            if hasattr(part, "function_call") and part.function_call:
+                                fc = part.function_call
+                                self._task_tool_messages.append(
+                                    {
+                                        "type": "tool_call",
+                                        "toolName": getattr(fc, "name", ""),
+                                        "arguments": json.dumps(
+                                            getattr(fc, "args", {}), default=str
+                                        ),
+                                    }
+                                )
+
+                            # Track tool results for rich history
+                            if hasattr(part, "function_response") and part.function_response:
+                                fr = part.function_response
+                                output = json.dumps(getattr(fr, "response", {}), default=str)
+                                if len(output) > _MAX_TOOL_OUTPUT_LENGTH:
+                                    output = output[:_MAX_TOOL_OUTPUT_LENGTH] + "... [truncated]"
+                                self._task_tool_messages.append(
+                                    {
+                                        "type": "tool_result",
+                                        "toolName": getattr(fr, "name", ""),
+                                        "output": output,
+                                    }
+                                )
 
                     # Record token usage from LLM responses
                     if (
@@ -356,7 +402,10 @@ class SessionManager:
             )
 
     async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
-        """Upload session history to workspace service (best-effort)."""
+        """Upload session history to workspace service (best-effort).
+
+        Includes user prompt, tool call/result messages, and assistant response.
+        """
         if not self._session_context:
             return
 
@@ -366,7 +415,7 @@ class SessionManager:
             from cowork_platform.conversation_message import ConversationMessage
 
             now = datetime.now(tz=UTC)
-            messages = [
+            messages: list[ConversationMessage] = [
                 ConversationMessage(
                     messageId=f"{task_id}-user",
                     sessionId=self._session_context.session_id,
@@ -375,6 +424,22 @@ class SessionManager:
                     content=prompt,
                     timestamp=now,
                 ),
+            ]
+
+            # Insert tool call/result messages
+            for i, tool_msg in enumerate(self._task_tool_messages):
+                messages.append(
+                    ConversationMessage(
+                        messageId=f"{task_id}-tool-{i}",
+                        sessionId=self._session_context.session_id,
+                        taskId=task_id,
+                        role="tool",
+                        content=json.dumps(tool_msg, default=str),
+                        timestamp=now,
+                    )
+                )
+
+            messages.append(
                 ConversationMessage(
                     messageId=f"{task_id}-assistant",
                     sessionId=self._session_context.session_id,
@@ -383,7 +448,7 @@ class SessionManager:
                     content=assistant_text,
                     timestamp=now,
                 ),
-            ]
+            )
 
             await self._workspace_client.upload_session_history(
                 workspace_id=self._session_context.workspace_id,
@@ -421,13 +486,30 @@ class SessionManager:
             decision=decision,
         )
 
-        # In Phase 1, approval is handled via LongRunningFunctionTool
-        # The Desktop App sends the updated function response back
+        delivered = False
+        if self._approval_gate:
+            delivered = self._approval_gate.deliver(approval_id, decision)
+
+        if not delivered:
+            logger.warning(
+                "approval_not_pending",
+                approval_id=approval_id,
+            )
+
         return {
             "approvalId": approval_id,
-            "status": "delivered",
+            "status": "delivered" if delivered else "not_found",
             "decision": decision,
         }
+
+    async def get_patch_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return a patch preview (unified diffs) for a task's file changes."""
+        task_id = params.get("taskId", self._current_task_id or "")
+
+        if not self._file_change_tracker:
+            return {"taskId": task_id, "files": []}
+
+        return self._file_change_tracker.get_patch_preview(task_id)
 
     async def get_session_state(self) -> dict[str, Any]:
         """Return current session and task status."""
@@ -492,6 +574,8 @@ class SessionManager:
         self._session_context = None
         self._runner = None
         self._current_task = None
+        self._approval_gate = None
+        self._file_change_tracker = None
 
         logger.info("session_shutdown", session_id=session_id)
         return {"status": "shutdown", "sessionId": session_id}

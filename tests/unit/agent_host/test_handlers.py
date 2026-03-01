@@ -21,6 +21,7 @@ def mock_session_manager() -> MagicMock:
     manager.deliver_approval = AsyncMock(
         return_value={"approvalId": "appr-1", "status": "delivered"}
     )
+    manager.get_patch_preview = AsyncMock(return_value={"taskId": "task-1", "files": []})
     manager.shutdown = AsyncMock(return_value={"status": "shutdown"})
     return manager
 
@@ -61,6 +62,13 @@ class TestHandlers:
         assert result["status"] == "delivered"
 
     @pytest.mark.asyncio
+    async def test_get_patch_preview(self, mock_session_manager: MagicMock) -> None:
+        handlers = Handlers(mock_session_manager)
+        result = await handlers.handle_get_patch_preview({"taskId": "task-1"})
+        assert result["taskId"] == "task-1"
+        mock_session_manager.get_patch_preview.assert_called_once()
+
+    @pytest.mark.asyncio
     async def test_shutdown(self, mock_session_manager: MagicMock) -> None:
         handlers = Handlers(mock_session_manager)
         result = await handlers.handle_shutdown({})
@@ -80,6 +88,7 @@ class TestHandlersRegistration:
             "CancelTask",
             "GetSessionState",
             "ApproveAction",
+            "GetPatchPreview",
             "Shutdown",
         ]
         for method in expected_methods:
