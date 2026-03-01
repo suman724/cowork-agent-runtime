@@ -232,6 +232,8 @@ class SessionManager:
                 parts=[types.Part(text=prompt)],
             )
 
+            assistant_text_parts: list[str] = []
+
             async for event in self._runner.run_async(
                 user_id=self._session_context.user_id,
                 session_id=self._session_context.session_id,
@@ -242,6 +244,7 @@ class SessionManager:
                     for part in event.content.parts:
                         if hasattr(part, "text") and part.text:
                             self._event_emitter.emit_text_chunk(task_id, part.text)
+                            assistant_text_parts.append(part.text)
 
                 # Record token usage from LLM responses
                 if self._token_budget and hasattr(event, "usage_metadata") and event.usage_metadata:
@@ -251,6 +254,9 @@ class SessionManager:
                     if input_tokens or output_tokens:
                         self._token_budget.record_usage(input_tokens, output_tokens)
 
+            # Upload session history (best-effort)
+            await self._upload_history(prompt, "".join(assistant_text_parts), task_id)
+
             # Emit task_completed after the loop finishes normally
             if self._event_emitter:
                 self._event_emitter.emit_task_completed(task_id)
@@ -259,10 +265,52 @@ class SessionManager:
 
         except asyncio.CancelledError:
             logger.info("task_cancelled", task_id=task_id)
-        except Exception:
+        except Exception as exc:
             logger.exception("task_failed", task_id=task_id)
             if self._event_emitter:
-                self._event_emitter.emit_task_failed(task_id)
+                self._event_emitter.emit_task_failed(task_id, reason=str(exc))
+
+    async def _upload_history(
+        self, prompt: str, assistant_text: str, task_id: str
+    ) -> None:
+        """Upload session history to workspace service (best-effort)."""
+        if not self._session_context:
+            return
+
+        try:
+            from datetime import UTC, datetime
+
+            from cowork_platform.conversation_message import ConversationMessage
+
+            now = datetime.now(tz=UTC)
+            messages = [
+                ConversationMessage(
+                    messageId=f"{task_id}-user",
+                    sessionId=self._session_context.session_id,
+                    taskId=task_id,
+                    role="user",
+                    content=prompt,
+                    timestamp=now,
+                ),
+                ConversationMessage(
+                    messageId=f"{task_id}-assistant",
+                    sessionId=self._session_context.session_id,
+                    taskId=task_id,
+                    role="assistant",
+                    content=assistant_text,
+                    timestamp=now,
+                ),
+            ]
+
+            await self._workspace_client.upload_session_history(
+                workspace_id=self._session_context.workspace_id,
+                session_id=self._session_context.session_id,
+                messages=messages,
+                task_id=task_id,
+            )
+            logger.info("session_history_uploaded", task_id=task_id)
+        except Exception:
+            logger.warning("session_history_upload_failed", task_id=task_id, exc_info=True)
 
     async def cancel_task(self) -> dict[str, Any]:
         """Cancel the currently running task (cooperative)."""
@@ -349,6 +397,10 @@ class SessionManager:
                     user_id=self._session_context.user_id,
                     session_id=session_id,
                 )
+
+        # Emit session_completed before cleanup
+        if self._event_emitter:
+            self._event_emitter.emit_session_completed()
 
         # Close HTTP clients
         await self._session_client.close()

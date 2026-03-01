@@ -1,4 +1,4 @@
-.PHONY: help install run lint format format-check typecheck test test-integration test-jsonrpc build check clean coverage
+.PHONY: help install run lint format format-check typecheck test test-integration test-jsonrpc test-chat build check clean coverage
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -30,6 +30,9 @@ test-integration: ## Run integration tests
 
 test-jsonrpc: ## Smoke test: CreateSession + Shutdown over JSON-RPC (needs backend services)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python scripts/test-jsonrpc.py
+
+test-chat: ## Full chat test: CreateSession + StartTask + LLM response (needs backend + LLM)
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python scripts/test-chat.py
 
 build: ## Build package
 	python -m build
