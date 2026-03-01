@@ -108,7 +108,8 @@ class WorkspaceClient:
             )
             await raise_for_status(response)
             # Workspace service returns {"artifactId": "...", "artifactUri": "..."}
-            return response.json()
+            result: dict[str, str] = response.json()
+            return result
         except Exception:
             logger.warning(
                 "workspace_client.upload_session_history_failed",

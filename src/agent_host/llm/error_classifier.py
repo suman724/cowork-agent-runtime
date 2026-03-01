@@ -61,8 +61,4 @@ def is_transient_llm_error(exc: Exception) -> bool:
 
     # Check class name for known SDK exception types
     class_name = type(exc).__name__
-    if class_name in _TRANSIENT_CLASS_NAMES:
-        return True
-
-    # Unknown exceptions are not retryable by default
-    return False
+    return class_name in _TRANSIENT_CLASS_NAMES
