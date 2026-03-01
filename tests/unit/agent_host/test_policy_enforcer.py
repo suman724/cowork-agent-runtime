@@ -38,6 +38,23 @@ class TestPolicyExpiry:
         assert "expired" in result.reason.lower()
 
 
+# ---- get_capability ----
+
+
+class TestGetCapability:
+    def test_returns_capability(self) -> None:
+        bundle = make_policy_bundle()
+        enforcer = PolicyEnforcer(bundle)
+        cap = enforcer.get_capability(CapabilityName.FILE_READ)
+        assert cap is not None
+        assert cap.name == "File.Read"
+
+    def test_returns_none_for_missing(self) -> None:
+        bundle = make_policy_bundle(capabilities=[{"name": "File.Read"}, {"name": "LLM.Call"}])
+        enforcer = PolicyEnforcer(bundle)
+        assert enforcer.get_capability(CapabilityName.FILE_WRITE) is None
+
+
 # ---- Capability granted ----
 
 

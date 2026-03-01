@@ -8,7 +8,10 @@ from cowork_platform.session_cancel_request import SessionCancelRequest  # noqa:
 from cowork_platform.session_create_request import SessionCreateRequest  # noqa: TC002
 from cowork_platform.session_create_response import SessionCreateResponse
 from cowork_platform_sdk import create_http_client, raise_for_status
+from pydantic import ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from agent_host.exceptions import AgentHostError
 
 logger = structlog.get_logger()
 
@@ -44,7 +47,12 @@ class SessionClient:
             content=request.model_dump_json(),
         )
         await raise_for_status(response)
-        return SessionCreateResponse.model_validate(response.json())
+        try:
+            return SessionCreateResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise AgentHostError(
+                f"Invalid response from Session Service: {exc}",
+            ) from exc
 
     @retry(
         stop=stop_after_attempt(3),

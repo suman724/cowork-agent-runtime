@@ -63,10 +63,11 @@ async def run() -> None:
     # Initialize tool router
     tool_router = ToolRouter()
 
-    # Initialize session manager
+    # Initialize session manager (EventEmitter created lazily after session creation)
     session_manager = SessionManager(
         config=config,
         tool_router=tool_router,
+        transport=transport,
     )
 
     # Set up method dispatcher
@@ -77,40 +78,48 @@ async def run() -> None:
     logger.info("agent_host_ready")
 
     # Read-dispatch-respond loop
-    shutdown_requested = False
-    while not shutdown_requested:
-        raw = await transport.read_message()
-        if raw is None:
-            # EOF — clean exit
-            logger.info("agent_host_eof")
-            break
+    try:
+        shutdown_requested = False
+        while not shutdown_requested:
+            raw = await transport.read_message()
+            if raw is None:
+                # EOF — clean exit
+                logger.info("agent_host_eof")
+                break
 
-        if not raw:
-            continue
+            if not raw:
+                continue
 
-        # Parse request
-        try:
-            request = parse_request(raw)
-        except JsonRpcError as e:
-            error_response = JsonRpcResponse(
-                id=None,
-                error=e,
-            )
-            await transport.write_message(serialize_response(error_response))
-            continue
+            # Parse request
+            try:
+                request = parse_request(raw)
+            except JsonRpcError as e:
+                error_response = JsonRpcResponse(
+                    id=None,
+                    error=e,
+                )
+                await transport.write_message(serialize_response(error_response))
+                continue
 
-        # Skip notifications (no response expected)
-        if request.is_notification:
-            await dispatcher.dispatch(request)
-            continue
+            # Skip notifications (no response expected)
+            if request.is_notification:
+                await dispatcher.dispatch(request)
+                continue
 
-        # Dispatch and respond
-        response = await dispatcher.dispatch(request)
-        await transport.write_message(serialize_response(response))
+            # Dispatch and respond
+            response = await dispatcher.dispatch(request)
+            await transport.write_message(serialize_response(response))
 
-        # Check if shutdown was requested
-        if request.method == "Shutdown":
-            shutdown_requested = True
+            # Check if shutdown was requested
+            if request.method == "Shutdown":
+                shutdown_requested = True
+    finally:
+        # Ensure HTTP clients are closed even on crash/EOF without Shutdown
+        if not shutdown_requested:
+            try:
+                await session_manager.shutdown()
+            except Exception:
+                logger.warning("emergency_shutdown_failed", exc_info=True)
 
     logger.info("agent_host_exiting")
 

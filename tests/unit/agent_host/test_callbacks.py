@@ -81,6 +81,18 @@ class TestBeforeToolCallback:
         callback(MagicMock(), "ReadFile", {"path": "/tmp/test"})
         emitter.emit_tool_requested.assert_called_once()
 
+    def test_emits_approval_requested_event(self) -> None:
+        """Emits approval_requested event when tool requires approval."""
+        bundle = make_restrictive_bundle(requires_approval=True)
+        enforcer = PolicyEnforcer(bundle)
+        emitter = MagicMock()
+        callback = make_before_tool_callback(enforcer, event_emitter=emitter)
+
+        callback(MagicMock(), "ReadFile", {"path": "/tmp/x"})
+        emitter.emit_approval_requested.assert_called_once()
+        call_kwargs = emitter.emit_approval_requested.call_args
+        assert call_kwargs[1]["tool_name"] == "ReadFile"
+
 
 class TestBeforeModelCallback:
     def test_passes_when_allowed(self) -> None:
@@ -104,6 +116,19 @@ class TestBeforeModelCallback:
 
         with pytest.raises(PolicyExpiredError):
             callback(MagicMock(), MagicMock())
+
+    def test_emits_policy_expired_event(self) -> None:
+        """Emits policy_expired event when policy is expired."""
+        bundle = make_policy_bundle(expired=True)
+        enforcer = PolicyEnforcer(bundle)
+        budget = TokenBudget(max_session_tokens=100000)
+        emitter = MagicMock()
+        callback = make_before_model_callback(enforcer, budget, event_emitter=emitter)
+
+        with pytest.raises(PolicyExpiredError):
+            callback(MagicMock(), MagicMock())
+
+        emitter.emit_policy_expired.assert_called_once()
 
     def test_raises_budget_exceeded(self) -> None:
         """Raises LLMBudgetExceededError when budget exhausted."""

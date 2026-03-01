@@ -97,3 +97,14 @@ class TestCreateAgent:
         assert agent.before_tool_callback is not None
         assert agent.before_model_callback is not None
         assert agent.after_tool_callback is not None
+
+    def test_budget_defaults_when_no_llm_policy(self) -> None:
+        """Uses default max tokens when llmPolicy is None."""
+        config = _make_config()
+        bundle = make_policy_bundle()
+        # Simulate llmPolicy being None
+        bundle.llmPolicy = None  # type: ignore[assignment]
+        router = _make_tool_router()
+
+        _, budget = create_agent(config=config, policy_bundle=bundle, tool_router=router)
+        assert budget.max_session_tokens == 100_000

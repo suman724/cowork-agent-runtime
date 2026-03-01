@@ -11,7 +11,10 @@ import structlog
 from cowork_platform.artifact import Artifact
 from cowork_platform.artifact_upload_request import ArtifactUploadRequest
 from cowork_platform_sdk import create_http_client, raise_for_status
+from pydantic import ValidationError
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+
+from agent_host.exceptions import AgentHostError
 
 if TYPE_CHECKING:
     from cowork_platform.conversation_message import ConversationMessage
@@ -70,7 +73,12 @@ class WorkspaceClient:
             content=request.model_dump_json(),
         )
         await raise_for_status(response)
-        return Artifact.model_validate(response.json())
+        try:
+            return Artifact.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise AgentHostError(
+                f"Invalid response from Workspace Service: {exc}",
+            ) from exc
 
     async def upload_session_history(
         self,

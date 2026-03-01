@@ -126,17 +126,41 @@ class TestSessionManagerCreate:
         await manager._workspace_client.close()
 
     @pytest.mark.asyncio
-    async def test_create_session_with_event_emitter(self, tmp_path: object) -> None:
-        """Session creation emits session_created event."""
+    async def test_create_session_creates_event_emitter(self, tmp_path: object) -> None:
+        """Session creation creates EventEmitter and emits session_created."""
         config = _make_config(tmp_path)
         router = MagicMock()
         router.get_available_tools.return_value = []
-        emitter = MagicMock()
-        manager = SessionManager(config, router, event_emitter=emitter)
+        manager = SessionManager(config, router)
+
+        # No event emitter before session creation
+        assert manager._event_emitter is None
 
         await _create_session_with_mock(manager)
 
-        emitter.emit_session_created.assert_called_once()
+        # Event emitter created after session creation
+        assert manager._event_emitter is not None
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_create_session_emits_session_created(self, tmp_path: object) -> None:
+        """Session creation emits session_created event via EventEmitter."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        with patch(
+            "agent_host.events.event_emitter.EventEmitter",
+            wraps=None,
+        ) as mock_cls:
+            mock_emitter = MagicMock()
+            mock_cls.return_value = mock_emitter
+            await _create_session_with_mock(manager)
+
+        mock_emitter.emit_session_created.assert_called_once()
 
         await manager._session_client.close()
         await manager._workspace_client.close()
@@ -165,6 +189,56 @@ class TestSessionManagerCreate:
             )
 
         assert result["status"] == "incompatible"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerCapabilities:
+    @pytest.mark.asyncio
+    async def test_capabilities_derived_from_router(self, tmp_path: object) -> None:
+        """supportedCapabilities is derived from tools available in the router."""
+        from cowork_platform.tool_definition import ToolDefinition
+
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        # Only ReadFile and RunCommand available
+        router.get_available_tools.return_value = [
+            ToolDefinition(
+                toolName="ReadFile",
+                description="Read a file",
+                inputSchema={"type": "object"},
+            ),
+            ToolDefinition(
+                toolName="RunCommand",
+                description="Run a command",
+                inputSchema={"type": "object"},
+            ),
+        ]
+        manager = SessionManager(config, router)
+
+        with patch.object(
+            manager._session_client,
+            "create_session",
+            new_callable=AsyncMock,
+        ) as mock_create:
+            from cowork_platform.session_create_response import SessionCreateResponse
+
+            mock_create.return_value = SessionCreateResponse.model_validate(
+                _make_session_response_dict()
+            )
+            await manager.create_session({"tenantId": "tenant-test", "userId": "user-test"})
+
+            # Check what capabilities were sent in the request
+            call_args = mock_create.call_args
+            request = call_args[0][0]
+            caps = request.supportedCapabilities
+            assert "File.Read" in caps
+            assert "Shell.Exec" in caps
+            assert "LLM.Call" in caps
+            # File.Write and File.Delete not available since no WriteFile/DeleteFile tool
+            assert "File.Write" not in caps
+            assert "File.Delete" not in caps
 
         await manager._session_client.close()
         await manager._workspace_client.close()
