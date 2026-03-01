@@ -6,18 +6,13 @@ import pytest
 
 from tool_runtime.exceptions import ToolInputValidationError, ToolTimeoutError
 from tool_runtime.models import ExecutionContext
-from tool_runtime.platform.darwin import DarwinAdapter
+from tool_runtime.platform.detection import get_platform
 from tool_runtime.tools.shell.run_command import RunCommandTool
 
 
 @pytest.fixture
-def platform() -> DarwinAdapter:
-    return DarwinAdapter()
-
-
-@pytest.fixture
-def tool(platform: DarwinAdapter) -> RunCommandTool:
-    return RunCommandTool(platform)
+def tool() -> RunCommandTool:
+    return RunCommandTool(get_platform())
 
 
 @pytest.fixture

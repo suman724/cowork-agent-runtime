@@ -45,6 +45,7 @@ jobs:
 
       - name: Install dependencies
         run: |
+          pip install build
           pip install "cowork-platform[sdk] @ git+https://github.com/suman724/cowork-platform.git@main"
           pip install -e ".[dev]"
 

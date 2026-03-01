@@ -31,7 +31,10 @@ class DarwinAdapter:
 
     @property
     def shell_executable(self) -> str:
-        return "/bin/zsh"
+        # macOS defaults to zsh; Linux defaults to bash
+        if sys.platform == "darwin":
+            return "/bin/zsh"
+        return "/bin/bash"
 
     @property
     def shell_flag(self) -> str:
