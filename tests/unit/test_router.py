@@ -124,11 +124,12 @@ class TestToolRouter:
 
 
 class TestPlatformDetection:
-    def test_get_platform_returns_darwin_on_mac(self) -> None:
+    def test_get_platform_returns_unix_adapter(self) -> None:
         from tool_runtime.platform.detection import get_platform
 
         adapter = get_platform()
-        assert adapter.shell_executable == "/bin/zsh"
+        # macOS uses zsh, Linux uses bash
+        assert adapter.shell_executable in ("/bin/zsh", "/bin/bash")
 
     @patch("tool_runtime.platform.detection.sys")
     def test_get_platform_returns_windows_on_win32(self, mock_sys: object) -> None:
