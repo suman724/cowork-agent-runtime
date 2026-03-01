@@ -1,10 +1,13 @@
-.PHONY: help install lint format format-check typecheck test test-integration build check clean coverage
+.PHONY: help install run lint format format-check typecheck test test-integration test-jsonrpc build check clean coverage
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install all dependencies
 	pip install -e ".[dev]" -e "../cowork-platform[sdk]"
+
+run: ## Run the agent-runtime in stdio mode (sources .env)
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main
 
 lint: ## Run linter
 	ruff check src/ tests/
@@ -24,6 +27,9 @@ test: ## Run unit tests
 
 test-integration: ## Run integration tests
 	pytest -m integration -x -q
+
+test-jsonrpc: ## Smoke test: CreateSession + Shutdown over JSON-RPC (needs backend services)
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python scripts/test-jsonrpc.py
 
 build: ## Build package
 	python -m build
