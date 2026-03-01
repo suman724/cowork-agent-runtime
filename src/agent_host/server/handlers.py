@@ -18,6 +18,7 @@ class Handlers:
         CancelTask — Cooperatively cancel running task
         GetSessionState — Return current session/task status
         ApproveAction — Deliver user approval/denial decision
+        GetPatchPreview — Return unified diffs for file changes
         Shutdown — Clean session teardown
     """
 
@@ -31,6 +32,7 @@ class Handlers:
         dispatcher.register("CancelTask", self.handle_cancel_task)
         dispatcher.register("GetSessionState", self.handle_get_session_state)
         dispatcher.register("ApproveAction", self.handle_approve_action)
+        dispatcher.register("GetPatchPreview", self.handle_get_patch_preview)
         dispatcher.register("Shutdown", self.handle_shutdown)
 
     async def handle_create_session(self, params: dict[str, Any]) -> dict[str, Any]:
@@ -55,6 +57,10 @@ class Handlers:
     async def handle_approve_action(self, params: dict[str, Any]) -> dict[str, Any]:
         """ApproveAction — deliver user approval/denial decision."""
         return await self._session_manager.deliver_approval(params)
+
+    async def handle_get_patch_preview(self, params: dict[str, Any]) -> dict[str, Any]:
+        """GetPatchPreview — return unified diffs for file changes in a task."""
+        return await self._session_manager.get_patch_preview(params)
 
     async def handle_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
         """Shutdown — clean session teardown."""

@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from google.adk.agents import LlmAgent
 from google.adk.models.lite_llm import LiteLlm
 
+from agent_host.agent.artifact_store import PendingArtifactStore
 from agent_host.agent.callbacks import (
     make_after_tool_callback,
     make_before_model_callback,
     make_before_tool_callback,
 )
-from agent_host.agent.tool_adapter import adapt_tools
+from agent_host.agent.file_change_tracker import FileChangeTracker
+from agent_host.agent.tool_adapter import ToolExecutionDeps, adapt_tools
+from agent_host.approval.approval_gate import ApprovalGate
 from agent_host.budget.token_budget import TokenBudget
 from agent_host.policy.policy_enforcer import PolicyEnforcer
 
@@ -39,6 +43,21 @@ Guidelines:
 """
 
 
+@dataclass
+class AgentComponents:
+    """All components created by ``create_agent``.
+
+    Returned to ``SessionManager`` so it can wire up JSON-RPC handlers
+    (approval delivery, patch preview, etc.).
+    """
+
+    agent: LlmAgent
+    token_budget: TokenBudget
+    approval_gate: ApprovalGate
+    artifact_store: PendingArtifactStore
+    file_change_tracker: FileChangeTracker
+
+
 def create_agent(
     config: AgentHostConfig,
     policy_bundle: PolicyBundle,
@@ -48,7 +67,8 @@ def create_agent(
     execution_context: ExecutionContext | None = None,
     session_id: str = "",
     task_id: str = "",
-) -> tuple[LlmAgent, TokenBudget]:
+    workspace_id: str = "",
+) -> AgentComponents:
     """Create an LlmAgent configured for Cowork.
 
     Args:
@@ -60,15 +80,34 @@ def create_agent(
         execution_context: Optional execution context for tool constraints.
         session_id: Current session ID.
         task_id: Current task ID.
+        workspace_id: Current workspace ID.
 
     Returns:
-        Tuple of (LlmAgent, TokenBudget) — the budget is needed for
-        recording actual usage after LLM responses.
+        AgentComponents containing the agent and all helper objects
+        needed by SessionManager.
     """
     # Initialize policy enforcer and token budget
     policy_enforcer = PolicyEnforcer(policy_bundle)
     max_tokens = policy_bundle.llmPolicy.maxSessionTokens if policy_bundle.llmPolicy else 100_000
     token_budget = TokenBudget(max_session_tokens=max_tokens)
+
+    # Create helper objects
+    approval_gate = ApprovalGate()
+    artifact_store = PendingArtifactStore()
+    file_change_tracker = FileChangeTracker()
+
+    # Bundle dependencies for tool functions
+    deps = ToolExecutionDeps(
+        tool_router=tool_router,
+        policy_enforcer=policy_enforcer,
+        event_emitter=event_emitter,
+        approval_gate=approval_gate,
+        artifact_store=artifact_store,
+        file_change_tracker=file_change_tracker,
+        approval_timeout=float(config.approval_timeout_seconds),
+        session_id=session_id,
+        task_id=task_id,
+    )
 
     # Configure LLM model via LiteLLM
     model = LiteLlm(
@@ -84,6 +123,7 @@ def create_agent(
         execution_context=execution_context,
         session_id=session_id,
         task_id=task_id,
+        deps=deps,
     )
 
     # Create callbacks
@@ -99,6 +139,9 @@ def create_agent(
     after_tool = make_after_tool_callback(
         workspace_client=workspace_client,
         event_emitter=event_emitter,
+        artifact_store=artifact_store,
+        session_id=session_id,
+        workspace_id=workspace_id,
     )
 
     # Create the agent
@@ -112,4 +155,10 @@ def create_agent(
         after_tool_callback=after_tool,
     )
 
-    return agent, token_budget
+    return AgentComponents(
+        agent=agent,
+        token_budget=token_budget,
+        approval_gate=approval_gate,
+        artifact_store=artifact_store,
+        file_change_tracker=file_change_tracker,
+    )

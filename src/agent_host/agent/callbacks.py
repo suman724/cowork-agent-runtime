@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from google.adk.agents.callback_context import CallbackContext
     from google.adk.models import LlmRequest, LlmResponse  # type: ignore[attr-defined]
 
+    from agent_host.agent.artifact_store import PendingArtifactStore
     from agent_host.budget.token_budget import TokenBudget
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.policy.policy_enforcer import PolicyEnforcer
@@ -30,6 +31,9 @@ def make_before_tool_callback(
 
     Returns None to proceed with tool execution, or a dict to skip
     the tool call (returned as the tool result to the LLM).
+
+    Note: APPROVAL_REQUIRED is handled inside tool_fn (via ApprovalGate),
+    not here, because before_tool_callback is synchronous and cannot await.
     """
 
     def before_tool_callback(
@@ -58,21 +62,8 @@ def make_before_tool_callback(
                 },
             }
 
-        if result.decision == "APPROVAL_REQUIRED":
-            logger.info(
-                "tool_call_requires_approval",
-                tool_name=tool_name,
-                capability=capability_name,
-                risk_level=result.risk_level,
-            )
-            if event_emitter:
-                event_emitter.emit_approval_requested(
-                    approval_id=result.approval_rule_id or "",
-                    risk_level=result.risk_level or "medium",
-                    tool_name=tool_name,
-                    action_summary=f"{tool_name} ({capability_name})",
-                )
-
+        # APPROVAL_REQUIRED: let tool_fn handle via ApprovalGate (it can await).
+        # Just emit tool_requested for both ALLOWED and APPROVAL_REQUIRED.
         if event_emitter:
             event_emitter.emit_tool_requested(tool_name, capability_name, tool_input)
 
@@ -114,8 +105,11 @@ def make_before_model_callback(
 
 
 def make_after_tool_callback(
-    workspace_client: WorkspaceClient | None = None,  # noqa: ARG001
+    workspace_client: WorkspaceClient | None = None,
     event_emitter: EventEmitter | None = None,
+    artifact_store: PendingArtifactStore | None = None,
+    session_id: str = "",
+    workspace_id: str = "",
 ) -> Any:
     """Create an after_tool_callback for event emission and artifact upload.
 
@@ -131,6 +125,31 @@ def make_after_tool_callback(
 
         if event_emitter:
             event_emitter.emit_tool_completed(tool_name, status)
+
+        # Upload artifacts (best-effort, fire-and-forget)
+        if artifact_store and workspace_client and workspace_id:
+            artifacts = artifact_store.pop(tool_name)
+            for artifact in artifacts:
+                try:
+                    import asyncio
+
+                    _task = asyncio.create_task(  # noqa: RUF006
+                        workspace_client.upload_artifact(
+                            workspace_id=workspace_id,
+                            session_id=session_id,
+                            artifact_data=artifact.data,
+                            artifact_type=artifact.artifact_type,
+                            artifact_name=artifact.artifact_name,
+                            content_type=artifact.media_type,
+                        )
+                    )
+                except Exception:
+                    logger.warning(
+                        "artifact_upload_failed",
+                        tool_name=tool_name,
+                        artifact_name=artifact.artifact_name,
+                        exc_info=True,
+                    )
 
         logger.debug(
             "tool_call_completed",

@@ -124,16 +124,39 @@ class TestEventEmitter:
                 emitter.emit(EventType.SESSION_CREATED)
 
     def test_emit_approval_requested(self) -> None:
-        """emit_approval_requested includes all required fields."""
+        """emit_approval_requested includes all required fields for Desktop parsing."""
         ctx = _make_context()
         emitter = EventEmitter(ctx)
 
         with patch.object(emitter, "emit") as mock_emit:
-            emitter.emit_approval_requested("appr-1", "medium", "RunCommand", "Run: pytest")
+            emitter.emit_approval_requested(
+                "appr-1",
+                "medium",
+                "RunCommand",
+                "Run: pytest",
+                session_id="sess-123",
+                task_id="task-1",
+                title="Approve RunCommand",
+            )
             mock_emit.assert_called_once()
             payload = mock_emit.call_args[1]["payload"]
             assert payload["approvalId"] == "appr-1"
             assert payload["riskLevel"] == "medium"
+            assert payload["sessionId"] == "sess-123"
+            assert payload["taskId"] == "task-1"
+            assert payload["title"] == "Approve RunCommand"
+
+    def test_emit_approval_requested_defaults(self) -> None:
+        """emit_approval_requested falls back to context session_id and default title."""
+        ctx = _make_context()
+        emitter = EventEmitter(ctx)
+
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_approval_requested("appr-2", "high", "DeleteFile", "Delete /tmp/x")
+            mock_emit.assert_called_once()
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["sessionId"] == "sess-123"  # from context
+            assert payload["title"] == "Approve DeleteFile"  # default
 
     def test_emit_policy_expired(self) -> None:
         """emit_policy_expired emits with warning severity."""

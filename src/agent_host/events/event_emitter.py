@@ -131,12 +131,23 @@ class EventEmitter:
         risk_level: str,
         tool_name: str,
         action_summary: str,
+        session_id: str = "",
+        task_id: str = "",
+        title: str = "",
     ) -> None:
-        """Emit approval_requested event."""
+        """Emit approval_requested event.
+
+        The Desktop's ``parseApprovalRequest`` requires ``sessionId``,
+        ``taskId``, and ``title`` in the payload — otherwise it returns null.
+        """
         self.emit(
             EventType.APPROVAL_REQUESTED,
+            task_id=task_id or None,
             payload={
                 "approvalId": approval_id,
+                "sessionId": session_id or self._ctx.session_id,
+                "taskId": task_id,
+                "title": title or f"Approve {tool_name}",
                 "riskLevel": risk_level,
                 "toolName": tool_name,
                 "actionSummary": action_summary,

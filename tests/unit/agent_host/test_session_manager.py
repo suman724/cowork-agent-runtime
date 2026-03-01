@@ -6,9 +6,8 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 import httpx
+import pytest
 
 from agent_host.config import AgentHostConfig
 from agent_host.exceptions import (
@@ -371,11 +370,22 @@ class TestSessionManagerTask:
 
 class TestSessionManagerApproval:
     @pytest.mark.asyncio
-    async def test_deliver_approval(self, tmp_path: object) -> None:
-        """deliver_approval returns status."""
+    async def test_deliver_approval_with_gate(self, tmp_path: object) -> None:
+        """deliver_approval resolves a pending approval via ApprovalGate."""
+        from agent_host.approval.approval_gate import ApprovalGate
+
         config = _make_config(tmp_path)
         router = MagicMock()
         manager = SessionManager(config, router)
+        gate = ApprovalGate()
+        manager._approval_gate = gate
+
+        # Schedule a request in the background
+        async def _request() -> str:
+            return await gate.request_approval("appr-1", timeout=5.0)
+
+        task = asyncio.create_task(_request())
+        await asyncio.sleep(0.01)  # let the future register
 
         result = await manager.deliver_approval(
             {
@@ -387,16 +397,27 @@ class TestSessionManagerApproval:
         assert result["approvalId"] == "appr-1"
         assert result["status"] == "delivered"
         assert result["decision"] == "approved"
+        assert await task == "approved"
 
         await manager._session_client.close()
         await manager._workspace_client.close()
 
     @pytest.mark.asyncio
-    async def test_deliver_denial(self, tmp_path: object) -> None:
-        """deliver_approval handles denial."""
+    async def test_deliver_denial_with_gate(self, tmp_path: object) -> None:
+        """deliver_approval handles denial via ApprovalGate."""
+        from agent_host.approval.approval_gate import ApprovalGate
+
         config = _make_config(tmp_path)
         router = MagicMock()
         manager = SessionManager(config, router)
+        gate = ApprovalGate()
+        manager._approval_gate = gate
+
+        async def _request() -> str:
+            return await gate.request_approval("appr-2", timeout=5.0)
+
+        task = asyncio.create_task(_request())
+        await asyncio.sleep(0.01)
 
         result = await manager.deliver_approval(
             {
@@ -407,6 +428,48 @@ class TestSessionManagerApproval:
         )
 
         assert result["decision"] == "denied"
+        assert await task == "denied"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_deliver_without_gate(self, tmp_path: object) -> None:
+        """deliver_approval returns not_found when no ApprovalGate is set."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        manager = SessionManager(config, router)
+
+        result = await manager.deliver_approval(
+            {
+                "approvalId": "appr-3",
+                "decision": "approved",
+            }
+        )
+
+        assert result["status"] == "not_found"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_deliver_unknown_approval_id(self, tmp_path: object) -> None:
+        """deliver_approval returns not_found for unknown approval ID."""
+        from agent_host.approval.approval_gate import ApprovalGate
+
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        manager = SessionManager(config, router)
+        manager._approval_gate = ApprovalGate()
+
+        result = await manager.deliver_approval(
+            {
+                "approvalId": "nonexistent",
+                "decision": "approved",
+            }
+        )
+
+        assert result["status"] == "not_found"
 
         await manager._session_client.close()
         await manager._workspace_client.close()
@@ -517,7 +580,7 @@ class TestSessionManagerRetry:
                 raise httpx.ConnectError("Connection refused")
             # Second attempt succeeds with no events
             return
-            yield  # make it an async generator  # noqa: RET504
+            yield  # make it an async generator
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -549,7 +612,7 @@ class TestSessionManagerRetry:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise LLMBudgetExceededError("Budget exhausted")
-            yield  # make it an async generator  # noqa: RET504
+            yield  # make it an async generator
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -575,7 +638,7 @@ class TestSessionManagerRetry:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise httpx.ConnectError("Connection refused")
-            yield  # make it an async generator  # noqa: RET504
+            yield  # make it an async generator
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -612,7 +675,7 @@ class TestSessionManagerRetry:
             if call_count == 1:
                 raise httpx.ReadTimeout("Read timed out")
             return
-            yield  # noqa: RET504
+            yield
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -644,7 +707,7 @@ class TestSessionManagerRetry:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise asyncio.CancelledError
-            yield  # noqa: RET504
+            yield
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -673,7 +736,7 @@ class TestSessionManagerSessionFailed:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise PolicyExpiredError("Policy expired")
-            yield  # noqa: RET504
+            yield
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -699,7 +762,7 @@ class TestSessionManagerSessionFailed:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise CheckpointError("Checkpoint write failed")
-            yield  # noqa: RET504
+            yield
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -725,7 +788,7 @@ class TestSessionManagerSessionFailed:
 
         async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
             raise ValueError("Something unexpected")
-            yield  # noqa: RET504
+            yield
 
         manager._runner = MagicMock()
         manager._runner.run_async = _mock_run_async
@@ -803,6 +866,87 @@ class TestSessionManagerTokenPersistence:
 
         assert manager._token_budget.input_tokens_used == 1000
         assert manager._token_budget.output_tokens_used == 500
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerPatchPreview:
+    @pytest.mark.asyncio
+    async def test_get_patch_preview_with_tracker(self, tmp_path: object) -> None:
+        """get_patch_preview delegates to FileChangeTracker."""
+        from agent_host.agent.file_change_tracker import FileChangeTracker
+
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        manager = SessionManager(config, router)
+        tracker = FileChangeTracker()
+        tracker.record_write("task-1", "/tmp/file.txt", old_content=None, new_content="hello")
+        manager._file_change_tracker = tracker
+
+        result = await manager.get_patch_preview({"taskId": "task-1"})
+        assert result["taskId"] == "task-1"
+        assert len(result["files"]) == 1
+        assert result["files"][0]["status"] == "added"
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_get_patch_preview_without_tracker(self, tmp_path: object) -> None:
+        """get_patch_preview returns empty when no tracker is set."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        manager = SessionManager(config, router)
+
+        result = await manager.get_patch_preview({"taskId": "task-1"})
+        assert result["files"] == []
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerRichHistory:
+    @pytest.mark.asyncio
+    async def test_upload_history_includes_tool_messages(self, tmp_path: object) -> None:
+        """_upload_history includes tool call/result messages between user and assistant."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        # Simulate tool messages collected during _run_agent
+        manager._task_tool_messages = [
+            {"type": "tool_call", "toolName": "ReadFile", "arguments": '{"path":"/tmp/x"}'},
+            {"type": "tool_result", "toolName": "ReadFile", "output": '"file contents"'},
+        ]
+
+        # Mock workspace client upload
+        with patch.object(
+            manager._workspace_client,
+            "upload_session_history",
+            new_callable=AsyncMock,
+        ) as mock_upload:
+            await manager._upload_history("hello", "I read the file.", "task-1")
+
+            mock_upload.assert_called_once()
+            messages = mock_upload.call_args[1]["messages"]
+
+            # Should be: user, tool_call, tool_result, assistant = 4 messages
+            assert len(messages) == 4
+            assert messages[0].role == "user"
+            assert messages[1].role == "tool"
+            assert messages[2].role == "tool"
+            assert messages[3].role == "assistant"
+
+            # Verify tool message content
+            import json
+
+            tool_call = json.loads(messages[1].content)
+            assert tool_call["type"] == "tool_call"
+            assert tool_call["toolName"] == "ReadFile"
 
         await manager._session_client.close()
         await manager._workspace_client.close()
