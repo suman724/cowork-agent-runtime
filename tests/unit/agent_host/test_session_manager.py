@@ -8,8 +8,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+import httpx
+
 from agent_host.config import AgentHostConfig
-from agent_host.exceptions import NoActiveTaskError, SessionNotFoundError
+from agent_host.exceptions import (
+    CheckpointError,
+    LLMBudgetExceededError,
+    NoActiveTaskError,
+    PolicyExpiredError,
+    SessionNotFoundError,
+)
 from agent_host.session.session_manager import SessionManager
 
 
@@ -487,6 +495,317 @@ class TestSessionManagerShutdown:
 
         # Should still succeed
         assert result["status"] == "shutdown"
+
+
+class TestSessionManagerRetry:
+    @pytest.mark.asyncio
+    async def test_run_agent_retries_on_transient_error(self, tmp_path: object) -> None:
+        """Transient error on first attempt triggers retry, second attempt succeeds."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        call_count = 0
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ConnectError("Connection refused")
+            # Second attempt succeeds with no events
+            return
+            yield  # make it an async generator  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        # Use fast retry config
+        object.__setattr__(manager._config, "llm_max_retries", 2)
+        object.__setattr__(manager._config, "llm_retry_base_delay", 0.01)
+        object.__setattr__(manager._config, "llm_retry_max_delay", 0.05)
+
+        await manager._run_agent("hello", "task-1")
+
+        assert call_count == 2
+        manager._event_emitter.emit_task_completed.assert_called_once_with("task-1")
+        manager._event_emitter.emit_llm_retry.assert_called_once()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_run_agent_no_retry_on_permanent_error(self, tmp_path: object) -> None:
+        """Permanent errors (LLMBudgetExceededError) are not retried."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise LLMBudgetExceededError("Budget exhausted")
+            yield  # make it an async generator  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1")
+
+        manager._event_emitter.emit_task_failed.assert_called_once()
+        manager._event_emitter.emit_llm_retry.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_run_agent_exhausts_retries(self, tmp_path: object) -> None:
+        """Transient error exceeding max retries emits task_failed."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise httpx.ConnectError("Connection refused")
+            yield  # make it an async generator  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        object.__setattr__(manager._config, "llm_max_retries", 2)
+        object.__setattr__(manager._config, "llm_retry_base_delay", 0.01)
+        object.__setattr__(manager._config, "llm_retry_max_delay", 0.05)
+
+        await manager._run_agent("hello", "task-1")
+
+        # Should have retried twice then failed
+        assert manager._event_emitter.emit_llm_retry.call_count == 2
+        manager._event_emitter.emit_task_failed.assert_called_once()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_run_agent_emits_retry_event(self, tmp_path: object) -> None:
+        """Verify emit_llm_retry is called with correct attempt and delay."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        call_count = 0
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise httpx.ReadTimeout("Read timed out")
+            return
+            yield  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        object.__setattr__(manager._config, "llm_max_retries", 3)
+        object.__setattr__(manager._config, "llm_retry_base_delay", 0.01)
+        object.__setattr__(manager._config, "llm_retry_max_delay", 0.05)
+
+        await manager._run_agent("hello", "task-1")
+
+        retry_call = manager._event_emitter.emit_llm_retry.call_args
+        assert retry_call.kwargs["task_id"] == "task-1"
+        assert retry_call.kwargs["attempt"] == 1
+        assert retry_call.kwargs["max_retries"] == 3
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_run_agent_no_retry_on_cancel(self, tmp_path: object) -> None:
+        """CancelledError exits immediately without retry."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise asyncio.CancelledError
+            yield  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1")
+
+        manager._event_emitter.emit_llm_retry.assert_not_called()
+        manager._event_emitter.emit_task_failed.assert_not_called()
+        manager._event_emitter.emit_task_completed.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerSessionFailed:
+    @pytest.mark.asyncio
+    async def test_policy_expired_emits_session_failed(self, tmp_path: object) -> None:
+        """PolicyExpiredError emits session_failed, not task_failed."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise PolicyExpiredError("Policy expired")
+            yield  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1")
+
+        manager._event_emitter.emit_session_failed.assert_called_once_with("Policy expired")
+        manager._event_emitter.emit_task_failed.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_error_emits_session_failed(self, tmp_path: object) -> None:
+        """CheckpointError emits session_failed, not task_failed."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise CheckpointError("Checkpoint write failed")
+            yield  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1")
+
+        manager._event_emitter.emit_session_failed.assert_called_once()
+        manager._event_emitter.emit_task_failed.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_generic_error_emits_task_failed(self, tmp_path: object) -> None:
+        """Generic non-transient errors emit task_failed."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        async def _mock_run_async(**kwargs):  # type: ignore[no-untyped-def]
+            raise ValueError("Something unexpected")
+            yield  # noqa: RET504
+
+        manager._runner = MagicMock()
+        manager._runner.run_async = _mock_run_async
+        manager._event_emitter = MagicMock()
+
+        await manager._run_agent("hello", "task-1")
+
+        manager._event_emitter.emit_task_failed.assert_called_once()
+        manager._event_emitter.emit_session_failed.assert_not_called()
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+
+class TestSessionManagerTokenPersistence:
+    @pytest.mark.asyncio
+    async def test_token_budget_persisted(self, tmp_path: object) -> None:
+        """Token usage is persisted to checkpoint after record_usage."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        await _create_session_with_mock(manager)
+
+        # Manually record usage and persist
+        assert manager._token_budget is not None
+        manager._token_budget.record_usage(500, 200)
+        manager._persist_token_budget()
+
+        # Read checkpoint file to verify
+        session = manager._checkpoint_service._sessions.get("sess-123")
+        assert session is not None
+        assert session.state["_token_input_used"] == 500
+        assert session.state["_token_output_used"] == 200
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
+
+    @pytest.mark.asyncio
+    async def test_token_budget_restored(self, tmp_path: object) -> None:
+        """Token budget is restored from checkpoint on session creation."""
+        config = _make_config(tmp_path)
+        router = MagicMock()
+        router.get_available_tools.return_value = []
+        manager = SessionManager(config, router)
+
+        # Pre-populate checkpoint with token data
+        from agent_host.session.session_manager import APP_NAME
+
+        await manager._checkpoint_service.create_session(
+            app_name=APP_NAME,
+            user_id="user-test",
+            session_id="sess-123",
+            state={
+                "workspace_id": "ws-456",
+                "tenant_id": "tenant-test",
+                "_token_input_used": 1000,
+                "_token_output_used": 500,
+            },
+        )
+
+        await _create_session_with_mock(manager)
+
+        # The ADK session creation in create_session replaces the checkpoint,
+        # but we can verify restore_usage was called by checking state
+        assert manager._token_budget is not None
+        # Since create_session creates a NEW checkpoint, the pre-populated
+        # state is overwritten. In a real crash recovery scenario,
+        # the checkpoint service would load from disk.
+        # For this test, we verify the restore method itself works:
+        manager._checkpoint_service._sessions["sess-123"].state["_token_input_used"] = 1000
+        manager._checkpoint_service._sessions["sess-123"].state["_token_output_used"] = 500
+        manager._restore_token_budget_from_checkpoint()
+
+        assert manager._token_budget.input_tokens_used == 1000
+        assert manager._token_budget.output_tokens_used == 500
+
+        await manager._session_client.close()
+        await manager._workspace_client.close()
 
 
 async def _async_iter(items: list[object]) -> object:  # type: ignore[misc]

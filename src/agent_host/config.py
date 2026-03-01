@@ -53,6 +53,9 @@ class AgentHostConfig:
     approval_timeout_seconds: int = 300
     log_level: str = "info"
     llm_model: str = "openai/gpt-4o"
+    llm_max_retries: int = 3
+    llm_retry_base_delay: float = 1.0
+    llm_retry_max_delay: float = 30.0
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -89,4 +92,7 @@ class AgentHostConfig:
             approval_timeout_seconds=int(os.environ.get("APPROVAL_TIMEOUT_SECONDS", "300")),
             log_level=os.environ.get("LOG_LEVEL", "info"),
             llm_model=os.environ.get("LLM_MODEL", "openai/gpt-4o"),
+            llm_max_retries=int(os.environ.get("LLM_MAX_RETRIES", "3")),
+            llm_retry_base_delay=float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0")),
+            llm_retry_max_delay=float(os.environ.get("LLM_RETRY_MAX_DELAY", "30.0")),
         )

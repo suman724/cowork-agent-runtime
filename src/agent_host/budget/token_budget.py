@@ -78,6 +78,19 @@ class TokenBudget:
                 },
             )
 
+    def restore_usage(self, input_tokens: int, output_tokens: int) -> None:
+        """Restore token usage from a checkpoint (absolute, not additive).
+
+        Called once during session restoration to re-establish budget state
+        after a crash. Overwrites current usage counters.
+
+        Args:
+            input_tokens: Total input tokens previously consumed.
+            output_tokens: Total output tokens previously consumed.
+        """
+        self._input_tokens_used = input_tokens
+        self._output_tokens_used = output_tokens
+
     def record_usage(self, input_tokens: int, output_tokens: int) -> None:
         """Record actual token usage from an LLM response.
 
