@@ -11,12 +11,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Two top-level packages with a **strict boundary** — no cross-imports allowed:
 
 ```
-agent_host/     ← Local Agent Host (agent loop orchestration via Google ADK)
+agent_host/     ← Local Agent Host (custom agent loop)
   server/       — JSON-RPC 2.0 server over stdio (parse, serialize, dispatch, handlers)
-  session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint service, SessionManager
-  agent/        — ADK agent factory, tool adapter (ToolRouter→FunctionTool), callbacks
+  session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
+  loop/         — Core agent loop, tool executor, agent-internal tools, error recovery, sub-agents
+  llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
+  thread/       — Message thread management, context compaction, token counting
+  memory/       — Working memory: task tracker, plan, notes (injected per-turn)
+  skills/       — Skill definitions, loader (built-in/YAML/policy), executor
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
+  approval/     — Approval gate (asyncio Futures for user approval flow)
   events/       — Event emitter: SessionEvent notifications + structured logging
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
@@ -39,33 +44,22 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 
 ## Key Patterns
 
-- **Google ADK** (`google-adk`) as the agent loop framework — handles LLM calls, tool execution, session/state, streaming via `LlmAgent`, `Runner`, `FunctionTool`, `LongRunningFunctionTool`.
-- **LiteLLM** for OpenAI-compatible LLM Gateway: `LiteLlm(model="openai/model", api_base=gateway_url)`.
-- **ADK callbacks** for policy/budget enforcement:
-  - `before_tool_callback` — global policy check, blocks DENIED calls
-  - `before_model_callback` — checks policy expiry and token budget
-  - `after_tool_callback` — event emission, artifact upload
-- **Custom JSON-RPC 2.0 server** (~200 lines) — ADK has no stdio transport. Newline-delimited JSON with write lock.
-- **Custom `CheckpointSessionService`** — ADK `BaseSessionService` impl backed by atomic JSON file writes (tempfile + os.replace) for crash recovery.
+- **Custom agent loop** (`loop/agent_loop.py`) — single-threaded `while tool_call: execute → feed back` loop. Sophistication is in the harness: compaction, working memory, error recovery, sub-agents, skills.
+- **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
+- **Agent loop harness layers:**
+  - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload
+  - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, SpawnAgent) without going through PolicyEnforcer
+  - `ErrorRecovery` — consecutive failure tracking, loop detection (same tool+args 3+ times), reflection/loop-break prompt injection
+  - `WorkingMemory` — task tracker + plan + notes, injected as system message every turn
+  - `SubAgentManager` — spawns focused sub-agents with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
+  - `SkillExecutor` — executes formalized multi-step workflows as focused sub-conversations
+- **Context compaction** (`thread/compactor.py`) — drop-oldest with recency window, triggered at 90% of max_context_tokens.
+- **Custom JSON-RPC 2.0 server** (~200 lines). Newline-delimited JSON with write lock.
+- **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
 - **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
 - **Pydantic models** from `cowork-platform` for all data contracts.
 - **httpx** with `tenacity` retry for async HTTP to backend services.
 - **structlog** to stderr for structured logging; stdout reserved for JSON-RPC.
-
-## How Cowork Maps to ADK
-
-```
-ADK Concept              → Cowork Component
-─────────────────────────────────────────────
-LlmAgent                 → Orchestrator agent with system prompt + tools
-FunctionTool             → Wrapper around each ToolRouter tool
-LongRunningFunctionTool  → Tools requiring approval (policy says APPROVAL_REQUIRED)
-before_tool_callback     → PolicyEnforcer.check_tool_call() — global, blocks DENIED
-before_model_callback    → TokenBudget.pre_check() + PolicyEnforcer.check_llm_call()
-after_tool_callback      → Event emission, artifact upload (best-effort)
-BaseSessionService       → CheckpointSessionService (JSON file persistence)
-Runner.run_async()       → Called from StartTask JSON-RPC handler
-```
 
 ## Tool-to-Capability Mapping
 
@@ -125,10 +119,15 @@ cowork-agent-runtime/
       config.py               # AgentHostConfig from env vars
       main.py                 # Process entry point
       server/                 # JSON-RPC 2.0 server (parse, transport, dispatch, handlers)
-      session/                # Session/Workspace clients, checkpoint service, SessionManager
-      agent/                  # ADK agent factory, tool adapter, callbacks
+      session/                # Session/Workspace clients, checkpoint manager, SessionManager
+      loop/                   # Agent loop, tool executor, agent tools, error recovery, sub-agents
+      llm/                    # LLM Gateway streaming client, response models, error classifier
+      thread/                 # Message thread, context compaction, token counting
+      memory/                 # Working memory: task tracker, plan, notes
+      skills/                 # Skill definitions, loader, executor
       policy/                 # Policy enforcer, path/command/domain matchers, risk assessor
       budget/                 # Token budget tracking
+      approval/               # Approval gate (asyncio Futures)
       events/                 # Event emitter
     tool_runtime/
       __init__.py
@@ -145,7 +144,7 @@ cowork-agent-runtime/
       agent_host/             # Mirrors src/agent_host/ structure
       tool_runtime/           # Mirrors src/tool_runtime/ structure
     integration/              # End-to-end agent loop tests
-    fixtures/                 # Shared test data (policy bundles, tool requests)
+    fixtures/                 # Shared test data (policy bundles, mock LLM, tool requests)
     conftest.py
   build/                      # Platform-specific packaging (Phase 4)
 ```
@@ -165,8 +164,7 @@ cowork-agent-runtime/
 
 | Library | Purpose |
 |---------|---------|
-| `google-adk>=1.0,<2.0` | Agent loop framework (LlmAgent, Runner, FunctionTool, SessionService) |
-| `litellm` | OpenAI-compatible LLM Gateway routing (used by ADK) |
+| `openai>=1.60,<2.0` | LLM Gateway streaming client (AsyncOpenAI, OpenAI-compatible endpoint) |
 | `tenacity>=9.0,<10.0` | Retry with exponential backoff for HTTP clients |
 | `httpx>=0.27,<1.0` | Async HTTP for backend service calls |
 | `pydantic>=2.0,<3.0` | Data validation (from cowork-platform contracts) |
@@ -219,7 +217,7 @@ All exceptions carry structured context for logging. The `MethodDispatcher` catc
 
 - **All I/O is async**: `async def` for every function that does I/O (file, network, subprocess).
 - **httpx.AsyncClient** with connection pooling for all outbound HTTP. Create one client per session, close on shutdown.
-- **LLM streaming**: ADK + LiteLLM handle streaming internally. Events forwarded via `EventEmitter`.
+- **LLM streaming**: `LLMClient.stream_chat()` uses `openai.AsyncOpenAI` with text chunk callbacks. Retry with backoff via `error_classifier.py`.
 - **Never use `time.sleep()`** — use `asyncio.sleep()`.
 - **Background tasks**: `asyncio.create_task()` for agent loop execution from `start_task()`.
 
@@ -234,17 +232,17 @@ All exceptions carry structured context for logging. The `MethodDispatcher` catc
 ### Checkpoint / Recovery
 
 - JSON file per session in user's app data directory (atomic write via tempfile + os.replace).
-- `CheckpointSessionService` implements ADK's `BaseSessionService` interface.
-- Write checkpoint after each ADK event (state changes, new messages).
+- `CheckpointManager` saves `SessionCheckpoint` with thread state, token budget, working memory.
+- Write checkpoint after each step completion.
 - On clean session end (Shutdown): delete checkpoint file.
-- On crash recovery: load checkpoint, restore session state.
+- On crash recovery: load checkpoint, restore thread + token budget + working memory.
 
 ### Testing
 
 - **Pytest markers**: `@pytest.mark.unit`, `@pytest.mark.integration`, `@pytest.mark.platform`
-- **Agent setup tests**: Mock ToolRouter + mock policy → test tool adaptation, callbacks, agent factory
+- **Agent loop tests**: `MockLLMClient` + mock ToolExecutor → test loop termination, tool dispatch, compaction, cancellation, max_steps
 - **Tool tests**: Real filesystem operations in temp directories, real subprocess execution with simple commands
 - **Policy enforcer tests**: Various policy bundles × tool requests → verify allow/deny/approval-required
-- **Session manager tests**: Mock HTTP clients + mock ADK runner → test lifecycle
+- **Session manager tests**: Mock HTTP clients + mock LLM → test lifecycle
 - **Platform tests**: `@pytest.mark.skipif(sys.platform != 'darwin')` for macOS-specific, similar for Windows
 - **Fixtures**: Pre-built policy bundles in `tests/fixtures/policy_bundles.py`

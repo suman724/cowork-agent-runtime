@@ -195,3 +195,37 @@ class EventEmitter:
     def emit_policy_expired(self) -> None:
         """Emit policy_expired event."""
         self.emit(EventType.POLICY_EXPIRED, severity="warning")
+
+    def emit_step_started(self, task_id: str, step: int) -> None:
+        """Emit step_started event at the beginning of each agent loop step."""
+        self.emit(
+            EventType.STEP_STARTED,
+            task_id=task_id,
+            payload={"step": step},
+        )
+
+    def emit_step_completed(self, task_id: str, step: int) -> None:
+        """Emit step_completed event after each agent loop step finishes."""
+        self.emit(
+            EventType.STEP_COMPLETED,
+            task_id=task_id,
+            payload={"step": step},
+        )
+
+    def emit_context_compacted(
+        self,
+        task_id: str,
+        messages_dropped: int,
+        tokens_before: int,
+        tokens_after: int,
+    ) -> None:
+        """Emit context_compacted event when message truncation occurs."""
+        self.emit(
+            "context_compacted",
+            task_id=task_id,
+            payload={
+                "messagesDropped": messages_dropped,
+                "tokensBefore": tokens_before,
+                "tokensAfter": tokens_after,
+            },
+        )

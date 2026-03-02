@@ -1,4 +1,4 @@
-.PHONY: help install run lint format format-check typecheck test test-integration test-jsonrpc test-chat build check clean coverage
+.PHONY: help install run run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic build check clean coverage
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -8,6 +8,10 @@ install: ## Install all dependencies
 
 run: ## Run the agent-runtime in stdio mode (sources .env)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main
+
+run-anthropic: ## Run the agent-runtime with Anthropic Claude (sources .env.anthropic)
+	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
+	set -a && . .env.anthropic; set +a && .venv/bin/python -m agent_host.main
 
 lint: ## Run linter
 	ruff check src/ tests/
@@ -33,6 +37,10 @@ test-jsonrpc: ## Smoke test: CreateSession + Shutdown over JSON-RPC (needs backe
 
 test-chat: ## Full chat test: CreateSession + StartTask + LLM response (needs backend + LLM)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python scripts/test-chat.py
+
+test-chat-anthropic: ## Full chat test using Anthropic Claude (needs backend + Anthropic API key)
+	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
+	set -a && . .env.anthropic; set +a && .venv/bin/python scripts/test-chat.py
 
 build: ## Build package
 	python -m build

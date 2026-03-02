@@ -8,7 +8,7 @@ The Desktop App communicates with the Agent Host via JSON-RPC 2.0 over stdio (ne
 
 | Method | Description |
 |--------|-------------|
-| `CreateSession` | Handshake with Session Service, initialize ADK agent with policy bundle |
+| `CreateSession` | Handshake with Session Service, initialize agent loop with policy bundle |
 | `ResumeSession` | Resume a completed/failed session — re-fetch policy, restore history, reuse session ID |
 | `StartTask` | Start an agent work cycle from a user prompt. Accepts `taskOptions.maxSteps` (1-200, default 50) to limit LLM calls per task |
 | `CancelTask` | Cancel the currently running task |
@@ -58,7 +58,7 @@ make coverage      # Run tests with coverage report
 | `CHECKPOINT_DIR` | Platform app data | Directory for session checkpoint files |
 | `APPROVAL_TIMEOUT_SECONDS` | `300` | Timeout for pending approval requests |
 | `LOG_LEVEL` | `info` | Structured logging level (debug, info, warning, error) |
-| `LLM_MODEL` | `openai/gpt-4o` | LLM model identifier for LiteLLM routing |
+| `LLM_MODEL` | `gpt-4o` | LLM model identifier for OpenAI-compatible gateway |
 
 ## Architecture
 
@@ -66,16 +66,21 @@ Two packages with a strict boundary — no cross-imports, communication via `Too
 
 ### agent_host/
 
-Agent loop orchestration using [Google ADK](https://github.com/google/adk-python):
+Custom agent loop with production-grade harness:
 
 | Module | Purpose |
 |--------|---------|
 | `server/` | JSON-RPC 2.0 server (parse, serialize, stdio transport, dispatch, handlers) |
-| `agent/` | ADK agent factory, tool adapter (ToolRouter → FunctionTool), callbacks |
-| `session/` | Session/Workspace HTTP clients, checkpoint service, SessionManager |
+| `loop/` | Core agent loop, tool executor, agent-internal tools, error recovery, sub-agents |
+| `llm/` | LLM Gateway streaming client (openai SDK), response models, error classifier |
+| `thread/` | Message thread management, context compaction, token counting |
+| `memory/` | Working memory: task tracker, plan, notes (injected per-turn) |
+| `skills/` | Skill definitions, loader (built-in/YAML/policy), executor |
+| `session/` | Session/Workspace HTTP clients, checkpoint manager, SessionManager |
 | `policy/` | Policy enforcer, path/command/domain matchers, risk assessor |
 | `budget/` | Session token budget tracking |
-| `events/` | Event emitter (JSON-RPC notifications + structlog), including `step_limit_approaching` |
+| `approval/` | Approval gate (asyncio Futures for user approval flow) |
+| `events/` | Event emitter (JSON-RPC notifications + structlog) |
 
 ### tool_runtime/
 
@@ -94,8 +99,7 @@ Local tool execution engine:
 
 | Library | Purpose |
 |---------|---------|
-| `google-adk` | Agent loop framework (LlmAgent, Runner, FunctionTool, SessionService) |
-| `litellm` | OpenAI-compatible LLM Gateway routing |
+| `openai` | LLM Gateway streaming client (AsyncOpenAI, OpenAI-compatible endpoint) |
 | `tenacity` | Retry with exponential backoff for HTTP clients |
 | `httpx` | Async HTTP for backend service calls |
 | `pydantic` | Data validation (cowork-platform contracts) |

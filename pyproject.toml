@@ -12,8 +12,7 @@ dependencies = [
     "pydantic>=2.0,<3.0",
     "structlog>=24.0,<26.0",
     "cowork-platform[sdk]",
-    "google-adk>=1.0,<2.0",
-    "litellm",
+    "openai>=1.60,<2.0",
     "tenacity>=9.0,<10.0",
 ]
 
@@ -39,7 +38,6 @@ select = ["E", "F", "W", "I", "N", "UP", "S", "B", "A", "C4", "SIM", "TCH", "ARG
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S101", "S106", "S108", "ARG001", "ARG002", "TCH"]
-"src/agent_host/session/checkpoint_session_service.py" = ["ARG002"]
 "src/agent_host/server/handlers.py" = ["ARG002"]
 
 [tool.mypy]
@@ -55,7 +53,7 @@ ignore_missing_imports = true
 follow_untyped_imports = true
 
 [[tool.mypy.overrides]]
-module = ["google.*", "google.adk.*", "google.genai.*", "litellm", "litellm.*", "tenacity", "tenacity.*"]
+module = ["openai", "openai.*", "tenacity", "tenacity.*"]
 ignore_missing_imports = true
 follow_untyped_imports = true
 

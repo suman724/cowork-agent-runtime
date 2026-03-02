@@ -5,9 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import math
 import platform
-import random
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -21,27 +19,29 @@ from cowork_platform.session_create_request import (
 )
 from cowork_platform.session_create_response import SessionCreateResponse  # noqa: TC002
 from cowork_platform_sdk import CapabilityName
-from google.adk.runners import Runner
-from google.genai import types
 
-from agent_host.agent.agent_factory import create_agent
-from agent_host.agent.tool_adapter import TOOL_CAPABILITY_MAP
+from agent_host.agent.file_change_tracker import FileChangeTracker
+from agent_host.approval.approval_gate import ApprovalGate
+from agent_host.budget.token_budget import TokenBudget
 from agent_host.exceptions import (
     CheckpointError,
     NoActiveTaskError,
     PolicyExpiredError,
     SessionNotFoundError,
 )
-from agent_host.llm.error_classifier import is_transient_llm_error
+from agent_host.llm.client import LLMClient
+from agent_host.loop.agent_loop import AgentLoop
+from agent_host.loop.system_prompt import SystemPromptBuilder
+from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
 from agent_host.models import SessionContext
-from agent_host.session.checkpoint_session_service import CheckpointSessionService
+from agent_host.policy.policy_enforcer import PolicyEnforcer
+from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
+from agent_host.thread.compactor import DropOldestCompactor
+from agent_host.thread.message_thread import MessageThread
 
 if TYPE_CHECKING:
-    from agent_host.agent.file_change_tracker import FileChangeTracker
-    from agent_host.approval.approval_gate import ApprovalGate
-    from agent_host.budget.token_budget import TokenBudget
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.server.stdio_transport import StdioTransport
@@ -76,26 +76,30 @@ class SessionManager:
         self._session_client = SessionClient(config.session_service_url)
         self._workspace_client = WorkspaceClient(config.workspace_service_url)
 
-        # ADK components (initialized on create_session)
-        self._checkpoint_service = CheckpointSessionService(config.checkpoint_dir)
-        self._runner: Runner | None = None
-        self._token_budget: TokenBudget | None = None
+        # Checkpoint manager (replaces ADK CheckpointSessionService)
+        self._checkpoint_manager = CheckpointManager(config.checkpoint_dir)
+
+        # LLM client (initialized on create_session)
+        self._llm_client: LLMClient | None = None
 
         # Event emitter (created lazily after session context is available)
         self._event_emitter: EventEmitter | None = None
 
-        # Approval and file tracking (set after create_agent)
+        # Policy, budget, approval, file tracking (set after create_session)
+        self._policy_enforcer: PolicyEnforcer | None = None
+        self._token_budget: TokenBudget | None = None
         self._approval_gate: ApprovalGate | None = None
         self._file_change_tracker: FileChangeTracker | None = None
+
+        # Message thread (replaces ADK session)
+        self._thread: MessageThread | None = None
 
         # Session state
         self._session_context: SessionContext | None = None
         self._session_response: SessionCreateResponse | None = None
         self._current_task: asyncio.Task[None] | None = None
         self._current_task_id: str | None = None
-
-        # Rich history: tool messages collected during a task
-        self._task_tool_messages: list[dict[str, str]] = []
+        self._cancel_event: asyncio.Event = asyncio.Event()
 
         # Cumulative session history (across tasks)
         self._session_messages: list[ConversationMessage] = []
@@ -179,48 +183,16 @@ class SessionManager:
 
         self._event_emitter = EventEmitter(self._session_context, self._transport)
 
-        # Initialize ADK agent with policy bundle
+        # Initialize components with policy bundle
         if response.policyBundle:
-            # Cast to canonical PolicyBundle type — both classes are structurally
-            # identical but codegen produces separate types in each response model.
             canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
-            components = create_agent(
-                config=self._config,
-                policy_bundle=canonical_bundle,
-                tool_router=self._tool_router,
-                event_emitter=self._event_emitter,
-                workspace_client=self._workspace_client,
-                session_id=response.sessionId,
-                workspace_id=response.workspaceId,
-            )
-            self._token_budget = components.token_budget
-            self._approval_gate = components.approval_gate
-            self._file_change_tracker = components.file_change_tracker
-
-            # Create ADK Runner
-            self._runner = Runner(
-                agent=components.agent,
-                app_name=APP_NAME,
-                session_service=self._checkpoint_service,
-            )
-
-            # Create ADK session
-            await self._checkpoint_service.create_session(
-                app_name=APP_NAME,
-                user_id=user_id,
-                session_id=response.sessionId,
-                state={
-                    "workspace_id": response.workspaceId,
-                    "tenant_id": tenant_id,
-                },
-            )
+            self._init_components(canonical_bundle)
 
         # Reset cumulative history for the new session
         self._session_messages = []
 
         # Restore token budget and session messages from checkpoint (crash recovery)
-        self._restore_token_budget_from_checkpoint()
-        self._restore_session_messages_from_checkpoint()
+        self._restore_from_checkpoint()
 
         # Emit session_created event
         if self._event_emitter:
@@ -242,7 +214,7 @@ class SessionManager:
     async def resume_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """Resume an existing session — reuses the same session ID.
 
-        Calls the Session Service's resume endpoint, re-initializes the ADK agent,
+        Calls the Session Service's resume endpoint, re-initializes the agent,
         and restores cumulative session history from the Workspace Service.
         """
         session_id = params.get("sessionId", "")
@@ -265,36 +237,10 @@ class SessionManager:
 
         self._event_emitter = EventEmitter(self._session_context, self._transport)
 
-        # Initialize ADK agent with refreshed policy bundle
+        # Initialize components with refreshed policy bundle
         if response.policyBundle:
             canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
-            components = create_agent(
-                config=self._config,
-                policy_bundle=canonical_bundle,
-                tool_router=self._tool_router,
-                event_emitter=self._event_emitter,
-                workspace_client=self._workspace_client,
-                session_id=response.sessionId,
-                workspace_id=response.workspaceId,
-            )
-            self._token_budget = components.token_budget
-            self._approval_gate = components.approval_gate
-            self._file_change_tracker = components.file_change_tracker
-
-            self._runner = Runner(
-                agent=components.agent,
-                app_name=APP_NAME,
-                session_service=self._checkpoint_service,
-            )
-
-            await self._checkpoint_service.create_session(
-                app_name=APP_NAME,
-                user_id="",
-                session_id=response.sessionId,
-                state={
-                    "workspace_id": response.workspaceId,
-                },
-            )
+            self._init_components(canonical_bundle)
 
         # Restore cumulative history from Workspace Service
         self._session_messages = []
@@ -311,7 +257,7 @@ class SessionManager:
             )
 
         # Restore token budget from checkpoint (if available)
-        self._restore_token_budget_from_checkpoint()
+        self._restore_from_checkpoint()
 
         if self._event_emitter:
             self._event_emitter.emit_session_created()
@@ -329,12 +275,50 @@ class SessionManager:
             "status": "ready",
         }
 
+    def _init_components(
+        self,
+        policy_bundle: PolicyBundle,
+    ) -> None:
+        """Initialize all agent loop components from a policy bundle."""
+        # Policy enforcer
+        self._policy_enforcer = PolicyEnforcer(policy_bundle)
+
+        # Token budget
+        max_tokens = (
+            policy_bundle.llmPolicy.maxSessionTokens if policy_bundle.llmPolicy else 100_000
+        )
+        self._token_budget = TokenBudget(max_session_tokens=max_tokens)
+
+        # Approval gate and file change tracker
+        self._approval_gate = ApprovalGate()
+        self._file_change_tracker = FileChangeTracker()
+
+        # LLM client
+        self._llm_client = LLMClient(
+            endpoint=self._config.llm_gateway_endpoint,
+            auth_token=self._config.llm_gateway_auth_token,
+            model=self._config.llm_model,
+            max_retries=self._config.llm_max_retries,
+            retry_base_delay=self._config.llm_retry_base_delay,
+            retry_max_delay=self._config.llm_retry_max_delay,
+            event_emitter=self._event_emitter,
+        )
+
+        # System prompt
+        prompt_builder = SystemPromptBuilder(
+            workspace_dir=None,  # Will be set from workspace context
+            os_family=platform.system(),
+        )
+
+        # Message thread
+        self._thread = MessageThread(system_prompt=prompt_builder.build_static_prompt())
+
     async def start_task(self, params: dict[str, Any]) -> dict[str, Any]:
         """Start a new task (agent work cycle) from a user prompt.
 
-        Spawns the ADK Runner as an asyncio task and returns immediately.
+        Spawns the agent loop as an asyncio task and returns immediately.
         """
-        if not self._session_context or not self._runner:
+        if not self._session_context or not self._llm_client:
             raise SessionNotFoundError("No active session")
 
         task_id = params.get("taskId", "")
@@ -351,8 +335,14 @@ class SessionManager:
         self._current_max_steps = max_steps
         self._current_step_count = 0
 
-        # Spawn the runner as a background asyncio task.
-        # Assign both fields together so cancel_task() never sees a partial state.
+        # Reset cancellation event for new task
+        self._cancel_event.clear()
+
+        # Add user message to thread
+        if self._thread:
+            self._thread.add_user_message(prompt)
+
+        # Spawn the agent loop as a background asyncio task
         task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))
         self._current_task = task
         self._current_task_id = task_id
@@ -360,209 +350,130 @@ class SessionManager:
         return {"taskId": task_id, "status": "running"}
 
     async def _run_agent(self, prompt: str, task_id: str, max_steps: int = 50) -> None:
-        """Run the ADK agent loop for a single task with retry on transient errors."""
-        if not self._runner or not self._session_context:
+        """Run the agent loop for a single task."""
+        if (
+            not self._llm_client
+            or not self._session_context
+            or not self._thread
+            or not self._policy_enforcer
+            or not self._token_budget
+        ):
             return
 
-        # Clear tool messages for this task
-        self._task_tool_messages = []
-
-        max_retries = self._config.llm_max_retries
-        base_delay = self._config.llm_retry_base_delay
-        max_delay = self._config.llm_retry_max_delay
-
-        message = types.Content(
-            role="user",
-            parts=[types.Part(text=prompt)],
-        )
-
-        for attempt in range(max_retries + 1):
-            try:
-                assistant_text_parts: list[str] = []
-
-                async for event in self._runner.run_async(
-                    user_id=self._session_context.user_id,
-                    session_id=self._session_context.session_id,
-                    new_message=message if attempt == 0 else None,
-                ):
-                    # Forward streaming events
-                    if self._event_emitter and event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if hasattr(part, "text") and part.text:
-                                self._event_emitter.emit_text_chunk(task_id, part.text)
-                                assistant_text_parts.append(part.text)
-
-                            # Track tool calls for rich history
-                            if hasattr(part, "function_call") and part.function_call:
-                                fc = part.function_call
-                                self._task_tool_messages.append(
-                                    {
-                                        "type": "tool_call",
-                                        "toolName": getattr(fc, "name", ""),
-                                        "arguments": json.dumps(
-                                            getattr(fc, "args", {}), default=str
-                                        ),
-                                    }
-                                )
-
-                            # Track tool results for rich history
-                            if hasattr(part, "function_response") and part.function_response:
-                                fr = part.function_response
-                                output = json.dumps(getattr(fr, "response", {}), default=str)
-                                if len(output) > _MAX_TOOL_OUTPUT_LENGTH:
-                                    output = output[:_MAX_TOOL_OUTPUT_LENGTH] + "... [truncated]"
-                                self._task_tool_messages.append(
-                                    {
-                                        "type": "tool_result",
-                                        "toolName": getattr(fr, "name", ""),
-                                        "output": output,
-                                    }
-                                )
-
-                    # Record token usage and count steps from LLM responses
-                    if hasattr(event, "usage_metadata") and event.usage_metadata:
-                        if self._token_budget:
-                            usage = event.usage_metadata
-                            input_tokens = getattr(usage, "prompt_token_count", 0) or 0
-                            output_tokens = getattr(usage, "candidates_token_count", 0) or 0
-                            if input_tokens or output_tokens:
-                                self._token_budget.record_usage(input_tokens, output_tokens)
-                                self._persist_token_budget()
-
-                        # Step counting: each usage_metadata = one LLM call = one step
-                        self._current_step_count += 1
-                        step_count = self._current_step_count
-                        warning_threshold = math.floor(max_steps * 0.8)
-                        if step_count == warning_threshold and self._event_emitter:
-                            self._event_emitter.emit_step_limit_approaching(
-                                task_id, step_count, max_steps
-                            )
-                        if step_count >= max_steps:
-                            if self._event_emitter:
-                                self._event_emitter.emit_task_failed(
-                                    task_id,
-                                    reason=f"Step limit reached ({step_count}/{max_steps})",
-                                )
-                            logger.warning(
-                                "step_limit_reached",
-                                task_id=task_id,
-                                step_count=step_count,
-                                max_steps=max_steps,
-                            )
-                            return
-
-                # Upload session history (best-effort)
-                await self._upload_history(prompt, "".join(assistant_text_parts), task_id)
-
-                # Emit task_completed after the loop finishes normally
-                if self._event_emitter:
-                    self._event_emitter.emit_task_completed(task_id)
-
-                logger.info("task_completed", task_id=task_id)
-                return
-
-            except asyncio.CancelledError:
-                logger.info("task_cancelled", task_id=task_id)
-                return
-
-            except Exception as exc:
-                if is_transient_llm_error(exc) and attempt < max_retries:
-                    delay = min(base_delay * (2**attempt), max_delay)
-                    jitter = random.uniform(0, delay * 0.25)  # noqa: S311
-                    delay += jitter
-                    logger.warning(
-                        "llm_transient_error_retrying",
-                        task_id=task_id,
-                        attempt=attempt + 1,
-                        max_retries=max_retries,
-                        delay=delay,
-                        error=str(exc),
-                    )
-                    if self._event_emitter:
-                        self._event_emitter.emit_llm_retry(
-                            task_id=task_id,
-                            attempt=attempt + 1,
-                            max_retries=max_retries,
-                            error_message=str(exc),
-                            delay_seconds=delay,
-                        )
-                    await asyncio.sleep(delay)
-                    continue
-
-                # Unrecoverable — classify as session-level or task-level failure
-                if isinstance(exc, (PolicyExpiredError, CheckpointError)):
-                    logger.exception("session_failed", task_id=task_id)
-                    if self._event_emitter:
-                        self._event_emitter.emit_session_failed(str(exc))
-                else:
-                    logger.exception("task_failed", task_id=task_id)
-                    if self._event_emitter:
-                        self._event_emitter.emit_task_failed(task_id, reason=str(exc))
-                return
-
-    def _persist_token_budget(self) -> None:
-        """Persist current token usage into the ADK session checkpoint."""
-        if not self._token_budget or not self._session_context:
-            return
-
-        session_id = self._session_context.session_id
-        session = self._checkpoint_service._sessions.get(session_id)
-        if not session:
-            return
-
-        session.state["_token_input_used"] = self._token_budget.input_tokens_used
-        session.state["_token_output_used"] = self._token_budget.output_tokens_used
-        self._checkpoint_service._write_checkpoint(APP_NAME, session)
-
-    def _restore_token_budget_from_checkpoint(self) -> None:
-        """Restore token usage from checkpoint state if available."""
-        if not self._token_budget or not self._session_context:
-            return
-
-        session_id = self._session_context.session_id
-        session = self._checkpoint_service._sessions.get(session_id)
-        if not session:
-            return
-
-        input_used = session.state.get("_token_input_used")
-        output_used = session.state.get("_token_output_used")
-        if isinstance(input_used, int) and isinstance(output_used, int):
-            self._token_budget.restore_usage(input_used, output_used)
-            logger.info(
-                "token_budget_restored",
-                input_tokens=input_used,
-                output_tokens=output_used,
+        try:
+            # Build tool executor
+            tool_executor = ToolExecutor(
+                tool_router=self._tool_router,
+                policy_enforcer=self._policy_enforcer,
+                event_emitter=self._event_emitter,
+                approval_gate=self._approval_gate,
+                file_change_tracker=self._file_change_tracker,
+                workspace_client=self._workspace_client,
+                session_id=self._session_context.session_id,
+                workspace_id=self._session_context.workspace_id,
+                approval_timeout=float(self._config.approval_timeout_seconds),
             )
 
-    def _persist_session_messages(self) -> None:
-        """Persist cumulative session messages into the ADK session checkpoint."""
+            # Build compactor
+            compactor = DropOldestCompactor(recency_window=self._config.recency_window)
+
+            # Build and run agent loop
+            loop = AgentLoop(
+                llm_client=self._llm_client,
+                tool_executor=tool_executor,
+                thread=self._thread,
+                compactor=compactor,
+                policy_enforcer=self._policy_enforcer,
+                token_budget=self._token_budget,
+                event_emitter=self._event_emitter,
+                cancellation_event=self._cancel_event,
+                max_steps=max_steps,
+                max_context_tokens=self._config.max_context_tokens,
+            )
+
+            result = await loop.run(task_id)
+
+            # Track step count for get_session_state
+            self._current_step_count = result.step_count
+
+            # Persist token budget to checkpoint
+            self._persist_checkpoint()
+
+            # Upload session history (best-effort)
+            await self._upload_history(prompt, result.text, task_id)
+
+            # Emit task_completed for successful completion
+            if result.reason == "completed" and self._event_emitter:
+                self._event_emitter.emit_task_completed(task_id)
+                logger.info("task_completed", task_id=task_id)
+
+        except asyncio.CancelledError:
+            logger.info("task_cancelled", task_id=task_id)
+            return
+
+        except Exception as exc:
+            # Classify as session-level or task-level failure
+            if isinstance(exc, (PolicyExpiredError, CheckpointError)):
+                logger.exception("session_failed", task_id=task_id)
+                if self._event_emitter:
+                    self._event_emitter.emit_session_failed(str(exc))
+            else:
+                logger.exception("task_failed", task_id=task_id)
+                if self._event_emitter:
+                    self._event_emitter.emit_task_failed(task_id, reason=str(exc))
+
+    def _persist_checkpoint(self) -> None:
+        """Persist current state into our checkpoint format."""
         if not self._session_context:
             return
 
-        session_id = self._session_context.session_id
-        session = self._checkpoint_service._sessions.get(session_id)
-        if not session:
-            return
+        checkpoint = SessionCheckpoint(
+            session_id=self._session_context.session_id,
+            workspace_id=self._session_context.workspace_id,
+            tenant_id=self._session_context.tenant_id,
+            user_id=self._session_context.user_id,
+            token_input_used=(self._token_budget.input_tokens_used if self._token_budget else 0),
+            token_output_used=(self._token_budget.output_tokens_used if self._token_budget else 0),
+            session_messages=[msg.model_dump(mode="json") for msg in self._session_messages],
+            thread=self._thread.to_checkpoint() if self._thread else None,
+        )
+        self._checkpoint_manager.save(checkpoint)
 
-        session.state["_session_messages"] = [
-            msg.model_dump(mode="json") for msg in self._session_messages
-        ]
-        self._checkpoint_service._write_checkpoint(APP_NAME, session)
-
-    def _restore_session_messages_from_checkpoint(self) -> None:
-        """Restore cumulative session messages from checkpoint state if available."""
+    def _restore_from_checkpoint(self) -> None:
+        """Restore token budget and session messages from checkpoint if available."""
         if not self._session_context:
             return
 
-        session_id = self._session_context.session_id
-        session = self._checkpoint_service._sessions.get(session_id)
-        if not session:
+        checkpoint = self._checkpoint_manager.load(self._session_context.session_id)
+        if not checkpoint:
             return
 
-        raw = session.state.get("_session_messages")
-        if isinstance(raw, list):
+        # Restore token budget
+        if self._token_budget and (checkpoint.token_input_used or checkpoint.token_output_used):
+            self._token_budget.restore_usage(
+                checkpoint.token_input_used, checkpoint.token_output_used
+            )
+            logger.info(
+                "token_budget_restored",
+                input_tokens=checkpoint.token_input_used,
+                output_tokens=checkpoint.token_output_used,
+            )
+
+        # Restore thread (conversation history for the agent loop)
+        if checkpoint.thread and self._thread:
+            restored_thread = MessageThread.from_checkpoint(checkpoint.thread)
+            self._thread = restored_thread
+            logger.info(
+                "thread_restored_from_checkpoint",
+                message_count=restored_thread.message_count,
+            )
+
+        # Restore session messages
+        if checkpoint.session_messages and not self._session_messages:
             try:
-                self._session_messages = [ConversationMessage.model_validate(msg) for msg in raw]
+                self._session_messages = [
+                    ConversationMessage.model_validate(msg) for msg in checkpoint.session_messages
+                ]
                 logger.info(
                     "session_messages_restored",
                     count=len(self._session_messages),
@@ -594,18 +505,49 @@ class SessionManager:
                 ),
             ]
 
-            # Insert tool call/result messages
-            for i, tool_msg in enumerate(self._task_tool_messages):
-                task_messages.append(
-                    ConversationMessage(
-                        messageId=f"{task_id}-tool-{i}",
-                        sessionId=self._session_context.session_id,
-                        taskId=task_id,
-                        role="tool",
-                        content=json.dumps(tool_msg, default=str),
-                        timestamp=now,
-                    )
-                )
+            # Build tool messages from the thread (current task's messages)
+            if self._thread:
+                tool_msg_index = 0
+                for msg in self._thread.messages:
+                    if msg.get("role") == "tool":
+                        tool_output = msg.get("content", "")
+                        if len(tool_output) > _MAX_TOOL_OUTPUT_LENGTH:
+                            tool_output = tool_output[:_MAX_TOOL_OUTPUT_LENGTH] + "... [truncated]"
+                        tool_msg_data = {
+                            "type": "tool_result",
+                            "toolName": msg.get("name", ""),
+                            "output": tool_output,
+                        }
+                        task_messages.append(
+                            ConversationMessage(
+                                messageId=f"{task_id}-tool-{tool_msg_index}",
+                                sessionId=self._session_context.session_id,
+                                taskId=task_id,
+                                role="tool",
+                                content=json.dumps(tool_msg_data, default=str),
+                                timestamp=now,
+                            )
+                        )
+                        tool_msg_index += 1
+                    elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                        for tc in msg["tool_calls"]:
+                            fn = tc.get("function", {})
+                            tool_call_data = {
+                                "type": "tool_call",
+                                "toolName": fn.get("name", ""),
+                                "arguments": fn.get("arguments", "{}"),
+                            }
+                            task_messages.append(
+                                ConversationMessage(
+                                    messageId=f"{task_id}-tool-{tool_msg_index}",
+                                    sessionId=self._session_context.session_id,
+                                    taskId=task_id,
+                                    role="tool",
+                                    content=json.dumps(tool_call_data, default=str),
+                                    timestamp=now,
+                                )
+                            )
+                            tool_msg_index += 1
 
             task_messages.append(
                 ConversationMessage(
@@ -636,17 +578,24 @@ class SessionManager:
             )
 
             # Persist to checkpoint for crash recovery
-            self._persist_session_messages()
+            self._persist_checkpoint()
 
             logger.info("session_history_uploaded", task_id=task_id)
         except Exception:
             logger.warning("session_history_upload_failed", task_id=task_id, exc_info=True)
 
     async def cancel_task(self) -> dict[str, Any]:
-        """Cancel the currently running task (cooperative)."""
+        """Cancel the currently running task (cooperative).
+
+        Sets the cancellation event instead of task.cancel() for cooperative cancellation.
+        """
         if not self._current_task:
             raise NoActiveTaskError("No task is currently running")
 
+        # Signal the agent loop to stop
+        self._cancel_event.set()
+
+        # Also cancel the asyncio task as a fallback
         self._current_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._current_task
@@ -725,6 +674,7 @@ class SessionManager:
 
         # Cancel any running task
         if had_active_task and self._current_task:
+            self._cancel_event.set()
             self._current_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._current_task
@@ -733,8 +683,7 @@ class SessionManager:
         if self._session_context:
             session_id = self._session_context.session_id
 
-            # Only cancel session on backend if there was a running task at shutdown.
-            # Completed/failed sessions are left as-is so they can be resumed later.
+            # Only cancel session on backend if there was a running task at shutdown
             if had_active_task:
                 try:
                     await self._session_client.cancel_session(
@@ -745,26 +694,26 @@ class SessionManager:
                     logger.warning("shutdown_cancel_failed", exc_info=True)
 
             # Delete checkpoint (clean exit)
-            if self._session_context:
-                await self._checkpoint_service.delete_session(
-                    app_name=APP_NAME,
-                    user_id=self._session_context.user_id,
-                    session_id=session_id,
-                )
+            self._checkpoint_manager.delete(session_id)
 
         # Emit session_completed before cleanup
         if self._event_emitter:
             self._event_emitter.emit_session_completed()
+
+        # Close LLM client
+        if self._llm_client:
+            await self._llm_client.close()
 
         # Close HTTP clients
         await self._session_client.close()
         await self._workspace_client.close()
 
         self._session_context = None
-        self._runner = None
+        self._llm_client = None
         self._current_task = None
         self._approval_gate = None
         self._file_change_tracker = None
+        self._thread = None
 
         logger.info("session_shutdown", session_id=session_id)
         return {"status": "shutdown", "sessionId": session_id}

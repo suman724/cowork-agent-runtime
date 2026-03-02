@@ -2,7 +2,7 @@
 """
 Test a full chat flow: CreateSession -> StartTask -> stream events -> Shutdown.
 
-Also runs additional scenarios: LLM error simulation, task cancellation, token budget check.
+Each scenario runs in its own isolated runtime process to prevent cascading failures.
 
 Requires:
   - Backend services running (session :8000, policy :8001, workspace :8002)
@@ -88,8 +88,8 @@ def read_lines(proc, count, timeout_sec=15):
     return lines
 
 
-def read_all(proc, timeout_sec=60):
-    """Read all messages until quiet for 3 seconds or timeout."""
+def read_all(proc, timeout_sec=60, quiet_sec=5.0):
+    """Read all messages until quiet for quiet_sec seconds or timeout."""
     lines = []
     start = time.time()
     while time.time() - start < timeout_sec:
@@ -103,14 +103,38 @@ def read_all(proc, timeout_sec=60):
             if raw:
                 lines.append(json.loads(raw))
         elif len(lines) > 0:
-            # Got some data, wait a bit more to see if more comes
+            # Got some data, wait to see if more comes (slow LLMs need longer quiet time)
             time.sleep(0.5)
-            ready2, _, _ = select.select([proc.stdout], [], [], 2.0)
+            ready2, _, _ = select.select([proc.stdout], [], [], quiet_sec)
             if not ready2:
-                break  # quiet for 2.5s after last message — done
+                break  # quiet for quiet_sec after last message — done
             raw = proc.stdout.readline().decode().strip()
             if raw:
                 lines.append(json.loads(raw))
+    return lines
+
+
+def read_until_task_done(proc, timeout_sec=90):
+    """Read messages until a terminal event (task_completed/task_failed) or timeout."""
+    lines = []
+    terminal_events = {"task_completed", "task_failed"}
+    start = time.time()
+    while time.time() - start < timeout_sec:
+        remaining = timeout_sec - (time.time() - start)
+        poll_sec = min(remaining, 2.0)
+        if poll_sec <= 0:
+            break
+        ready, _, _ = select.select([proc.stdout], [], [], poll_sec)
+        if ready:
+            raw = proc.stdout.readline().decode().strip()
+            if raw:
+                msg = json.loads(raw)
+                lines.append(msg)
+                # Check if this is a terminal event
+                if "method" in msg:
+                    evt = msg.get("params", {}).get("eventType", "")
+                    if evt in terminal_events:
+                        break
     return lines
 
 
@@ -178,9 +202,9 @@ def dump_stderr(proc):
                 if any(kw in line.lower() for kw in ["error", "exception", "traceback", "failed"])
             ]
             if error_lines:
-                print("  STDERR highlights:")
+                print("    STDERR highlights:")
                 for line in error_lines[-10:]:
-                    print(f"    {line}")
+                    print(f"      {line}")
     except Exception:
         pass
 
@@ -196,12 +220,39 @@ def extract_events(messages):
     return events
 
 
+def run_isolated(scenario_fn):
+    """Run a scenario in its own isolated runtime process.
+
+    Spawns runtime, creates session, calls scenario_fn(proc, session_id),
+    shuts down. Returns (passed: bool, error: str | None).
+    """
+    proc = None
+    try:
+        proc = spawn_runtime()
+        session_id, _ = create_session(proc)
+        scenario_fn(proc, session_id)
+        try:
+            shutdown_runtime(proc)
+        except TestFailure:
+            kill_runtime(proc)
+        return True, None
+    except TestFailure as e:
+        if proc:
+            dump_stderr(proc)
+            kill_runtime(proc)
+        return False, str(e)
+    except Exception as e:
+        if proc:
+            dump_stderr(proc)
+            kill_runtime(proc)
+        return False, f"unexpected: {e}"
+
+
 # --- Scenarios ---
 
 
 def test_happy_path(proc, session_id):
     """Happy path: StartTask -> stream text -> task_completed."""
-    print("\n  Scenario: Happy Path")
     send(proc, {
         "jsonrpc": "2.0", "id": 2, "method": "StartTask",
         "params": {
@@ -238,12 +289,9 @@ def test_happy_path(proc, session_id):
     if "task_completed" not in events and "task_failed" not in events:
         raise TestFailure("Neither task_completed nor task_failed emitted")
 
-    return all_msgs
-
 
 def test_llm_error_simulation(proc, session_id):
     """LLM error simulation: send prompt, verify task outcome includes retry or failure events."""
-    print("\n  Scenario: LLM Error Simulation")
     send(proc, {
         "jsonrpc": "2.0", "id": 3, "method": "StartTask",
         "params": {
@@ -268,12 +316,9 @@ def test_llm_error_simulation(proc, session_id):
     if retry_count > 0:
         print(f"    LLM retries observed: {retry_count}")
 
-    return all_msgs
-
 
 def test_task_cancellation(proc, session_id):
     """Task cancellation: start a task, cancel it, verify cancelled status."""
-    print("\n  Scenario: Task Cancellation")
     send(proc, {
         "jsonrpc": "2.0", "id": 4, "method": "StartTask",
         "params": {
@@ -291,21 +336,23 @@ def test_task_cancellation(proc, session_id):
         "jsonrpc": "2.0", "id": 5, "method": "CancelTask", "params": {},
     })
 
-    # Read the CancelTask response
-    cancel_msgs = read_lines(proc, count=1, timeout_sec=10)
-
+    # Read messages until we find the CancelTask response (id=5)
+    # Events from the running task may arrive before the response.
     cancel_response = None
-    for msg in cancel_msgs:
-        if msg.get("id") == 5 and "result" in msg:
-            cancel_response = msg["result"]
-
-    if cancel_response is None:
-        # Also check if we got remaining events
-        remaining = read_all(proc, timeout_sec=5)
-        for msg in remaining:
-            if msg.get("id") == 5 and "result" in msg:
-                cancel_response = msg["result"]
-                break
+    start = time.time()
+    while time.time() - start < 30:
+        remaining = 30 - (time.time() - start)
+        poll_sec = min(remaining, 2.0)
+        if poll_sec <= 0:
+            break
+        ready, _, _ = select.select([proc.stdout], [], [], poll_sec)
+        if ready:
+            raw = proc.stdout.readline().decode().strip()
+            if raw:
+                msg = json.loads(raw)
+                if msg.get("id") == 5 and "result" in msg:
+                    cancel_response = msg["result"]
+                    break
 
     if cancel_response is None:
         raise TestFailure("No response received for CancelTask")
@@ -315,14 +362,9 @@ def test_task_cancellation(proc, session_id):
     if cancel_response.get("status") != "cancelled":
         raise TestFailure(f"Expected status='cancelled', got: {cancel_response.get('status')}")
 
-    # Drain any remaining events
-    read_all(proc, timeout_sec=3)
-
 
 def test_session_resume():
     """Session resume: create session, run task, shutdown, resume in new runtime."""
-    print("\n  Scenario: Session Resume")
-
     # Step 1: Create a session and run a task to completion
     proc1 = spawn_runtime()
     print(f"    Step 1: Created runtime (pid={proc1.pid})")
@@ -350,7 +392,7 @@ def test_session_resume():
 
         # Shutdown the first runtime
         shutdown_runtime(proc1, request_id=199)
-        print(f"    Step 1: First runtime shutdown OK")
+        print("    Step 1: First runtime shutdown OK")
     except Exception:
         kill_runtime(proc1)
         raise
@@ -368,7 +410,9 @@ def test_session_resume():
 
         messages = read_lines(proc2, count=2, timeout_sec=30)
         if len(messages) < 1:
-            raise TestFailure(f"Expected at least 1 message from ResumeSession, got {len(messages)}")
+            raise TestFailure(
+                f"Expected at least 1 message from ResumeSession, got {len(messages)}"
+            )
 
         resumed_session_id = None
         for msg in messages:
@@ -439,17 +483,31 @@ def test_session_resume():
 
 
 def test_token_budget_check(proc, session_id):
-    """Token budget check: verify GetSessionState returns tokenUsage."""
-    print("\n  Scenario: Token Budget Check")
+    """Token budget check: run a task then verify GetSessionState returns tokenUsage."""
+    # Run a task first so token budget has data
+    send(proc, {
+        "jsonrpc": "2.0", "id": 2, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-budget-1",
+            "prompt": "Say 'budget test' in one sentence.",
+            "taskOptions": {"maxSteps": 3},
+        },
+    })
+    msgs = read_until_task_done(proc, timeout_sec=60)
+    events = extract_events(msgs)
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"Pre-budget task did not complete: {events}")
+
     send(proc, {
         "jsonrpc": "2.0", "id": 6, "method": "GetSessionState", "params": {},
     })
 
-    msgs = read_lines(proc, count=1, timeout_sec=10)
-    if not msgs:
+    state_msgs = read_lines(proc, count=1, timeout_sec=10)
+    if not state_msgs:
         raise TestFailure("No response to GetSessionState")
 
-    response = msgs[0]
+    response = state_msgs[0]
     if "error" in response:
         raise TestFailure(f"GetSessionState error: {response['error']}")
 
@@ -460,7 +518,9 @@ def test_token_budget_check(proc, session_id):
     if token_usage is None:
         raise TestFailure("tokenUsage not present in GetSessionState response")
 
-    required_fields = ["inputTokens", "outputTokens", "totalTokens", "remaining", "maxSessionTokens"]
+    required_fields = [
+        "inputTokens", "outputTokens", "totalTokens", "remaining", "maxSessionTokens",
+    ]
     for field in required_fields:
         if field not in token_usage:
             raise TestFailure(f"tokenUsage missing field: {field}")
@@ -470,7 +530,246 @@ def test_token_budget_check(proc, session_id):
         if not isinstance(token_usage[field], (int, float)):
             raise TestFailure(f"tokenUsage.{field} is not numeric: {token_usage[field]}")
 
-    print(f"    Token usage: {token_usage['totalTokens']} used, {token_usage['remaining']} remaining")
+    print(
+        f"    Token usage: {token_usage['totalTokens']} used, "
+        f"{token_usage['remaining']} remaining"
+    )
+
+
+def test_tool_call_round_trip(proc, session_id):
+    """Tool call round-trip: prompt triggers ReadFile, verify tool execution pipeline."""
+    # Create a temp file for the LLM to read
+    test_file = "/tmp/test-chat/tool-test-file.txt"
+    os.makedirs("/tmp/test-chat", exist_ok=True)
+    with open(test_file, "w") as f:
+        f.write("TOOL_TEST_MARKER_12345\n")
+
+    send(proc, {
+        "jsonrpc": "2.0", "id": 10, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-tool-rt-1",
+            "prompt": (
+                f"Read the file at {test_file} using the ReadFile tool "
+                "and report its exact contents."
+            ),
+            "taskOptions": {"maxSteps": 5},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=90)
+    events = extract_events(all_msgs)
+    text_chunks = []
+    tool_events = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            if evt == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+            if evt in ("tool_requested", "tool_completed"):
+                tool_events.append(evt)
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:200]}{'...' if len(full_text) > 200 else ''}'")
+    print(f"    Events: {events}")
+    print(f"    Tool events: {tool_events}")
+
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"No terminal event. Events: {events}")
+
+    # Should have at least tool_completed (tool_requested may be absent if denied)
+    if "tool_completed" not in events:
+        raise TestFailure("No tool_completed event — tool was not dispatched")
+
+    # Verify the LLM actually called ReadFile and got the marker content back
+    # If policy denied the read, the LLM should still report it — we check for the tool round-trip
+    if "tool_requested" in events and "TOOL_TEST_MARKER_12345" not in full_text:
+        raise TestFailure(f"ReadFile succeeded but marker not in response: {full_text[:200]}")
+
+    # Clean up
+    try:
+        os.remove(test_file)
+    except OSError:
+        pass
+
+
+def test_multi_step_task(proc, session_id):
+    """Multi-step task: prompt requiring multiple LLM turns (tool calls + final text)."""
+    # Create two files for the LLM to read in sequence
+    os.makedirs("/tmp/test-chat", exist_ok=True)
+    with open("/tmp/test-chat/file-a.txt", "w") as f:
+        f.write("CONTENT_FILE_A\n")
+    with open("/tmp/test-chat/file-b.txt", "w") as f:
+        f.write("CONTENT_FILE_B\n")
+
+    send(proc, {
+        "jsonrpc": "2.0", "id": 11, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-multi-1",
+            "prompt": (
+                "Read these two files using ReadFile and report their contents:\n"
+                "1. /tmp/test-chat/file-a.txt\n"
+                "2. /tmp/test-chat/file-b.txt\n"
+                "Report the exact content of each file."
+            ),
+            "taskOptions": {"maxSteps": 10},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=120)
+    events = extract_events(all_msgs)
+    text_chunks = []
+    step_started_count = events.count("step_started")
+    step_completed_count = events.count("step_completed")
+    tool_completed_count = events.count("tool_completed")
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            if params.get("eventType") == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:200]}{'...' if len(full_text) > 200 else ''}'")
+    print(f"    Steps: {step_started_count} started, {step_completed_count} completed")
+    print(f"    Tool completions: {tool_completed_count}")
+    print(f"    Events: {events}")
+
+    # Should have taken multiple steps (at least 2: tool call + response)
+    if step_started_count < 2:
+        raise TestFailure(
+            f"Expected at least 2 steps for multi-step task, got {step_started_count}"
+        )
+
+    # Verify the tool was dispatched at least once (even if denied by policy)
+    if tool_completed_count < 1:
+        raise TestFailure(
+            f"Expected at least 1 tool completion, got {tool_completed_count}"
+        )
+
+    # Clean up
+    for f in ("/tmp/test-chat/file-a.txt", "/tmp/test-chat/file-b.txt"):
+        try:
+            os.remove(f)
+        except OSError:
+            pass
+
+
+def test_step_event_structure(proc, session_id):
+    """Step event structure: verify step_started/step_completed have correct payload fields."""
+    send(proc, {
+        "jsonrpc": "2.0", "id": 12, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-step-evt-1",
+            "prompt": "Say 'checking events' in one sentence. Do not use tools.",
+            "taskOptions": {"maxSteps": 5},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=60)
+    events = extract_events(all_msgs)
+
+    step_started_payloads = []
+    step_completed_payloads = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            payload = params.get("payload", {})
+            if evt == "step_started":
+                step_started_payloads.append(payload)
+            elif evt == "step_completed":
+                step_completed_payloads.append(payload)
+
+    print(f"    Events: {events}")
+    print(f"    step_started payloads: {step_started_payloads}")
+    print(f"    step_completed payloads: {step_completed_payloads}")
+
+    if "task_completed" not in events:
+        raise TestFailure(f"Task did not complete. Events: {events}")
+
+    if not step_started_payloads:
+        raise TestFailure("No step_started events received")
+    if not step_completed_payloads:
+        raise TestFailure("No step_completed events received")
+
+    # Verify step_started has step number
+    for payload in step_started_payloads:
+        if "step" not in payload:
+            raise TestFailure(f"step_started payload missing 'step' field: {payload}")
+        if not isinstance(payload["step"], int) or payload["step"] < 1:
+            raise TestFailure(f"step_started 'step' should be positive int: {payload}")
+
+    # Verify step_completed has step number
+    for payload in step_completed_payloads:
+        if "step" not in payload:
+            raise TestFailure(f"step_completed payload missing 'step' field: {payload}")
+
+    # Verify ordering: step numbers should be sequential
+    started_steps = [p["step"] for p in step_started_payloads]
+    completed_steps = [p["step"] for p in step_completed_payloads]
+    print(f"    Started steps: {started_steps}, Completed steps: {completed_steps}")
+
+    if started_steps != sorted(started_steps):
+        raise TestFailure(f"step_started events not sequential: {started_steps}")
+    if completed_steps != sorted(completed_steps):
+        raise TestFailure(f"step_completed events not sequential: {completed_steps}")
+
+
+def test_conversation_context_preserved(proc, session_id):
+    """Conversation context: verify LLM has access to prior task history within the session."""
+    # Task 1: Tell the LLM a specific fact
+    send(proc, {
+        "jsonrpc": "2.0", "id": 13, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-ctx-1",
+            "prompt": "Remember this code: ALPHA-7742. Just acknowledge it.",
+            "taskOptions": {"maxSteps": 3},
+        },
+    })
+    msgs1 = read_until_task_done(proc, timeout_sec=60)
+    events1 = extract_events(msgs1)
+    if "task_completed" not in events1:
+        raise TestFailure(f"Context task 1 did not complete: {events1}")
+    print("    Task 1: Told LLM the code ALPHA-7742")
+
+    # Task 2: Ask the LLM to recall the fact
+    send(proc, {
+        "jsonrpc": "2.0", "id": 14, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-ctx-2",
+            "prompt": "What was the code I told you earlier? Reply with just the code.",
+            "taskOptions": {"maxSteps": 3},
+        },
+    })
+    msgs2 = read_until_task_done(proc, timeout_sec=60)
+    events2 = extract_events(msgs2)
+    text_chunks = []
+    for msg in msgs2:
+        if "method" in msg:
+            params = msg.get("params", {})
+            if params.get("eventType") == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+
+    full_text = "".join(text_chunks)
+    print(f"    Task 2 response: '{full_text[:150]}'")
+    print(f"    Events: {events2}")
+
+    if "task_completed" not in events2:
+        raise TestFailure(f"Context task 2 did not complete: {events2}")
+
+    if "ALPHA-7742" not in full_text:
+        raise TestFailure(
+            f"LLM did not recall the code — conversation context may not be preserved. "
+            f"Response: {full_text[:200]}"
+        )
 
 
 # --- Main ---
@@ -487,91 +786,53 @@ def main():
         print(f"FAIL: Python venv not found at {PYTHON}. Run: make install")
         sys.exit(1)
 
+    # Each scenario runs in its own isolated runtime process.
+    # No shared state — no cascading failures.
     scenarios = [
         ("Happy Path", test_happy_path),
+        ("Step Event Structure", test_step_event_structure),
         ("LLM Error Simulation", test_llm_error_simulation),
-        ("Task Cancellation", test_task_cancellation),
         ("Token Budget Check", test_token_budget_check),
+        ("Tool Call Round-Trip", test_tool_call_round_trip),
+        ("Multi-Step Task", test_multi_step_task),
+        ("Task Cancellation", test_task_cancellation),
+        ("Conversation Context Preserved", test_conversation_context_preserved),
     ]
 
-    # Step 1: Spawn
-    print("\n1. Spawning agent-runtime...")
-    try:
-        proc = spawn_runtime()
-    except TestFailure as e:
-        print(f"FAIL: {e}")
-        sys.exit(1)
-    print(f"  OK: Running (pid={proc.pid})")
-
-    # Step 2: CreateSession
-    print("\n2. CreateSession...")
-    try:
-        session_id, session_msgs = create_session(proc)
-    except TestFailure as e:
-        print(f"FAIL: {e}")
-        kill_runtime(proc)
-        dump_stderr(proc)
-        sys.exit(1)
-
-    for msg in session_msgs:
-        if "method" in msg:
-            evt = msg.get("params", {}).get("eventType", "")
-            print(f"  NOTIFICATION: {msg['method']} -> {evt}")
-        else:
-            result = msg.get("result", {})
-            print(f"  RESPONSE: sessionId={result.get('sessionId', '')[:12]}... status={result.get('status')}")
-    print(f"  OK: Session created (id={session_id[:12]}...)")
-
-    # Step 3: Run scenarios
-    print("\n3. Running scenarios...")
     passed = 0
     failed = 0
     results = []
 
     for name, test_fn in scenarios:
-        try:
-            test_fn(proc, session_id)
+        print(f"\n  [{len(results) + 1}/{len(scenarios) + 1}] {name}...")
+        ok, err = run_isolated(test_fn)
+        if ok:
             print(f"    PASS: {name}")
             passed += 1
-            results.append((name, True, None))
-        except TestFailure as e:
-            print(f"    FAIL: {name} — {e}")
+        else:
+            print(f"    FAIL: {name} — {err}")
             failed += 1
-            results.append((name, False, str(e)))
-        except Exception as e:
-            print(f"    FAIL: {name} — unexpected error: {e}")
-            failed += 1
-            results.append((name, False, str(e)))
+        results.append((name, ok, err))
 
-    # Step 4: Shutdown
-    print("\n4. Shutdown...")
-    try:
-        shutdown_runtime(proc)
-        print(f"  OK: Exit code={proc.returncode}")
-    except TestFailure as e:
-        print(f"  WARN: Shutdown issue: {e}")
-        kill_runtime(proc)
-
-    dump_stderr(proc)
-
-    # Step 5: Session Resume (requires a fresh runtime process)
-    print("\n5. Session Resume...")
+    # Session Resume — manages its own runtime processes
+    name = "Session Resume"
+    print(f"\n  [{len(results) + 1}/{len(scenarios) + 1}] {name}...")
     try:
         test_session_resume()
-        print(f"    PASS: Session Resume")
+        print(f"    PASS: {name}")
         passed += 1
-        results.append(("Session Resume", True, None))
+        results.append((name, True, None))
     except TestFailure as e:
-        print(f"    FAIL: Session Resume — {e}")
+        print(f"    FAIL: {name} — {e}")
         failed += 1
-        results.append(("Session Resume", False, str(e)))
+        results.append((name, False, str(e)))
     except Exception as e:
-        print(f"    FAIL: Session Resume — unexpected error: {e}")
+        print(f"    FAIL: {name} — unexpected: {e}")
         failed += 1
-        results.append(("Session Resume", False, str(e)))
+        results.append((name, False, str(e)))
 
     # Summary
-    total = len(scenarios) + 1  # +1 for session resume
+    total = passed + failed
     print("\n" + "=" * 60)
     print(f"RESULTS: {passed} passed, {failed} failed, {total} total")
     print("=" * 60)

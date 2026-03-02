@@ -58,6 +58,7 @@ class AgentHostConfig:
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0
     llm_retry_max_delay: float = 30.0
+    recency_window: int = 20
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -99,4 +100,5 @@ class AgentHostConfig:
             llm_max_retries=int(os.environ.get("LLM_MAX_RETRIES", "3")),
             llm_retry_base_delay=float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0")),
             llm_retry_max_delay=float(os.environ.get("LLM_RETRY_MAX_DELAY", "30.0")),
+            recency_window=int(os.environ.get("RECENCY_WINDOW", "20")),
         )
