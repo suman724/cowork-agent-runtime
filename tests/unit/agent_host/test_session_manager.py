@@ -965,11 +965,13 @@ class TestSessionManagerMaxSteps:
         manager._runner = MagicMock()
         manager._runner.run_async = MagicMock(return_value=_async_iter([]))
 
-        result = await manager.start_task({
-            "taskId": "task-1",
-            "prompt": "hello",
-            "taskOptions": {"maxSteps": 10},
-        })
+        result = await manager.start_task(
+            {
+                "taskId": "task-1",
+                "prompt": "hello",
+                "taskOptions": {"maxSteps": 10},
+            }
+        )
 
         assert result["status"] == "running"
         assert manager._current_max_steps == 10
@@ -1017,22 +1019,26 @@ class TestSessionManagerMaxSteps:
         manager._runner.run_async = MagicMock(return_value=_async_iter([]))
 
         # Over 200
-        await manager.start_task({
-            "taskId": "task-1",
-            "prompt": "hello",
-            "taskOptions": {"maxSteps": 999},
-        })
+        await manager.start_task(
+            {
+                "taskId": "task-1",
+                "prompt": "hello",
+                "taskOptions": {"maxSteps": 999},
+            }
+        )
         assert manager._current_max_steps == 200
         manager._current_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await manager._current_task
 
         # Under 1
-        await manager.start_task({
-            "taskId": "task-2",
-            "prompt": "hello",
-            "taskOptions": {"maxSteps": -5},
-        })
+        await manager.start_task(
+            {
+                "taskId": "task-2",
+                "prompt": "hello",
+                "taskOptions": {"maxSteps": -5},
+            }
+        )
         assert manager._current_max_steps == 1
         manager._current_task.cancel()
         with pytest.raises(asyncio.CancelledError):
@@ -1106,9 +1112,7 @@ class TestSessionManagerMaxSteps:
         await manager._run_agent("hello", "task-1", max_steps=10)
 
         # Step 8 = floor(10*0.8) should trigger warning
-        manager._event_emitter.emit_step_limit_approaching.assert_called_once_with(
-            "task-1", 8, 10
-        )
+        manager._event_emitter.emit_step_limit_approaching.assert_called_once_with("task-1", 8, 10)
         # Step 10 = limit reached
         manager._event_emitter.emit_task_failed.assert_called_once()
 

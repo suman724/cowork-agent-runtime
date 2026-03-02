@@ -91,9 +91,7 @@ def make_before_model_callback(
     ) -> LlmResponse | None:
         # Truncate context window if too large
         if llm_request.contents:
-            llm_request.contents = truncate_contents(
-                llm_request.contents, max_context_tokens
-            )
+            llm_request.contents = truncate_contents(llm_request.contents, max_context_tokens)
 
         # Check policy (LLM.Call capability + not expired)
         result = policy_enforcer.check_llm_call()

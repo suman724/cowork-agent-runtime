@@ -469,9 +469,7 @@ class SessionManager:
         raw = session.state.get("_session_messages")
         if isinstance(raw, list):
             try:
-                self._session_messages = [
-                    ConversationMessage.model_validate(msg) for msg in raw
-                ]
+                self._session_messages = [ConversationMessage.model_validate(msg) for msg in raw]
                 logger.info(
                     "session_messages_restored",
                     count=len(self._session_messages),
