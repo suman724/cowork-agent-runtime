@@ -1,7 +1,15 @@
-"""SkillLoader — loads skills from built-in, workspace YAML, and policy bundle."""
+"""SkillLoader — loads skills from built-in Python and user YAML files.
+
+Sources (in priority order):
+1. Built-in skills (Python, always available)
+2. User skills (~/.cowork/skills/*.yaml, user-level customization)
+
+Policy bundle skills are accepted but not yet wired (Phase 3+).
+"""
 
 from __future__ import annotations
 
+import platform
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +18,19 @@ import structlog
 from agent_host.skills.models import SkillDefinition
 
 logger = structlog.get_logger()
+
+
+def _default_user_skills_dir() -> Path:
+    """Return the platform-specific user skills directory."""
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / ".cowork" / "skills"
+    elif system == "Windows":
+        app_data = Path.home() / "AppData" / "Roaming"
+        return app_data / "cowork" / "skills"
+    else:  # Linux and others
+        return Path.home() / ".cowork" / "skills"
+
 
 # Built-in skill definitions
 _BUILTIN_SKILLS: list[SkillDefinition] = [
@@ -82,16 +103,19 @@ class SkillLoader:
 
     Sources (in priority order):
     1. Built-in skills (Python, always available)
-    2. Workspace skills (YAML files in {workspace_dir}/.cowork/skills/)
-    3. Policy bundle skills (from policyBundle.skills field)
+    2. User skills (YAML files in ~/.cowork/skills/)
+    3. Policy bundle skills (Phase 3+, not yet wired)
     """
 
     def __init__(
         self,
-        workspace_dir: str | None = None,
+        user_skills_dir: str | None = None,
         policy_skills: list[dict[str, Any]] | None = None,
     ) -> None:
-        self._workspace_dir = workspace_dir
+        if user_skills_dir is not None:
+            self._user_skills_dir = Path(user_skills_dir)
+        else:
+            self._user_skills_dir = _default_user_skills_dir()
         self._policy_skills = policy_skills or []
 
     def load_all(self) -> list[SkillDefinition]:
@@ -102,31 +126,34 @@ class SkillLoader:
         for skill in _BUILTIN_SKILLS:
             skills[skill.name] = skill
 
-        # 2. Workspace skills (override built-in if same name)
-        for skill in self._load_workspace_skills():
+        # 2. User skills (override built-in if same name)
+        for skill in self._load_user_skills():
             skills[skill.name] = skill
 
-        # 3. Policy skills (override workspace if same name)
+        # 3. Policy skills — Phase 3+ (override user if same name)
         for skill in self._load_policy_skills():
             skills[skill.name] = skill
 
         return list(skills.values())
 
-    def _load_workspace_skills(self) -> list[SkillDefinition]:
-        """Load skills from workspace YAML files."""
-        if not self._workspace_dir:
-            return []
-
-        skills_dir = Path(self._workspace_dir) / ".cowork" / "skills"
-        if not skills_dir.is_dir():
+    def _load_user_skills(self) -> list[SkillDefinition]:
+        """Load skills from user YAML files (~/.cowork/skills/)."""
+        if not self._user_skills_dir.is_dir():
             return []
 
         skills: list[SkillDefinition] = []
-        for yaml_file in sorted(skills_dir.glob("*.yaml")) + sorted(skills_dir.glob("*.yml")):
+        for yaml_file in sorted(self._user_skills_dir.glob("*.yaml")) + sorted(
+            self._user_skills_dir.glob("*.yml")
+        ):
             try:
                 skill = self._parse_yaml_skill(yaml_file)
                 if skill:
                     skills.append(skill)
+                    logger.info(
+                        "user_skill_loaded",
+                        name=skill.name,
+                        path=str(yaml_file),
+                    )
             except Exception:
                 logger.warning(
                     "skill_load_failed",
@@ -136,7 +163,7 @@ class SkillLoader:
         return skills
 
     def _load_policy_skills(self) -> list[SkillDefinition]:
-        """Load skills from policy bundle."""
+        """Load skills from policy bundle (Phase 3+)."""
         skills: list[SkillDefinition] = []
         for skill_data in self._policy_skills:
             try:

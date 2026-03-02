@@ -1,4 +1,4 @@
-"""Tests for SkillLoader — built-in, workspace YAML, and policy bundle loading."""
+"""Tests for SkillLoader — built-in and user YAML skill loading."""
 
 from __future__ import annotations
 
@@ -39,10 +39,10 @@ class TestBuiltinSkills:
         assert "error_description" in debug.input_schema.get("properties", {})
 
 
-class TestWorkspaceSkills:
-    def test_load_workspace_yaml(self, tmp_path: Path) -> None:
-        """Should load skills from workspace YAML files."""
-        skills_dir = tmp_path / ".cowork" / "skills"
+class TestUserSkills:
+    def test_load_user_yaml(self, tmp_path: Path) -> None:
+        """Should load skills from user YAML files."""
+        skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
 
         yaml_content = """\
@@ -62,7 +62,7 @@ max_steps: 20
 """
         (skills_dir / "deploy.yaml").write_text(yaml_content)
 
-        loader = SkillLoader(workspace_dir=str(tmp_path))
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
         skills = loader.load_all()
         by_name = {s.name: s for s in skills}
 
@@ -73,9 +73,9 @@ max_steps: 20
         assert deploy.max_steps == 20
         assert deploy.system_prompt_additions == "You are deploying to staging."
 
-    def test_workspace_overrides_builtin(self, tmp_path: Path) -> None:
-        """Workspace skill with same name should override built-in."""
-        skills_dir = tmp_path / ".cowork" / "skills"
+    def test_user_overrides_builtin(self, tmp_path: Path) -> None:
+        """User skill with same name should override built-in."""
+        skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
 
         yaml_content = """\
@@ -85,27 +85,21 @@ max_steps: 25
 """
         (skills_dir / "search.yaml").write_text(yaml_content)
 
-        loader = SkillLoader(workspace_dir=str(tmp_path))
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
         skills = {s.name: s for s in loader.load_all()}
 
         assert skills["search_codebase"].description == "Custom search override."
         assert skills["search_codebase"].max_steps == 25
 
-    def test_no_workspace_dir(self) -> None:
-        """No workspace dir should return only built-in skills."""
-        loader = SkillLoader(workspace_dir=None)
+    def test_no_user_skills_dir(self, tmp_path: Path) -> None:
+        """Non-existent user skills dir should return only built-in skills."""
+        loader = SkillLoader(user_skills_dir=str(tmp_path / "nonexistent"))
         skills = loader.load_all()
         assert len(skills) == 3  # only built-ins
 
-    def test_missing_skills_directory(self, tmp_path: Path) -> None:
-        """Non-existent skills dir should return only built-in skills."""
-        loader = SkillLoader(workspace_dir=str(tmp_path))
-        skills = loader.load_all()
-        assert len(skills) == 3
-
     def test_invalid_yaml_skipped(self, tmp_path: Path) -> None:
         """Invalid YAML files should be skipped without crashing."""
-        skills_dir = tmp_path / ".cowork" / "skills"
+        skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
 
         # Invalid YAML (no name field)
@@ -118,14 +112,14 @@ description: A valid skill.
 """
         (skills_dir / "good.yaml").write_text(yaml_content)
 
-        loader = SkillLoader(workspace_dir=str(tmp_path))
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
         skills = loader.load_all()
         names = {s.name for s in skills}
         assert "valid_skill" in names
 
     def test_yml_extension(self, tmp_path: Path) -> None:
         """Should load .yml files as well as .yaml."""
-        skills_dir = tmp_path / ".cowork" / "skills"
+        skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
 
         yaml_content = """\
@@ -134,7 +128,7 @@ description: Loaded from .yml file.
 """
         (skills_dir / "test.yml").write_text(yaml_content)
 
-        loader = SkillLoader(workspace_dir=str(tmp_path))
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
         skills = {s.name: s for s in loader.load_all()}
         assert "yml_skill" in skills
 
@@ -166,14 +160,14 @@ class TestPolicySkills:
         assert scan.tool_subset == ["RunCommand"]
         assert scan.max_steps == 10
 
-    def test_policy_overrides_workspace(self, tmp_path: Path) -> None:
-        """Policy skill should override workspace skill with same name."""
-        skills_dir = tmp_path / ".cowork" / "skills"
+    def test_policy_overrides_user(self, tmp_path: Path) -> None:
+        """Policy skill should override user skill with same name."""
+        skills_dir = tmp_path / "skills"
         skills_dir.mkdir(parents=True)
 
         yaml_content = """\
 name: shared_skill
-description: From workspace.
+description: From user.
 max_steps: 10
 """
         (skills_dir / "shared.yaml").write_text(yaml_content)
@@ -186,7 +180,7 @@ max_steps: 10
             }
         ]
 
-        loader = SkillLoader(workspace_dir=str(tmp_path), policy_skills=policy_skills)
+        loader = SkillLoader(user_skills_dir=str(skills_dir), policy_skills=policy_skills)
         skills = {s.name: s for s in loader.load_all()}
 
         assert skills["shared_skill"].description == "From policy."

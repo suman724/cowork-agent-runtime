@@ -325,7 +325,7 @@ class SessionManager:
         self._thread = MessageThread(system_prompt=prompt_builder.build_static_prompt())
 
         # Load skills
-        skill_loader = SkillLoader(workspace_dir=None)
+        skill_loader = SkillLoader()
         self._skills = skill_loader.load_all()
         if self._skills:
             logger.info("skills_loaded", count=len(self._skills))
