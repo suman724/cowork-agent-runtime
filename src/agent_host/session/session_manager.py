@@ -215,6 +215,9 @@ class SessionManager:
                 },
             )
 
+        # Reset cumulative history for the new session
+        self._session_messages = []
+
         # Restore token budget and session messages from checkpoint (crash recovery)
         self._restore_token_budget_from_checkpoint()
         self._restore_session_messages_from_checkpoint()
@@ -225,6 +228,96 @@ class SessionManager:
 
         logger.info(
             "session_created",
+            session_id=response.sessionId,
+            workspace_id=response.workspaceId,
+        )
+
+        return {
+            "sessionId": response.sessionId,
+            "workspaceId": response.workspaceId,
+            "logDir": self._config.log_dir,
+            "status": "ready",
+        }
+
+    async def resume_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Resume an existing session — reuses the same session ID.
+
+        Calls the Session Service's resume endpoint, re-initializes the ADK agent,
+        and restores cumulative session history from the Workspace Service.
+        """
+        session_id = params.get("sessionId", "")
+        if not session_id:
+            raise SessionNotFoundError("sessionId is required for ResumeSession")
+
+        # Resume via Session Service (refreshes policy, extends expiry)
+        response = await self._session_client.resume_session(session_id)
+
+        # Store session context
+        self._session_context = SessionContext(
+            session_id=response.sessionId,
+            workspace_id=response.workspaceId,
+            tenant_id="",  # Not returned by resume; not needed for agent loop
+            user_id="",
+        )
+
+        # Create EventEmitter
+        from agent_host.events.event_emitter import EventEmitter
+
+        self._event_emitter = EventEmitter(self._session_context, self._transport)
+
+        # Initialize ADK agent with refreshed policy bundle
+        if response.policyBundle:
+            canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
+            components = create_agent(
+                config=self._config,
+                policy_bundle=canonical_bundle,
+                tool_router=self._tool_router,
+                event_emitter=self._event_emitter,
+                workspace_client=self._workspace_client,
+                session_id=response.sessionId,
+                workspace_id=response.workspaceId,
+            )
+            self._token_budget = components.token_budget
+            self._approval_gate = components.approval_gate
+            self._file_change_tracker = components.file_change_tracker
+
+            self._runner = Runner(
+                agent=components.agent,
+                app_name=APP_NAME,
+                session_service=self._checkpoint_service,
+            )
+
+            await self._checkpoint_service.create_session(
+                app_name=APP_NAME,
+                user_id="",
+                session_id=response.sessionId,
+                state={
+                    "workspace_id": response.workspaceId,
+                },
+            )
+
+        # Restore cumulative history from Workspace Service
+        self._session_messages = []
+        prior_messages = await self._workspace_client.get_session_history(
+            workspace_id=response.workspaceId,
+            session_id=response.sessionId,
+        )
+        if prior_messages:
+            self._session_messages = prior_messages
+            logger.info(
+                "session_history_restored",
+                session_id=response.sessionId,
+                message_count=len(prior_messages),
+            )
+
+        # Restore token budget from checkpoint (if available)
+        self._restore_token_budget_from_checkpoint()
+
+        if self._event_emitter:
+            self._event_emitter.emit_session_created()
+
+        logger.info(
+            "session_resumed",
             session_id=response.sessionId,
             workspace_id=response.workspaceId,
         )
@@ -627,8 +720,11 @@ class SessionManager:
 
     async def shutdown(self) -> dict[str, Any]:
         """Clean session teardown."""
+        # Check for active task *before* cancelling it
+        had_active_task = bool(self._current_task and not self._current_task.done())
+
         # Cancel any running task
-        if self._current_task and not self._current_task.done():
+        if had_active_task and self._current_task:
             self._current_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._current_task
@@ -637,14 +733,16 @@ class SessionManager:
         if self._session_context:
             session_id = self._session_context.session_id
 
-            # Cancel session on backend (best-effort)
-            try:
-                await self._session_client.cancel_session(
-                    session_id,
-                    SessionCancelRequest(reason="shutdown"),
-                )
-            except Exception:
-                logger.warning("shutdown_cancel_failed", exc_info=True)
+            # Only cancel session on backend if there was a running task at shutdown.
+            # Completed/failed sessions are left as-is so they can be resumed later.
+            if had_active_task:
+                try:
+                    await self._session_client.cancel_session(
+                        session_id,
+                        SessionCancelRequest(reason="shutdown"),
+                    )
+                except Exception:
+                    logger.warning("shutdown_cancel_failed", exc_info=True)
 
             # Delete checkpoint (clean exit)
             if self._session_context:

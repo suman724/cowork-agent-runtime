@@ -118,3 +118,27 @@ class WorkspaceClient:
                 exc_info=True,
             )
             return None
+
+    async def get_session_history(
+        self,
+        workspace_id: str,
+        session_id: str,
+    ) -> list[ConversationMessage]:
+        """Download session history from the Workspace Service. Returns empty list on failure."""
+        from cowork_platform.conversation_message import ConversationMessage as ConvMsg
+
+        try:
+            response = await self._client.get(
+                f"/workspaces/{workspace_id}/sessions/{session_id}/history",
+            )
+            await raise_for_status(response)
+            data: list[dict[str, object]] = response.json()
+            return [ConvMsg.model_validate(msg) for msg in data]
+        except Exception:
+            logger.warning(
+                "workspace_client.get_session_history_failed",
+                workspace_id=workspace_id,
+                session_id=session_id,
+                exc_info=True,
+            )
+            return []

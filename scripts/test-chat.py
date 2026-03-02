@@ -319,6 +319,125 @@ def test_task_cancellation(proc, session_id):
     read_all(proc, timeout_sec=3)
 
 
+def test_session_resume():
+    """Session resume: create session, run task, shutdown, resume in new runtime."""
+    print("\n  Scenario: Session Resume")
+
+    # Step 1: Create a session and run a task to completion
+    proc1 = spawn_runtime()
+    print(f"    Step 1: Created runtime (pid={proc1.pid})")
+
+    try:
+        session_id, _ = create_session(proc1, request_id=100)
+        print(f"    Step 1: Session created: {session_id[:12]}...")
+
+        # Run a quick task to completion
+        send(proc1, {
+            "jsonrpc": "2.0", "id": 101, "method": "StartTask",
+            "params": {
+                "sessionId": session_id,
+                "taskId": "task-pre-resume",
+                "prompt": "Say 'first task done' in one sentence.",
+                "taskOptions": {"maxSteps": 5},
+            },
+        })
+        pre_msgs = read_all(proc1, timeout_sec=60)
+        pre_events = extract_events(pre_msgs)
+        print(f"    Step 1: Pre-resume task events: {pre_events}")
+
+        if "task_completed" not in pre_events:
+            raise TestFailure(f"Pre-resume task did not complete: {pre_events}")
+
+        # Shutdown the first runtime
+        shutdown_runtime(proc1, request_id=199)
+        print(f"    Step 1: First runtime shutdown OK")
+    except Exception:
+        kill_runtime(proc1)
+        raise
+
+    # Step 2: Spawn a fresh runtime and resume the session
+    proc2 = spawn_runtime()
+    print(f"    Step 2: Spawned fresh runtime (pid={proc2.pid})")
+
+    try:
+        # Resume the session instead of creating a new one
+        send(proc2, {
+            "jsonrpc": "2.0", "id": 1, "method": "ResumeSession",
+            "params": {"sessionId": session_id},
+        })
+
+        messages = read_lines(proc2, count=2, timeout_sec=30)
+        if len(messages) < 1:
+            raise TestFailure(f"Expected at least 1 message from ResumeSession, got {len(messages)}")
+
+        resumed_session_id = None
+        for msg in messages:
+            print(f"    ResumeSession msg: {json.dumps(msg)[:200]}")
+            if "error" in msg:
+                raise TestFailure(f"ResumeSession error: {msg['error']}")
+            if "result" in msg:
+                result = msg["result"]
+                resumed_session_id = result.get("sessionId")
+                if result.get("status") != "ready":
+                    raise TestFailure(
+                        f"Resume status: {result.get('status')}, expected 'ready'"
+                    )
+
+        if not resumed_session_id:
+            raise TestFailure(
+                f"No sessionId in ResumeSession response. Messages: "
+                f"{json.dumps(messages)[:500]}"
+            )
+
+        if resumed_session_id != session_id:
+            raise TestFailure(
+                f"Session ID mismatch: sent={session_id}, got={resumed_session_id}"
+            )
+
+        print(f"    Resumed session: {resumed_session_id[:12]}...")
+
+        # Run a task on the resumed session
+        send(proc2, {
+            "jsonrpc": "2.0", "id": 2, "method": "StartTask",
+            "params": {
+                "sessionId": resumed_session_id,
+                "taskId": "task-resumed-1",
+                "prompt": "Say 'Session resumed successfully' in one sentence.",
+                "taskOptions": {"maxSteps": 5},
+            },
+        })
+
+        all_msgs = read_all(proc2, timeout_sec=60)
+        events = extract_events(all_msgs)
+        text_chunks = []
+
+        for msg in all_msgs:
+            if "method" in msg:
+                params = msg.get("params", {})
+                evt = params.get("eventType", "")
+                if evt == "text_chunk":
+                    text = params.get("payload", {}).get("text", "")
+                    text_chunks.append(text)
+
+        full_text = "".join(text_chunks)
+        print(f"    Assistant: '{full_text[:100]}{'...' if len(full_text) > 100 else ''}'")
+        print(f"    Events: {events}")
+
+        if not full_text:
+            raise TestFailure("No text_chunk events after resume — LLM may have failed")
+        if "task_completed" not in events and "task_failed" not in events:
+            raise TestFailure("Neither task_completed nor task_failed emitted after resume")
+
+    finally:
+        # Shutdown the second runtime
+        try:
+            shutdown_runtime(proc2, request_id=99)
+            print(f"    Runtime shutdown OK (exit={proc2.returncode})")
+        except TestFailure:
+            kill_runtime(proc2)
+        dump_stderr(proc2)
+
+
 def test_token_budget_check(proc, session_id):
     """Token budget check: verify GetSessionState returns tokenUsage."""
     print("\n  Scenario: Token Budget Check")
@@ -435,9 +554,26 @@ def main():
 
     dump_stderr(proc)
 
+    # Step 5: Session Resume (requires a fresh runtime process)
+    print("\n5. Session Resume...")
+    try:
+        test_session_resume()
+        print(f"    PASS: Session Resume")
+        passed += 1
+        results.append(("Session Resume", True, None))
+    except TestFailure as e:
+        print(f"    FAIL: Session Resume — {e}")
+        failed += 1
+        results.append(("Session Resume", False, str(e)))
+    except Exception as e:
+        print(f"    FAIL: Session Resume — unexpected error: {e}")
+        failed += 1
+        results.append(("Session Resume", False, str(e)))
+
     # Summary
+    total = len(scenarios) + 1  # +1 for session resume
     print("\n" + "=" * 60)
-    print(f"RESULTS: {passed} passed, {failed} failed, {len(scenarios)} total")
+    print(f"RESULTS: {passed} passed, {failed} failed, {total} total")
     print("=" * 60)
     for name, ok, err in results:
         status = "PASS" if ok else "FAIL"
