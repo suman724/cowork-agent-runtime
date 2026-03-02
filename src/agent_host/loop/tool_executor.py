@@ -28,12 +28,19 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "ReadFile": "File.Read",
     "WriteFile": "File.Write",
     "DeleteFile": "File.Delete",
+    "EditFile": "File.Write",
+    "ListDirectory": "File.Read",
+    "FindFiles": "File.Read",
+    "GrepFiles": "File.Read",
+    "ViewImage": "File.Read",
     "RunCommand": "Shell.Exec",
     "HttpRequest": "Network.Http",
+    "FetchUrl": "Network.Http",
+    "WebSearch": "Search.Web",
 }
 
 # Tools that mutate files
-_FILE_WRITE_TOOLS = {"WriteFile"}
+_FILE_WRITE_TOOLS = {"WriteFile", "EditFile"}
 _FILE_DELETE_TOOLS = {"DeleteFile"}
 
 # Maximum length for tool output stored in history messages
@@ -192,6 +199,12 @@ class ToolExecutor:
                 result_dict["error"] = error.model_dump()
             result_text = json.dumps(result_dict, default=str)
 
+            # Build data URI for multimodal image content
+            image_url: str | None = None
+            if exec_result.image_content is not None:
+                ic = exec_result.image_content
+                image_url = f"data:{ic.media_type};base64,{ic.base64_data}"
+
             return ToolCallResult(
                 tool_call_id=call.id,
                 tool_name=tool_name,
@@ -199,6 +212,7 @@ class ToolExecutor:
                 result_text=result_text,
                 arguments=arguments,
                 artifacts=exec_result.artifacts or None,
+                image_url=image_url,
             )
 
         except Exception as exc:

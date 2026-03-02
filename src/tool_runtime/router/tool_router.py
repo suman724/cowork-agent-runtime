@@ -12,9 +12,16 @@ from tool_runtime.exceptions import ToolNotFoundError, ToolRuntimeError
 from tool_runtime.models import ExecutionContext, ToolExecutionResult
 from tool_runtime.platform.detection import get_platform
 from tool_runtime.tools.file.delete_file import DeleteFileTool
+from tool_runtime.tools.file.edit_file import EditFileTool
+from tool_runtime.tools.file.find_files import FindFilesTool
+from tool_runtime.tools.file.grep_files import GrepFilesTool
+from tool_runtime.tools.file.list_directory import ListDirectoryTool
 from tool_runtime.tools.file.read_file import ReadFileTool
+from tool_runtime.tools.file.view_image import ViewImageTool
 from tool_runtime.tools.file.write_file import WriteFileTool
+from tool_runtime.tools.network.fetch_url import FetchUrlTool
 from tool_runtime.tools.network.http_request import HttpRequestTool
+from tool_runtime.tools.network.web_search import WebSearchTool
 from tool_runtime.tools.shell.run_command import RunCommandTool
 
 if TYPE_CHECKING:
@@ -45,8 +52,15 @@ class ToolRouter:
         self._register(ReadFileTool(self._platform))
         self._register(WriteFileTool(self._platform))
         self._register(DeleteFileTool(self._platform))
+        self._register(EditFileTool(self._platform))
+        self._register(ListDirectoryTool(self._platform))
+        self._register(ViewImageTool(self._platform))
+        self._register(FindFilesTool())
+        self._register(GrepFilesTool())
         self._register(RunCommandTool(self._platform))
         self._register(HttpRequestTool(http_client))
+        self._register(FetchUrlTool(http_client))
+        self._register(WebSearchTool(http_client))
 
     def _register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
@@ -88,7 +102,11 @@ class ToolRouter:
                 artifactUris=artifact_uris if artifact_uris else None,
             )
 
-            return ToolExecutionResult(tool_result=tool_result, artifacts=artifacts)
+            return ToolExecutionResult(
+                tool_result=tool_result,
+                artifacts=artifacts,
+                image_content=raw_output.image_content,
+            )
 
         except ToolRuntimeError as e:
             logger.warning(

@@ -51,6 +51,14 @@ class ArtifactData:
     media_type: str = "text/plain"
 
 
+@dataclass(frozen=True)
+class ImageContent:
+    """Image data for multimodal tool output (e.g., ViewImage)."""
+
+    media_type: str  # "image/png", "image/jpeg", etc.
+    base64_data: str
+
+
 @dataclass
 class RawToolOutput:
     """Internal output from a tool before being wrapped in ToolResult.
@@ -61,6 +69,7 @@ class RawToolOutput:
 
     output_text: str
     artifact_data: ArtifactData | None = None
+    image_content: ImageContent | None = None
 
 
 @dataclass
@@ -73,3 +82,4 @@ class ToolExecutionResult:
 
     tool_result: ToolResult
     artifacts: list[ArtifactData] = field(default_factory=list)
+    image_content: ImageContent | None = None

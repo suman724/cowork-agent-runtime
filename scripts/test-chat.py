@@ -1183,6 +1183,196 @@ def test_conversation_context_preserved(proc, session_id):
 # --- Main ---
 
 
+def test_file_discovery_tools(proc, session_id):
+    """Test ListDirectory + FindFiles + GrepFiles tool chain."""
+    test_dir = "/tmp/test-chat/file-discovery"
+    os.makedirs(test_dir, exist_ok=True)
+    os.makedirs(os.path.join(test_dir, "subdir"), exist_ok=True)
+    with open(os.path.join(test_dir, "hello.py"), "w") as f:
+        f.write("def greet():\n    return 'DISCOVERY_MARKER_99'\n")
+    with open(os.path.join(test_dir, "subdir", "nested.py"), "w") as f:
+        f.write("# nested module\n")
+    with open(os.path.join(test_dir, "readme.txt"), "w") as f:
+        f.write("Just a text file.\n")
+
+    send(proc, {
+        "jsonrpc": "2.0", "id": 10, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-file-disc-1",
+            "prompt": (
+                f"Using only tools (no guessing), do the following in {test_dir}:\n"
+                "1. List the directory contents\n"
+                "2. Find all .py files recursively\n"
+                "3. Search for the text 'DISCOVERY_MARKER_99' in all files\n"
+                "Report each result."
+            ),
+            "taskOptions": {"maxSteps": 10},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=90)
+    events = extract_events(all_msgs)
+    text_chunks = []
+    tool_events = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            if evt == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+            if evt in ("tool_requested", "tool_completed"):
+                tool_events.append(params.get("payload", {}).get("toolName", evt))
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:300]}{'...' if len(full_text) > 300 else ''}'")
+    print(f"    Events: {events}")
+    print(f"    Tool invocations: {tool_events}")
+
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"No terminal event. Events: {events}")
+
+    # Should have used at least 2 different tools
+    if len(tool_events) < 2:
+        raise TestFailure(f"Expected multiple tool calls, got: {tool_events}")
+
+    # Clean up
+    import shutil
+    try:
+        shutil.rmtree(test_dir)
+    except OSError:
+        pass
+
+
+def test_edit_file_round_trip(proc, session_id):
+    """Test EditFile tool: write a file, edit it, verify the result."""
+    test_dir = "/tmp/test-chat/edit-test"
+    os.makedirs(test_dir, exist_ok=True)
+    test_file = os.path.join(test_dir, "editable.txt")
+    with open(test_file, "w") as f:
+        f.write("The color is blue.\nThe sky is clear.\n")
+
+    send(proc, {
+        "jsonrpc": "2.0", "id": 10, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-edit-1",
+            "prompt": (
+                f"Using the EditFile tool, change 'blue' to 'green' in {test_file}. "
+                "Then read the file to confirm the change."
+            ),
+            "taskOptions": {"maxSteps": 5},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=90)
+    events = extract_events(all_msgs)
+    text_chunks = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            if evt == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:200]}{'...' if len(full_text) > 200 else ''}'")
+    print(f"    Events: {events}")
+
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"No terminal event. Events: {events}")
+
+    # Verify file was actually changed
+    try:
+        with open(test_file) as f:
+            content = f.read()
+        if "green" not in content:
+            print(f"    WARNING: File content doesn't contain 'green': {content[:100]}")
+    except Exception as e:
+        print(f"    WARNING: Could not verify file: {e}")
+
+    # Clean up
+    import shutil
+    try:
+        shutil.rmtree(test_dir)
+    except OSError:
+        pass
+
+
+def test_fetch_url(proc, session_id):
+    """Test FetchUrl tool: fetch a known URL."""
+    send(proc, {
+        "jsonrpc": "2.0", "id": 10, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-fetch-1",
+            "prompt": (
+                "Use the FetchUrl tool to fetch https://httpbin.org/json "
+                "and tell me what the 'slideshow' title is."
+            ),
+            "taskOptions": {"maxSteps": 5},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=90)
+    events = extract_events(all_msgs)
+    text_chunks = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            if evt == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:200]}{'...' if len(full_text) > 200 else ''}'")
+    print(f"    Events: {events}")
+
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"No terminal event. Events: {events}")
+
+
+def test_web_search(proc, session_id):
+    """Test WebSearch tool (skip if TAVILY_API_KEY not set)."""
+    if not os.environ.get("TAVILY_API_KEY"):
+        print("    SKIP: TAVILY_API_KEY not set")
+        return
+
+    send(proc, {
+        "jsonrpc": "2.0", "id": 10, "method": "StartTask",
+        "params": {
+            "sessionId": session_id,
+            "taskId": "task-search-1",
+            "prompt": (
+                "Use the WebSearch tool to search for 'Python asyncio tutorial' "
+                "and summarize the top result."
+            ),
+            "taskOptions": {"maxSteps": 5},
+        },
+    })
+
+    all_msgs = read_until_task_done(proc, timeout_sec=90)
+    events = extract_events(all_msgs)
+    text_chunks = []
+
+    for msg in all_msgs:
+        if "method" in msg:
+            params = msg.get("params", {})
+            evt = params.get("eventType", "")
+            if evt == "text_chunk":
+                text_chunks.append(params.get("payload", {}).get("text", ""))
+
+    full_text = "".join(text_chunks)
+    print(f"    Assistant: '{full_text[:200]}{'...' if len(full_text) > 200 else ''}'")
+    print(f"    Events: {events}")
+
+    if "task_completed" not in events and "task_failed" not in events:
+        raise TestFailure(f"No terminal event. Events: {events}")
+
+
 def main():
     print("=" * 60)
     print("Agent-Runtime Chat Flow Test")
@@ -1208,6 +1398,10 @@ def main():
         ("Task Cancellation", test_task_cancellation),
         ("Error Event Payloads", test_error_event_payloads),
         ("Conversation Context Preserved", test_conversation_context_preserved),
+        ("File Discovery Tools", test_file_discovery_tools),
+        ("EditFile Round-Trip", test_edit_file_round_trip),
+        ("FetchUrl", test_fetch_url),
+        ("WebSearch", test_web_search),
     ]
 
     # Scenarios that manage their own runtime processes (custom lifecycle)

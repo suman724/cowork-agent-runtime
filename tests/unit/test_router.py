@@ -56,7 +56,20 @@ class TestToolRouter:
         tools = tool_router.get_available_tools()
         tool_names = {t.toolName for t in tools}
 
-        assert tool_names == {"ReadFile", "WriteFile", "DeleteFile", "RunCommand", "HttpRequest"}
+        assert tool_names == {
+            "ReadFile",
+            "WriteFile",
+            "DeleteFile",
+            "EditFile",
+            "ListDirectory",
+            "FindFiles",
+            "GrepFiles",
+            "ViewImage",
+            "RunCommand",
+            "HttpRequest",
+            "FetchUrl",
+            "WebSearch",
+        }
         for tool_def in tools:
             assert tool_def.description
             assert tool_def.inputSchema

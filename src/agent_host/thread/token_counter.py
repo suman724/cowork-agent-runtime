@@ -14,10 +14,15 @@ def estimate_tokens(text: str) -> int:
     return max(1, len(text) // 4)
 
 
+# Conservative flat estimate for image tokens. OpenAI's vision model uses ~85 tokens
+# for low-res + ~170 tokens per 512px tile. We use ~1000 as a simple approximation.
+_IMAGE_TOKEN_ESTIMATE = 1000
+
+
 def estimate_message_tokens(message: dict[str, Any]) -> int:
     """Estimate tokens for a complete OpenAI-format message.
 
-    Accounts for role, content, tool_calls, and tool_call_id fields.
+    Accounts for role, content, tool_calls, tool_call_id fields, and images.
     Adds overhead per message (~4 tokens for formatting).
     """
     total = 4  # per-message overhead (role, delimiters)
@@ -25,6 +30,14 @@ def estimate_message_tokens(message: dict[str, Any]) -> int:
     content = message.get("content")
     if isinstance(content, str) and content:
         total += estimate_tokens(content)
+    elif isinstance(content, list):
+        # Multimodal content blocks
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    total += estimate_tokens(block.get("text", ""))
+                elif block.get("type") == "image_url":
+                    total += _IMAGE_TOKEN_ESTIMATE
 
     # Tool calls (assistant messages with function calls)
     tool_calls = message.get("tool_calls")
