@@ -35,6 +35,7 @@ ENV = {
     "LLM_GATEWAY_AUTH_TOKEN": os.environ.get("LLM_GATEWAY_AUTH_TOKEN", "test-token"),
     "LLM_MODEL": os.environ.get("LLM_MODEL", "openai/gpt-4o"),
     "LOG_LEVEL": os.environ.get("LOG_LEVEL", "debug"),
+    "APPROVAL_TIMEOUT_SECONDS": os.environ.get("APPROVAL_TIMEOUT_SECONDS", "5"),
 }
 
 
@@ -238,13 +239,13 @@ def run_isolated(scenario_fn):
         return True, None
     except TestFailure as e:
         if proc:
-            dump_stderr(proc)
             kill_runtime(proc)
+            dump_stderr(proc)
         return False, str(e)
     except Exception as e:
         if proc:
-            dump_stderr(proc)
             kill_runtime(proc)
+            dump_stderr(proc)
         return False, f"unexpected: {e}"
 
 
@@ -700,19 +701,19 @@ def test_step_event_structure(proc, session_id):
 
     # Verify step_started has step number
     for payload in step_started_payloads:
-        if "step" not in payload:
-            raise TestFailure(f"step_started payload missing 'step' field: {payload}")
-        if not isinstance(payload["step"], int) or payload["step"] < 1:
-            raise TestFailure(f"step_started 'step' should be positive int: {payload}")
+        if "stepNumber" not in payload:
+            raise TestFailure(f"step_started payload missing 'stepNumber' field: {payload}")
+        if not isinstance(payload["stepNumber"], int) or payload["stepNumber"] < 1:
+            raise TestFailure(f"step_started 'stepNumber' should be positive int: {payload}")
 
     # Verify step_completed has step number
     for payload in step_completed_payloads:
-        if "step" not in payload:
-            raise TestFailure(f"step_completed payload missing 'step' field: {payload}")
+        if "stepNumber" not in payload:
+            raise TestFailure(f"step_completed payload missing 'stepNumber' field: {payload}")
 
     # Verify ordering: step numbers should be sequential
-    started_steps = [p["step"] for p in step_started_payloads]
-    completed_steps = [p["step"] for p in step_completed_payloads]
+    started_steps = [p["stepNumber"] for p in step_started_payloads]
+    completed_steps = [p["stepNumber"] for p in step_completed_payloads]
     print(f"    Started steps: {started_steps}, Completed steps: {completed_steps}")
 
     if started_steps != sorted(started_steps):
