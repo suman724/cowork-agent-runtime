@@ -203,7 +203,8 @@ stateDiagram-v2
    - `FileChangeTracker` — tracks file mutations for patch preview
    - `LLMClient` — OpenAI SDK streaming client pointed at LLM Gateway
    - `MessageThread` — conversation history with system prompt
-7. Restore from checkpoint (crash recovery)
+   - `SkillLoader` — loads skills from built-in, workspace, and policy sources
+7. Restore from checkpoint (crash recovery — token budget, thread, working memory, session messages)
 8. Emit `session_created` event
 
 ### StartTask Flow
@@ -211,9 +212,12 @@ stateDiagram-v2
 1. Parse `taskOptions.maxSteps` (clamped to 1–200, default 50)
 2. Add user prompt to `MessageThread`
 3. Build `ToolExecutor` with all dependencies
-4. Build `AgentLoop` with all components
-5. Spawn as background `asyncio.Task` — returns immediately with `{taskId, status: "running"}`
-6. On completion: persist checkpoint, upload history, emit events
+4. Initialize or reuse `WorkingMemory` (task tracker, plan, notes)
+5. Create `SubAgentManager` (for `SpawnAgent` tool)
+6. Create `SkillExecutor` (for `Skill_*` tools)
+7. Build `AgentLoop` with all components (including working memory, sub-agent manager, skill executor, loaded skills)
+8. Spawn as background `asyncio.Task` — returns immediately with `{taskId, status: "running"}`
+9. On completion: persist checkpoint (including working memory), upload history, emit events
 
 ---
 
@@ -530,18 +534,25 @@ Working memory is rendered as text and inserted at `messages[1]` (right after th
 
 **File:** `agent_host/loop/agent_tools.py`
 
-Agent-internal tools manipulate working memory and spawn sub-agents. They bypass the `PolicyEnforcer` and `ToolRouter` entirely.
+Agent-internal tools manipulate working memory, spawn sub-agents, and invoke skills. They bypass the `PolicyEnforcer` and `ToolRouter` entirely.
 
 ```mermaid
 graph LR
-    LLM[LLM response] -->|tool_calls| Route{Agent tool?}
+    LLM[LLM response] -->|tool_calls| Route{Agent tool<br/>or Skill_*?}
     Route -->|Yes| ATH[AgentToolHandler<br/>No policy check<br/>No ToolRouter]
     Route -->|No| TE[ToolExecutor<br/>Policy + Approval + ToolRouter]
 
     ATH --> TT[TaskTracker<br/>create / update / list]
     ATH --> CP[CreatePlan<br/>goal + steps]
     ATH --> SA[SpawnAgent<br/>delegate to sub-agent]
+    ATH --> SK[Skill_*<br/>delegate to SkillExecutor]
 ```
+
+The `AgentToolHandler` is initialized with `WorkingMemory`, `SubAgentManager`, `SkillExecutor`, and the loaded `SkillDefinition` list. It builds tool definitions for all agent-internal tools plus one `Skill_{name}` tool per loaded skill.
+
+The `is_agent_tool()` method checks both the static `AGENT_TOOL_NAMES` set (`TaskTracker`, `CreatePlan`, `SpawnAgent`) and the dynamic `_skill_tool_names` set (e.g., `Skill_search_codebase`).
+
+The `execute()` method takes `tool_name`, `arguments`, and `task_id` — the `task_id` is passed through to the `SkillExecutor` for tracking.
 
 ### TaskTracker Tool
 
@@ -568,6 +579,17 @@ Creates or replaces the current plan in working memory.
 | `context` | string? | Relevant context from current work |
 
 Only available when `SubAgentManager` is configured. Delegates to the sub-agent system (see next section).
+
+### Skill Tools (`Skill_*`)
+
+Each loaded skill is exposed as an agent-internal tool named `Skill_{skill.name}` (e.g., `Skill_search_codebase`, `Skill_edit_and_verify`). When invoked:
+
+1. The `Skill_` prefix is stripped to resolve the skill name
+2. The matching `SkillDefinition` is looked up
+3. `SkillExecutor.execute()` runs the skill as a focused sub-conversation
+4. Result is returned to the agent loop
+
+This means skills are first-class tools that the LLM can invoke alongside `TaskTracker`, `CreatePlan`, and `SpawnAgent`.
 
 ---
 
@@ -685,6 +707,12 @@ class SkillDefinition:
 2. **Workspace** (`.cowork/skills/*.yaml` — overrides built-in by name)
 3. **Policy bundle** (from `policyBundle.skills` — overrides workspace by name)
 
+### Skill Invocation
+
+Skills are registered as agent-internal tools by `AgentToolHandler` with a `Skill_` prefix. For example, the built-in `search_codebase` skill becomes a tool named `Skill_search_codebase`. The LLM sees these alongside other agent tools (TaskTracker, CreatePlan, SpawnAgent) and can invoke them directly.
+
+When invoked, `AgentToolHandler._handle_skill()` strips the `Skill_` prefix, resolves the `SkillDefinition`, and delegates to `SkillExecutor.execute()`.
+
 ### Skill Execution
 
 Skills run as focused sub-conversations, similar to sub-agents but with more structure:
@@ -750,8 +778,10 @@ sequenceDiagram
 
 ### Error Classification
 
-- **Transient (retried):** Connection errors, timeouts, rate limits (429)
-- **Permanent (not retried):** Auth errors (401/403), invalid requests (400), guardrail blocks
+**File:** `agent_host/llm/error_classifier.py`
+
+- **Transient (retried):** Connection errors (`httpx.ConnectError`, `httpx.ReadError`), timeouts, rate limits (429), server errors (502, 503, 504), and SDK exceptions (`RateLimitError`, `ServiceUnavailableError`, `APIConnectionError`, `APITimeoutError`)
+- **Permanent (not retried):** `LLMBudgetExceededError`, `LLMGuardrailBlockedError`, `PolicyExpiredError`, auth errors, invalid requests
 
 ### Response Model
 

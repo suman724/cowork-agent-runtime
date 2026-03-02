@@ -14,23 +14,23 @@ run-anthropic: ## Run the agent-runtime with Anthropic Claude (sources .env.anth
 	set -a && . .env.anthropic; set +a && .venv/bin/python -m agent_host.main
 
 lint: ## Run linter
-	ruff check src/ tests/
+	.venv/bin/ruff check src/ tests/
 
 format: ## Auto-format code
-	ruff format src/ tests/
-	ruff check --fix src/ tests/
+	.venv/bin/ruff format src/ tests/
+	.venv/bin/ruff check --fix src/ tests/
 
 format-check: ## Check formatting without modifying
-	ruff format --check src/ tests/
+	.venv/bin/ruff format --check src/ tests/
 
 typecheck: ## Run type checker
-	mypy src/
+	.venv/bin/mypy src/
 
 test: ## Run unit tests
-	pytest -m "unit or not integration" -x -q
+	.venv/bin/pytest -m "unit or not integration" -x -q
 
 test-integration: ## Run integration tests
-	pytest -m integration -x -q
+	.venv/bin/pytest -m integration -x -q
 
 test-jsonrpc: ## Smoke test: CreateSession + Shutdown over JSON-RPC (needs backend services)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python scripts/test-jsonrpc.py
@@ -43,7 +43,7 @@ test-chat-anthropic: ## Full chat test using Anthropic Claude (needs backend + A
 	set -a && . .env.anthropic; set +a && .venv/bin/python scripts/test-chat.py
 
 build: ## Build package
-	python -m build
+	.venv/bin/python -m build
 
 check: lint format-check typecheck test ## CI gate: lint + format-check + typecheck + test
 
@@ -52,6 +52,6 @@ clean: ## Remove build artifacts and caches
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
 coverage: ## Run tests with coverage
-	coverage run -m pytest -m "unit or not integration" -x -q
-	coverage report
-	coverage html
+	.venv/bin/coverage run -m pytest -m "unit or not integration" -x -q
+	.venv/bin/coverage report
+	.venv/bin/coverage html

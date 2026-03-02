@@ -208,7 +208,9 @@ class AgentLoop:
             # Execute agent-internal tools (no policy, no ToolRouter)
             for ac in agent_calls:
                 handler = self._agent_tool_handler
-                assert handler is not None  # guaranteed when agent_calls is non-empty
+                if handler is None:
+                    err_msg = "agent_tool_handler is None but agent_calls is non-empty"
+                    raise RuntimeError(err_msg)
                 result_dict = await handler.execute(ac.name, ac.arguments, task_id=task_id)
                 result_text = json.dumps(result_dict, default=str)
                 self._thread.add_tool_result(ac.id, ac.name, result_text)

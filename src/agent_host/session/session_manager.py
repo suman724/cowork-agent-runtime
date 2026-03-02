@@ -479,9 +479,7 @@ class SessionManager:
             token_output_used=(self._token_budget.output_tokens_used if self._token_budget else 0),
             session_messages=[msg.model_dump(mode="json") for msg in self._session_messages],
             thread=self._thread.to_checkpoint() if self._thread else None,
-            working_memory=(
-                self._working_memory.to_checkpoint() if self._working_memory else None
-            ),
+            working_memory=(self._working_memory.to_checkpoint() if self._working_memory else None),
         )
         self._checkpoint_manager.save(checkpoint)
 
