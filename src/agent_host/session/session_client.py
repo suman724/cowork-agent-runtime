@@ -60,6 +60,27 @@ class SessionClient:
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
         reraise=True,
     )
+    async def resume_session(self, session_id: str) -> SessionCreateResponse:
+        """Resume an existing session via POST /sessions/{id}/resume.
+
+        Returns the same response shape as create_session (sessionId, workspaceId, policyBundle).
+        """
+        logger.info("session_client.resume_session", session_id=session_id)
+        response = await self._client.post(f"/sessions/{session_id}/resume")
+        await raise_for_status(response)
+        try:
+            return SessionCreateResponse.model_validate(response.json())
+        except (ValueError, ValidationError) as exc:
+            raise AgentHostError(
+                f"Invalid response from Session Service: {exc}",
+            ) from exc
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
+        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        reraise=True,
+    )
     async def cancel_session(self, session_id: str, request: SessionCancelRequest) -> None:
         """Cancel a session via POST /sessions/{id}/cancel.
 

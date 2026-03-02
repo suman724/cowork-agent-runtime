@@ -14,6 +14,7 @@ class Handlers:
 
     Methods:
         CreateSession — Initialize session with Session Service
+        ResumeSession — Resume an existing session (reuses session ID)
         StartTask — Begin agent work cycle from user prompt
         CancelTask — Cooperatively cancel running task
         GetSessionState — Return current session/task status
@@ -28,6 +29,7 @@ class Handlers:
     def register_all(self, dispatcher: MethodDispatcher) -> None:
         """Register all handlers with the method dispatcher."""
         dispatcher.register("CreateSession", self.handle_create_session)
+        dispatcher.register("ResumeSession", self.handle_resume_session)
         dispatcher.register("StartTask", self.handle_start_task)
         dispatcher.register("CancelTask", self.handle_cancel_task)
         dispatcher.register("GetSessionState", self.handle_get_session_state)
@@ -38,6 +40,10 @@ class Handlers:
     async def handle_create_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """CreateSession — initialize session with Session Service."""
         return await self._session_manager.create_session(params)
+
+    async def handle_resume_session(self, params: dict[str, Any]) -> dict[str, Any]:
+        """ResumeSession — resume an existing session, reusing the same session ID."""
+        return await self._session_manager.resume_session(params)
 
     async def handle_start_task(self, params: dict[str, Any]) -> dict[str, Any]:
         """StartTask — begin agent work cycle from user prompt."""
