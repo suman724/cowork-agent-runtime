@@ -67,6 +67,8 @@ graph TB
             AL[Agent Loop]
             TE[Tool Executor]
             ATH[Agent Tool Handler]
+            SE[Skill Executor]
+            SAM[SubAgent Manager]
             PE[Policy Enforcer]
             AG[Approval Gate]
             TB[Token Budget]
@@ -104,6 +106,8 @@ graph TB
     AL --> LLM
     AL --> TE
     AL --> ATH
+    ATH --> SE
+    ATH --> SAM
     TE --> PE
     TE --> AG
     TE -->|ToolRouter interface| TR
@@ -264,7 +268,7 @@ flowchart TD
     CheckDone -->|No| RouteCalls
 
     RouteCalls[Route tool calls:<br/>agent vs external]
-    RouteCalls --> ExecAgent[Execute agent-internal tools<br/>TaskTracker, CreatePlan, SpawnAgent]
+    RouteCalls --> ExecAgent[Execute agent-internal tools<br/>TaskTracker, CreatePlan,<br/>SpawnAgent, Skill_*]
     RouteCalls --> ExecExternal[Execute external tools<br/>via ToolExecutor]
 
     ExecAgent --> AddResults[Add tool results to thread]
@@ -278,7 +282,7 @@ flowchart TD
 
 - **Step = 1 LLM call + 0..N tool calls.** Each iteration of the while loop is one step.
 - **Natural termination:** When the LLM returns no tool calls and `stop_reason == "stop"`, the loop ends.
-- **Tool call routing:** Tool calls are classified as agent-internal (bypass policy/ToolRouter) or external (full lifecycle).
+- **Tool call routing:** Tool calls are classified as agent-internal — `TaskTracker`, `CreatePlan`, `SpawnAgent`, and `Skill_*` (bypass policy/ToolRouter) — or external (full lifecycle).
 - **80% warning:** At 80% of max_steps, an event warns the Desktop App.
 - **Compaction at 90%:** Context is compacted when it reaches 90% of `max_context_tokens`.
 
@@ -429,6 +433,23 @@ flowchart TD
 | `Network.Http` | **DomainMatcher** | `allowedDomains`, `blockedDomains` (includes subdomains) |
 
 The `check_llm_call()` method verifies the `LLM.Call` capability is granted and the policy is not expired.
+
+### Risk Assessment
+
+**File:** `agent_host/policy/risk_assessor.py`
+
+When a capability has `requiresApproval: true`, the `assess_risk()` function determines the risk level sent with the approval request:
+
+| Capability | Risk Level |
+|-----------|-----------|
+| `File.Read` | low |
+| `File.Write` | medium |
+| `File.Delete` | high |
+| `Shell.Exec` | medium |
+| `Network.Http` | medium |
+| `Workspace.Upload` | low |
+| `BackendTool.Invoke` | medium |
+| Unknown | high |
 
 ---
 
@@ -1038,7 +1059,7 @@ sequenceDiagram
     SM->>CM: save(checkpoint)
     CM->>FS: Write to tempfile
     CM->>FS: os.replace → atomic swap
-    Note over FS: checkpoint_{session_id}.json
+    Note over FS: cowork_{session_id}.json
 
     Note over SM: On next session creation...
     SM->>CM: load(session_id)
@@ -1046,6 +1067,7 @@ sequenceDiagram
     CM-->>SM: SessionCheckpoint
     SM->>SM: Restore token budget
     SM->>SM: Restore message thread
+    SM->>SM: Restore working memory
     SM->>SM: Restore session messages
 
     Note over SM: On clean shutdown...
@@ -1062,14 +1084,32 @@ class SessionCheckpoint:
     workspace_id: str
     tenant_id: str
     user_id: str
-    token_input_used: int
-    token_output_used: int
-    session_messages: list[dict]   # Cumulative ConversationMessages
-    thread: list[dict] | None      # MessageThread state
+    token_input_used: int = 0
+    token_output_used: int = 0
+    session_messages: list[dict]        # Cumulative ConversationMessages
+    thread: list[dict] | None = None    # MessageThread state
+    working_memory: dict | None = None  # WorkingMemory state (tasks, plan, notes)
+    checkpointed_at: str = ""           # ISO 8601 timestamp
 ```
 
+### Restore Flow
+
+On session creation or resume, `_restore_from_checkpoint()` restores state in this order:
+
+1. **Token budget** — `restore_usage()` overwrites counters (absolute, not additive)
+2. **Message thread** — `MessageThread.from_checkpoint()` rebuilds full conversation history
+3. **Working memory** — `WorkingMemory.from_checkpoint()` restores tasks, plan, and notes
+4. **Session messages** — Cumulative `ConversationMessage` list for history upload
+
+Each restore step is independent — a failure in one does not block the others.
+
+### Corrupt Checkpoint Handling
+
+If a checkpoint file is corrupt (invalid JSON, missing keys), it is **deleted** and the session starts fresh. This prevents a bad checkpoint from permanently blocking session creation.
+
 **Write strategy:** `tempfile` → `os.replace()` (atomic on all platforms)
-**Lifecycle:** Saved after each task completion. Deleted on clean `Shutdown`.
+**File naming:** `cowork_{session_id}.json` in the platform checkpoint directory
+**Lifecycle:** Saved after each task completion (including working memory). Deleted on clean `Shutdown`.
 
 ---
 
@@ -1121,7 +1161,7 @@ graph TD
 | **MessageThread** | `thread/message_thread.py` | Conversation history |
 | **DropOldestCompactor** | `thread/compactor.py` | Context window management |
 | **WorkingMemory** | `memory/working_memory.py` | Task tracker + plan + notes |
-| **AgentToolHandler** | `loop/agent_tools.py` | Internal tools (no policy) |
+| **AgentToolHandler** | `loop/agent_tools.py` | Internal tools + skill tools (no policy) |
 | **SubAgentManager** | `loop/sub_agent.py` | Spawn isolated sub-agents |
 | **SkillLoader** | `skills/skill_loader.py` | Load skills from 3 sources |
 | **SkillExecutor** | `skills/skill_executor.py` | Execute skills as sub-conversations |
