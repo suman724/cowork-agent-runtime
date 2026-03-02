@@ -219,7 +219,9 @@ class AgentLoop:
             if external_calls:
                 results = await self._tool_executor.execute_tool_calls(external_calls, task_id)
                 for r in results:
-                    self._thread.add_tool_result(r.tool_call_id, r.tool_name, r.result_text)
+                    self._thread.add_tool_result(
+                        r.tool_call_id, r.tool_name, r.result_text, image_url=r.image_url
+                    )
 
             # 8. Error recovery tracking (Wave 5)
             for tc in response.tool_calls:

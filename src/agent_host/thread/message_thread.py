@@ -74,14 +74,32 @@ class MessageThread:
 
         self._messages.append(msg)
 
-    def add_tool_result(self, tool_call_id: str, tool_name: str, result: str) -> None:
-        """Append a tool result message."""
+    def add_tool_result(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        result: str,
+        image_url: str | None = None,
+    ) -> None:
+        """Append a tool result message.
+
+        When image_url is provided (data URI), the content is sent as multimodal
+        content blocks so the LLM can see the image.
+        """
+        if image_url:
+            content: str | list[dict[str, Any]] = [
+                {"type": "text", "text": result},
+                {"type": "image_url", "image_url": {"url": image_url}},
+            ]
+        else:
+            content = result
+
         self._messages.append(
             {
                 "role": "tool",
                 "tool_call_id": tool_call_id,
                 "name": tool_name,
-                "content": result,
+                "content": content,
             }
         )
 

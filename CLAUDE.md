@@ -27,9 +27,9 @@ agent_host/     ← Local Agent Host (custom agent loop)
 tool_runtime/   ← Local Tool Runtime (tool execution)
   router/       — ToolRouter implementation, tool registry, dispatch
   tools/
-    file/       — ReadFile, WriteFile, DeleteFile
+    file/       — ReadFile, WriteFile, DeleteFile, EditFile, ListDirectory, FindFiles, GrepFiles, ViewImage
     shell/      — RunCommand
-    network/    — HttpRequest
+    network/    — HttpRequest, FetchUrl, WebSearch
   platform/     — OS abstraction (path handling, shell resolution, encoding) for macOS/Windows
   mcp/          — MCP client: discovery, connection, manifest translation (Phase 2+)
   output/       — Output formatting, truncation, artifact extraction
@@ -63,13 +63,20 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 
 ## Tool-to-Capability Mapping
 
-| Tool | Capability |
-|------|-----------|
-| `ReadFile` | `File.Read` |
-| `WriteFile` | `File.Write` |
-| `DeleteFile` | `File.Delete` |
-| `RunCommand` | `Shell.Exec` |
-| `HttpRequest` | `Network.Http` |
+| Tool | Capability | Description |
+|------|-----------|-------------|
+| `ReadFile` | `File.Read` | Read file contents with encoding detection |
+| `WriteFile` | `File.Write` | Atomic file write with diff generation |
+| `DeleteFile` | `File.Delete` | Delete a file |
+| `EditFile` | `File.Write` | Exact-match find-and-replace editing |
+| `ListDirectory` | `File.Read` | List files and directories at a path |
+| `FindFiles` | `File.Read` | Glob-pattern file discovery across a directory tree |
+| `GrepFiles` | `File.Read` | Regex search across files |
+| `ViewImage` | `File.Read` | Read image file, return base64 for multimodal LLM |
+| `RunCommand` | `Shell.Exec` | Execute shell commands |
+| `HttpRequest` | `Network.Http` | General HTTP requests |
+| `FetchUrl` | `Network.Http` | Fetch URL, convert HTML→markdown |
+| `WebSearch` | `Search.Web` | Web search via Tavily API |
 
 ## Environment Variables
 
@@ -81,6 +88,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `APPROVAL_TIMEOUT_SECONDS` — Approval timeout (default: 300)
 - `LOG_LEVEL` — Logging level (default: info)
 - `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
+- `TAVILY_API_KEY` — Tavily API key (optional, required for WebSearch tool)
 
 ## Platform Adapters
 
@@ -133,9 +141,9 @@ cowork-agent-runtime/
       __init__.py
       router/                 # ToolRouter implementation
       tools/
-        file/                 # ReadFile, WriteFile, DeleteFile
+        file/                 # ReadFile, WriteFile, DeleteFile, EditFile, ListDirectory, FindFiles, GrepFiles, ViewImage
         shell/                # RunCommand
-        network/              # HttpRequest
+        network/              # HttpRequest, FetchUrl, WebSearch
       platform/               # OS abstraction (macOS/Windows)
       mcp/                    # MCP client (Phase 2+)
       output/                 # Formatting, truncation, artifact extraction
@@ -169,6 +177,7 @@ cowork-agent-runtime/
 | `httpx>=0.27,<1.0` | Async HTTP for backend service calls |
 | `pydantic>=2.0,<3.0` | Data validation (from cowork-platform contracts) |
 | `structlog>=24.0,<26.0` | Structured logging to stderr |
+| `markdownify>=0.14,<1.0` | HTML to markdown conversion (FetchUrl tool) |
 
 ### Package Boundary Enforcement
 

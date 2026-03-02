@@ -25,3 +25,4 @@ class ToolCallResult:
     result_text: str
     arguments: dict[str, Any] = field(default_factory=dict)
     artifacts: list[Any] | None = None
+    image_url: str | None = None
