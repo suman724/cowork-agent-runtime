@@ -9,9 +9,9 @@ The Desktop App communicates with the Agent Host via JSON-RPC 2.0 over stdio (ne
 | Method | Description |
 |--------|-------------|
 | `CreateSession` | Handshake with Session Service, initialize ADK agent with policy bundle |
-| `StartTask` | Start an agent work cycle from a user prompt (runs in background) |
+| `StartTask` | Start an agent work cycle from a user prompt. Accepts `taskOptions.maxSteps` (1-200, default 50) to limit LLM calls per task |
 | `CancelTask` | Cancel the currently running task |
-| `GetSessionState` | Return session status, active task, and token usage |
+| `GetSessionState` | Return session status, active task, token usage, `currentStep`, and `maxSteps` |
 | `ApproveAction` | Deliver a user approval/denial for a pending tool call |
 | `Shutdown` | Cancel task, clean up session, close connections |
 
@@ -52,6 +52,8 @@ make coverage      # Run tests with coverage report
 | `LLM_GATEWAY_AUTH_TOKEN` | — | LLM Gateway auth token (required) |
 | `SESSION_SERVICE_URL` | — | Session Service URL (required) |
 | `WORKSPACE_SERVICE_URL` | — | Workspace Service URL (required) |
+| `DEFAULT_MAX_STEPS` | `50` | Default max LLM calls per task (overridden by `taskOptions.maxSteps`) |
+| `MAX_CONTEXT_TOKENS` | `100000` | Context window token budget — oldest messages truncated when exceeded |
 | `CHECKPOINT_DIR` | Platform app data | Directory for session checkpoint files |
 | `APPROVAL_TIMEOUT_SECONDS` | `300` | Timeout for pending approval requests |
 | `LOG_LEVEL` | `info` | Structured logging level (debug, info, warning, error) |
@@ -72,7 +74,7 @@ Agent loop orchestration using [Google ADK](https://github.com/google/adk-python
 | `session/` | Session/Workspace HTTP clients, checkpoint service, SessionManager |
 | `policy/` | Policy enforcer, path/command/domain matchers, risk assessor |
 | `budget/` | Session token budget tracking |
-| `events/` | Event emitter (JSON-RPC notifications + structlog) |
+| `events/` | Event emitter (JSON-RPC notifications + structlog), including `step_limit_approaching` |
 
 ### tool_runtime/
 
