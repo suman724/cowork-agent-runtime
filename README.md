@@ -9,6 +9,7 @@ The Desktop App communicates with the Agent Host via JSON-RPC 2.0 over stdio (ne
 | Method | Description |
 |--------|-------------|
 | `CreateSession` | Handshake with Session Service, initialize ADK agent with policy bundle |
+| `ResumeSession` | Resume a completed/failed session — re-fetch policy, restore history, reuse session ID |
 | `StartTask` | Start an agent work cycle from a user prompt. Accepts `taskOptions.maxSteps` (1-200, default 50) to limit LLM calls per task |
 | `CancelTask` | Cancel the currently running task |
 | `GetSessionState` | Return session status, active task, token usage, `currentStep`, and `maxSteps` |
