@@ -53,27 +53,58 @@ class TestEventEmitter:
             )
 
     def test_emit_tool_requested(self) -> None:
-        """emit_tool_requested includes tool details."""
+        """emit_tool_requested includes toolCallId and arguments."""
         ctx = _make_context()
         emitter = EventEmitter(ctx)
 
         with patch.object(emitter, "emit") as mock_emit:
-            emitter.emit_tool_requested("ReadFile", "File.Read", {"path": "/tmp/x"})
+            emitter.emit_tool_requested(
+                "ReadFile", "File.Read", {"path": "/tmp/x"}, tool_call_id="call_abc"
+            )
             mock_emit.assert_called_once()
-            call_args = mock_emit.call_args
-            assert call_args[0][0] == EventType.TOOL_REQUESTED
-            assert call_args[1]["payload"]["toolName"] == "ReadFile"
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["toolCallId"] == "call_abc"
+            assert payload["toolName"] == "ReadFile"
+            assert payload["arguments"] == {"path": "/tmp/x"}
+            assert payload["capability"] == "File.Read"
 
     def test_emit_tool_completed(self) -> None:
-        """emit_tool_completed includes status."""
+        """emit_tool_completed includes toolCallId, result, and error."""
         ctx = _make_context()
         emitter = EventEmitter(ctx)
 
         with patch.object(emitter, "emit") as mock_emit:
-            emitter.emit_tool_completed("ReadFile", "succeeded")
+            emitter.emit_tool_completed(
+                "ReadFile", "succeeded", tool_call_id="call_abc", result="file contents"
+            )
             mock_emit.assert_called_once()
-            call_args = mock_emit.call_args
-            assert call_args[1]["payload"]["status"] == "succeeded"
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["toolCallId"] == "call_abc"
+            assert payload["status"] == "succeeded"
+            assert payload["result"] == "file contents"
+
+    def test_emit_tool_completed_with_error(self) -> None:
+        """emit_tool_completed includes error field when present."""
+        ctx = _make_context()
+        emitter = EventEmitter(ctx)
+
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_tool_completed(
+                "ReadFile", "failed", tool_call_id="call_abc", error="file not found"
+            )
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["error"] == "file not found"
+
+    def test_emit_tool_completed_omits_null_result_and_error(self) -> None:
+        """emit_tool_completed omits result/error when None."""
+        ctx = _make_context()
+        emitter = EventEmitter(ctx)
+
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_tool_completed("ReadFile", "succeeded", tool_call_id="call_abc")
+            payload = mock_emit.call_args[1]["payload"]
+            assert "result" not in payload
+            assert "error" not in payload
 
     def test_emit_with_transport(self) -> None:
         """emit() sends JSON-RPC notification when transport available."""
@@ -157,6 +188,28 @@ class TestEventEmitter:
             payload = mock_emit.call_args[1]["payload"]
             assert payload["sessionId"] == "sess-123"  # from context
             assert payload["title"] == "Approve DeleteFile"  # default
+
+    def test_emit_step_started_uses_step_number(self) -> None:
+        """emit_step_started uses stepNumber key (not step) for desktop compat."""
+        ctx = _make_context()
+        emitter = EventEmitter(ctx)
+
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_step_started("task-1", 3)
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["stepNumber"] == 3
+            assert "step" not in payload
+
+    def test_emit_step_completed_uses_step_number(self) -> None:
+        """emit_step_completed uses stepNumber key for desktop compat."""
+        ctx = _make_context()
+        emitter = EventEmitter(ctx)
+
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_step_completed("task-1", 5)
+            payload = mock_emit.call_args[1]["payload"]
+            assert payload["stepNumber"] == 5
+            assert "step" not in payload
 
     def test_emit_policy_expired(self) -> None:
         """emit_policy_expired emits with warning severity."""

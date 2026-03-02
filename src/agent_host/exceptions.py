@@ -112,3 +112,9 @@ class NoActiveTaskError(AgentHostError):
     """No task is currently running."""
 
     json_rpc_code = -32041
+
+
+class LoopAbortedError(AgentHostError):
+    """Agent loop was aborted due to an unrecoverable error."""
+
+    json_rpc_code = -32050

@@ -32,6 +32,8 @@ coverage.xml
 
 # Environment
 .env
+.env.*
+!.env.*.example
 
 # Runtime logs
 agent_stderr.log

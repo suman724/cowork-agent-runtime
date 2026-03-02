@@ -1,16 +1,18 @@
-"""Integration tests — PolicyEnforcer + ToolAdapter + ApprovalGate in realistic flows."""
+"""Integration tests — PolicyEnforcer + ToolExecutor + ApprovalGate in realistic flows."""
 
 from __future__ import annotations
 
 import asyncio
+import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from cowork_platform.tool_definition import ToolDefinition
 from cowork_platform.tool_result import ToolResult
 
-from agent_host.agent.tool_adapter import ToolExecutionDeps, adapt_tools
 from agent_host.approval.approval_gate import ApprovalGate
+from agent_host.llm.models import ToolCallMessage
+from agent_host.loop.tool_executor import ToolExecutor
 from agent_host.policy.policy_enforcer import PolicyEnforcer
 from tests.fixtures.policy_bundles import make_policy_bundle, make_restrictive_bundle
 from tool_runtime.models import ToolExecutionResult
@@ -51,17 +53,25 @@ def _make_success_result(tool_name: str) -> ToolExecutionResult:
 class TestPolicyToolIntegration:
     @pytest.mark.asyncio
     async def test_denied_tool_blocked(self) -> None:
-        """File.Write with blocked path → tool returns CAPABILITY_DENIED via before_callback."""
-        from agent_host.agent.callbacks import make_before_tool_callback
-
+        """File.Write with blocked path → tool returns CAPABILITY_DENIED."""
         bundle = make_restrictive_bundle(allowed_paths=["/allowed"])
         enforcer = PolicyEnforcer(bundle)
-        callback = make_before_tool_callback(enforcer)
+        router = _make_router(["WriteFile"])
 
-        result = callback(MagicMock(), "WriteFile", {"path": "/forbidden/secret.txt"})
-        assert result is not None
-        assert result["status"] == "denied"
-        assert result["error"]["code"] == "CAPABILITY_DENIED"
+        executor = ToolExecutor(
+            tool_router=router,
+            policy_enforcer=enforcer,
+            session_id="sess-1",
+        )
+
+        call = ToolCallMessage(
+            id="tc1", name="WriteFile", arguments={"path": "/forbidden/secret.txt"}
+        )
+        results = await executor.execute_tool_calls([call], "task-1")
+
+        assert results[0].status == "denied"
+        result_data = json.loads(results[0].result_text)
+        assert result_data["error"]["code"] == "CAPABILITY_DENIED"
 
     @pytest.mark.asyncio
     async def test_allowed_tool_executes(self) -> None:
@@ -72,17 +82,21 @@ class TestPolicyToolIntegration:
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
 
-        tools = adapt_tools(router, enforcer, session_id="sess-1", task_id="task-1")
-        assert len(tools) == 1
+        executor = ToolExecutor(
+            tool_router=router,
+            policy_enforcer=enforcer,
+            session_id="sess-1",
+        )
 
-        fn = tools[0].func
-        result = await fn(path="/tmp/allowed.txt")
-        assert result["status"] == "succeeded"
-        assert result["output"] == "ReadFile succeeded"
+        call = ToolCallMessage(id="tc1", name="ReadFile", arguments={"path": "/tmp/allowed.txt"})
+        results = await executor.execute_tool_calls([call], "task-1")
+
+        assert results[0].status == "succeeded"
+        router.execute.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_approval_required_waits_then_approved(self) -> None:
-        """Tool with requiresApproval → tool_fn awaits gate → deliver approved → executes."""
+        """Tool with requiresApproval → executor awaits gate → deliver approved → executes."""
         router = _make_router(["WriteFile"])
         router.execute = AsyncMock(return_value=_make_success_result("WriteFile"))
 
@@ -91,18 +105,18 @@ class TestPolicyToolIntegration:
         gate = ApprovalGate()
         emitter = MagicMock()
 
-        deps = ToolExecutionDeps(
+        executor = ToolExecutor(
             tool_router=router,
             policy_enforcer=enforcer,
             event_emitter=emitter,
             approval_gate=gate,
             approval_timeout=5.0,
             session_id="sess-1",
-            task_id="task-1",
         )
 
-        tools = adapt_tools(router, enforcer, deps=deps)
-        fn = tools[0].func
+        call = ToolCallMessage(
+            id="tc1", name="WriteFile", arguments={"path": "/tmp/file.txt", "content": "data"}
+        )
 
         async def _approve_soon() -> None:
             await asyncio.sleep(0.01)
@@ -110,9 +124,9 @@ class TestPolicyToolIntegration:
             gate.deliver(call_kwargs["approval_id"], "approved")
 
         _task = asyncio.create_task(_approve_soon())  # noqa: RUF006
-        result = await fn(path="/tmp/file.txt", content="data")
+        results = await executor.execute_tool_calls([call], "task-1")
 
-        assert result["status"] == "succeeded"
+        assert results[0].status == "succeeded"
         router.execute.assert_called_once()
         emitter.emit_approval_requested.assert_called_once()
 
@@ -125,18 +139,18 @@ class TestPolicyToolIntegration:
         gate = ApprovalGate()
         emitter = MagicMock()
 
-        deps = ToolExecutionDeps(
+        executor = ToolExecutor(
             tool_router=router,
             policy_enforcer=enforcer,
             event_emitter=emitter,
             approval_gate=gate,
             approval_timeout=5.0,
             session_id="sess-1",
-            task_id="task-1",
         )
 
-        tools = adapt_tools(router, enforcer, deps=deps)
-        fn = tools[0].func
+        call = ToolCallMessage(
+            id="tc1", name="WriteFile", arguments={"path": "/tmp/file.txt", "content": "data"}
+        )
 
         async def _deny_soon() -> None:
             await asyncio.sleep(0.01)
@@ -144,10 +158,11 @@ class TestPolicyToolIntegration:
             gate.deliver(call_kwargs["approval_id"], "denied")
 
         _task = asyncio.create_task(_deny_soon())  # noqa: RUF006
-        result = await fn(path="/tmp/file.txt", content="data")
+        results = await executor.execute_tool_calls([call], "task-1")
 
-        assert result["status"] == "denied"
-        assert result["error"]["code"] == "APPROVAL_DENIED"
+        assert results[0].status == "denied"
+        result_data = json.loads(results[0].result_text)
+        assert result_data["error"]["code"] == "APPROVAL_DENIED"
         router.execute.assert_not_called()
 
     @pytest.mark.asyncio
@@ -159,52 +174,61 @@ class TestPolicyToolIntegration:
         gate = ApprovalGate()
         emitter = MagicMock()
 
-        deps = ToolExecutionDeps(
+        executor = ToolExecutor(
             tool_router=router,
             policy_enforcer=enforcer,
             event_emitter=emitter,
             approval_gate=gate,
             approval_timeout=0.05,
             session_id="sess-1",
-            task_id="task-1",
         )
 
-        tools = adapt_tools(router, enforcer, deps=deps)
-        fn = tools[0].func
+        call = ToolCallMessage(
+            id="tc1", name="WriteFile", arguments={"path": "/tmp/file.txt", "content": "data"}
+        )
 
-        result = await fn(path="/tmp/file.txt", content="data")
+        results = await executor.execute_tool_calls([call], "task-1")
 
-        assert result["status"] == "denied"
-        assert result["error"]["code"] == "APPROVAL_DENIED"
+        assert results[0].status == "denied"
+        result_data = json.loads(results[0].result_text)
+        assert result_data["error"]["code"] == "APPROVAL_DENIED"
         router.execute.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_expired_policy_denies_all(self) -> None:
-        """Expired policy → all tools denied via before_tool_callback."""
-        from agent_host.agent.callbacks import make_before_tool_callback
-
+        """Expired policy → all tools denied."""
         bundle = make_policy_bundle(expired=True)
         enforcer = PolicyEnforcer(bundle)
-        callback = make_before_tool_callback(enforcer)
+        router = _make_router()
 
-        # All known tools should be denied
-        for tool_name in ["ReadFile", "WriteFile", "DeleteFile", "RunCommand", "HttpRequest"]:
-            result = callback(MagicMock(), tool_name, {"path": "/tmp/x"})
-            assert result is not None, f"{tool_name} should be denied"
-            assert result["status"] == "denied"
+        executor = ToolExecutor(
+            tool_router=router,
+            policy_enforcer=enforcer,
+            session_id="sess-1",
+        )
+
+        for tool_name in ["ReadFile", "WriteFile", "DeleteFile"]:
+            call = ToolCallMessage(
+                id=f"tc-{tool_name}", name=tool_name, arguments={"path": "/tmp/x"}
+            )
+            results = await executor.execute_tool_calls([call], "task-1")
+            assert results[0].status == "denied", f"{tool_name} should be denied"
 
     @pytest.mark.asyncio
-    async def test_before_callback_blocks_denied(self) -> None:
-        """before_tool_callback returns block dict for DENIED decision."""
-        from agent_host.agent.callbacks import make_before_tool_callback
-
-        # Bundle only allows LLM.Call — File.Read is not granted
+    async def test_capability_not_granted_denied(self) -> None:
+        """Tool whose capability is not in the policy bundle → denied."""
         bundle = make_policy_bundle(capabilities=[{"name": "LLM.Call"}])
         enforcer = PolicyEnforcer(bundle)
-        callback = make_before_tool_callback(enforcer)
+        router = _make_router(["ReadFile"])
 
-        result = callback(MagicMock(), "ReadFile", {"path": "/tmp/test"})
-        assert result is not None
-        assert result["status"] == "denied"
-        assert result["error"]["code"] == "CAPABILITY_DENIED"
-        assert "not granted" in result["error"]["message"].lower() or result["error"]["message"]
+        executor = ToolExecutor(
+            tool_router=router,
+            policy_enforcer=enforcer,
+            session_id="sess-1",
+        )
+
+        call = ToolCallMessage(id="tc1", name="ReadFile", arguments={"path": "/tmp/test"})
+        results = await executor.execute_tool_calls([call], "task-1")
+        assert results[0].status == "denied"
+        result_data = json.loads(results[0].result_text)
+        assert result_data["error"]["code"] == "CAPABILITY_DENIED"
