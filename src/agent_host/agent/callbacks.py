@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from agent_host.agent.context_truncation import truncate_contents
 from agent_host.agent.tool_adapter import get_capability_for_tool
 from agent_host.exceptions import PolicyExpiredError
 
@@ -76,16 +77,22 @@ def make_before_model_callback(
     policy_enforcer: PolicyEnforcer,
     token_budget: TokenBudget,
     event_emitter: EventEmitter | None = None,
+    max_context_tokens: int = 100_000,
 ) -> Any:
     """Create a before_model_callback for policy and budget enforcement.
 
     Returns None to proceed with the LLM call, or an LlmResponse to skip it.
+    Also truncates context if it exceeds the token budget.
     """
 
     def before_model_callback(
         callback_context: CallbackContext,
-        llm_request: LlmRequest,  # noqa: ARG001
+        llm_request: LlmRequest,
     ) -> LlmResponse | None:
+        # Truncate context window if too large
+        if llm_request.contents:
+            llm_request.contents = truncate_contents(llm_request.contents, max_context_tokens)
+
         # Check policy (LLM.Call capability + not expired)
         result = policy_enforcer.check_llm_call()
         if result.decision == "DENIED":
