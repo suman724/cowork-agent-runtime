@@ -31,13 +31,17 @@ from agent_host.exceptions import (
 )
 from agent_host.llm.client import LLMClient
 from agent_host.loop.agent_loop import AgentLoop
+from agent_host.loop.sub_agent import SubAgentManager
 from agent_host.loop.system_prompt import SystemPromptBuilder
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
+from agent_host.memory.working_memory import WorkingMemory
 from agent_host.models import SessionContext
 from agent_host.policy.policy_enforcer import PolicyEnforcer
 from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
+from agent_host.skills.skill_executor import SkillExecutor
+from agent_host.skills.skill_loader import SkillLoader
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 
@@ -45,6 +49,7 @@ if TYPE_CHECKING:
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.server.stdio_transport import StdioTransport
+    from agent_host.skills.models import SkillDefinition
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -93,6 +98,12 @@ class SessionManager:
 
         # Message thread (replaces ADK session)
         self._thread: MessageThread | None = None
+
+        # Working memory (task tracker, plan, notes — injected per-turn)
+        self._working_memory: WorkingMemory | None = None
+
+        # Skills (loaded from built-in, workspace YAML, and policy bundle)
+        self._skills: list[SkillDefinition] = []
 
         # Session state
         self._session_context: SessionContext | None = None
@@ -313,6 +324,12 @@ class SessionManager:
         # Message thread
         self._thread = MessageThread(system_prompt=prompt_builder.build_static_prompt())
 
+        # Load skills
+        skill_loader = SkillLoader(workspace_dir=None)
+        self._skills = skill_loader.load_all()
+        if self._skills:
+            logger.info("skills_loaded", count=len(self._skills))
+
     async def start_task(self, params: dict[str, Any]) -> dict[str, Any]:
         """Start a new task (agent work cycle) from a user prompt.
 
@@ -377,6 +394,28 @@ class SessionManager:
             # Build compactor
             compactor = DropOldestCompactor(recency_window=self._config.recency_window)
 
+            # Working memory (task tracker, plan, notes — injected per-turn)
+            if not self._working_memory:
+                self._working_memory = WorkingMemory()
+
+            # Sub-agent manager (for SpawnAgent tool)
+            sub_agent_manager = SubAgentManager(
+                llm_client=self._llm_client,
+                tool_executor=tool_executor,
+                policy_enforcer=self._policy_enforcer,
+                token_budget=self._token_budget,
+                max_context_tokens=self._config.max_context_tokens,
+            )
+
+            # Skill executor (for skill tools)
+            skill_executor = SkillExecutor(
+                llm_client=self._llm_client,
+                tool_executor=tool_executor,
+                policy_enforcer=self._policy_enforcer,
+                token_budget=self._token_budget,
+                max_context_tokens=self._config.max_context_tokens,
+            )
+
             # Build and run agent loop
             loop = AgentLoop(
                 llm_client=self._llm_client,
@@ -389,6 +428,10 @@ class SessionManager:
                 cancellation_event=self._cancel_event,
                 max_steps=max_steps,
                 max_context_tokens=self._config.max_context_tokens,
+                working_memory=self._working_memory,
+                sub_agent_manager=sub_agent_manager,
+                skill_executor=skill_executor,
+                skills=self._skills,
             )
 
             result = await loop.run(task_id)
@@ -436,6 +479,9 @@ class SessionManager:
             token_output_used=(self._token_budget.output_tokens_used if self._token_budget else 0),
             session_messages=[msg.model_dump(mode="json") for msg in self._session_messages],
             thread=self._thread.to_checkpoint() if self._thread else None,
+            working_memory=(
+                self._working_memory.to_checkpoint() if self._working_memory else None
+            ),
         )
         self._checkpoint_manager.save(checkpoint)
 
@@ -467,6 +513,14 @@ class SessionManager:
                 "thread_restored_from_checkpoint",
                 message_count=restored_thread.message_count,
             )
+
+        # Restore working memory
+        if checkpoint.working_memory:
+            try:
+                self._working_memory = WorkingMemory.from_checkpoint(checkpoint.working_memory)
+                logger.info("working_memory_restored_from_checkpoint")
+            except Exception:
+                logger.warning("working_memory_restore_failed", exc_info=True)
 
         # Restore session messages
         if checkpoint.session_messages and not self._session_messages:
@@ -714,6 +768,7 @@ class SessionManager:
         self._approval_gate = None
         self._file_change_tracker = None
         self._thread = None
+        self._working_memory = None
 
         logger.info("session_shutdown", session_id=session_id)
         return {"status": "shutdown", "sessionId": session_id}

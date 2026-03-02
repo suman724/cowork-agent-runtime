@@ -18,9 +18,12 @@ if TYPE_CHECKING:
     from agent_host.budget.token_budget import TokenBudget
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
+    from agent_host.loop.sub_agent import SubAgentManager
     from agent_host.loop.tool_executor import ToolExecutor
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_host.skills.models import SkillDefinition
+    from agent_host.skills.skill_executor import SkillExecutor
     from agent_host.thread.compactor import ContextCompactor
     from agent_host.thread.message_thread import MessageThread
 
@@ -47,6 +50,9 @@ class AgentLoop:
         max_steps: int = 50,
         max_context_tokens: int = 100_000,
         working_memory: WorkingMemory | None = None,
+        sub_agent_manager: SubAgentManager | None = None,
+        skill_executor: SkillExecutor | None = None,
+        skills: list[SkillDefinition] | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -59,7 +65,16 @@ class AgentLoop:
         self._max_steps = max_steps
         self._max_context_tokens = max_context_tokens
         self._working_memory = working_memory
-        self._agent_tool_handler = AgentToolHandler(working_memory) if working_memory else None
+        self._agent_tool_handler = (
+            AgentToolHandler(
+                working_memory,
+                sub_agent_manager=sub_agent_manager,
+                skill_executor=skill_executor,
+                skills=skills,
+            )
+            if working_memory
+            else None
+        )
         self._error_recovery = ErrorRecovery()
 
     async def run(self, task_id: str) -> LoopResult:
@@ -192,7 +207,9 @@ class AgentLoop:
 
             # Execute agent-internal tools (no policy, no ToolRouter)
             for ac in agent_calls:
-                result_dict = await self._agent_tool_handler.execute(ac.name, ac.arguments)  # type: ignore[union-attr]
+                handler = self._agent_tool_handler
+                assert handler is not None  # guaranteed when agent_calls is non-empty
+                result_dict = await handler.execute(ac.name, ac.arguments, task_id=task_id)
                 result_text = json.dumps(result_dict, default=str)
                 self._thread.add_tool_result(ac.id, ac.name, result_text)
 

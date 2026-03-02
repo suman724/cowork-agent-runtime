@@ -113,7 +113,12 @@ class ToolExecutor:
                     reason=check.reason,
                 )
                 if self._event_emitter:
-                    self._event_emitter.emit_tool_completed(tool_name, "denied")
+                    self._event_emitter.emit_tool_completed(
+                        tool_name,
+                        "denied",
+                        tool_call_id=call.id,
+                        error=check.reason,
+                    )
                 denial_msg = json.dumps(
                     {
                         "status": "denied",
@@ -130,7 +135,9 @@ class ToolExecutor:
 
             # 2. Emit tool_requested event
             if self._event_emitter:
-                self._event_emitter.emit_tool_requested(tool_name, capability_name, arguments)
+                self._event_emitter.emit_tool_requested(
+                    tool_name, capability_name, arguments, tool_call_id=call.id
+                )
 
             # 3. Approval gate if required
             if check.decision == "APPROVAL_REQUIRED":
@@ -140,7 +147,9 @@ class ToolExecutor:
         else:
             # Unknown tool — still emit requested event
             if self._event_emitter:
-                self._event_emitter.emit_tool_requested(tool_name, "", arguments)
+                self._event_emitter.emit_tool_requested(
+                    tool_name, "", arguments, tool_call_id=call.id
+                )
 
         # 4. File change tracking: capture old content BEFORE execution
         old_content, file_path_arg = self._capture_pre_state(tool_name, arguments)
@@ -168,12 +177,16 @@ class ToolExecutor:
 
             # 7. Emit tool_completed event
             status = exec_result.tool_result.status
-            if self._event_emitter:
-                self._event_emitter.emit_tool_completed(tool_name, status)
-
-            # Build result text
             output = exec_result.tool_result.outputText or ""
             error = exec_result.tool_result.error
+            if self._event_emitter:
+                self._event_emitter.emit_tool_completed(
+                    tool_name,
+                    status,
+                    tool_call_id=call.id,
+                    result=output[:_MAX_TOOL_OUTPUT_LENGTH] if output else None,
+                    error=error.message if error else None,
+                )
             result_dict: dict[str, Any] = {"status": status, "output": output}
             if error:
                 result_dict["error"] = error.model_dump()
@@ -196,7 +209,12 @@ class ToolExecutor:
                 exc_info=True,
             )
             if self._event_emitter:
-                self._event_emitter.emit_tool_completed(tool_name, "failed")
+                self._event_emitter.emit_tool_completed(
+                    tool_name,
+                    "failed",
+                    tool_call_id=call.id,
+                    error=str(exc),
+                )
             error_text = json.dumps(
                 {
                     "status": "failed",
@@ -243,7 +261,12 @@ class ToolExecutor:
                 approval_id=approval_id,
             )
             if self._event_emitter:
-                self._event_emitter.emit_tool_completed(call.name, "denied")
+                self._event_emitter.emit_tool_completed(
+                    call.name,
+                    "denied",
+                    tool_call_id=call.id,
+                    error=f"User {decision} the {call.name} tool call",
+                )
             denial_text = json.dumps(
                 {
                     "status": "denied",

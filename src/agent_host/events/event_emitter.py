@@ -1,4 +1,4 @@
-"""Event emitter — bridges ADK events to JSON-RPC notifications + structlog."""
+"""Event emitter — emits agent loop events as JSON-RPC notifications + structlog."""
 
 from __future__ import annotations
 
@@ -107,23 +107,39 @@ class EventEmitter:
         self,
         tool_name: str,
         capability: str,
-        arguments: dict[str, Any],  # noqa: ARG002
+        arguments: dict[str, Any],
+        tool_call_id: str = "",
     ) -> None:
         """Emit tool_requested event."""
         self.emit(
             EventType.TOOL_REQUESTED,
             payload={
+                "toolCallId": tool_call_id,
                 "toolName": tool_name,
                 "capability": capability,
+                "arguments": arguments,
             },
         )
 
-    def emit_tool_completed(self, tool_name: str, status: str) -> None:
+    def emit_tool_completed(
+        self,
+        tool_name: str,
+        status: str,
+        tool_call_id: str = "",
+        result: str | None = None,
+        error: str | None = None,
+    ) -> None:
         """Emit tool_completed event."""
-        self.emit(
-            EventType.TOOL_COMPLETED,
-            payload={"toolName": tool_name, "status": status},
-        )
+        payload: dict[str, Any] = {
+            "toolCallId": tool_call_id,
+            "toolName": tool_name,
+            "status": status,
+        }
+        if result is not None:
+            payload["result"] = result
+        if error is not None:
+            payload["error"] = error
+        self.emit(EventType.TOOL_COMPLETED, payload=payload)
 
     def emit_approval_requested(
         self,
@@ -201,7 +217,7 @@ class EventEmitter:
         self.emit(
             EventType.STEP_STARTED,
             task_id=task_id,
-            payload={"step": step},
+            payload={"stepNumber": step},
         )
 
     def emit_step_completed(self, task_id: str, step: int) -> None:
@@ -209,7 +225,7 @@ class EventEmitter:
         self.emit(
             EventType.STEP_COMPLETED,
             task_id=task_id,
-            payload={"step": step},
+            payload={"stepNumber": step},
         )
 
     def emit_context_compacted(
@@ -221,7 +237,7 @@ class EventEmitter:
     ) -> None:
         """Emit context_compacted event when message truncation occurs."""
         self.emit(
-            "context_compacted",
+            EventType.CONTEXT_COMPACTED,
             task_id=task_id,
             payload={
                 "messagesDropped": messages_dropped,

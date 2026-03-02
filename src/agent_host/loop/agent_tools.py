@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from agent_host.loop.sub_agent import SubAgentManager
     from agent_host.memory.working_memory import WorkingMemory
+    from agent_host.skills.models import SkillDefinition
+    from agent_host.skills.skill_executor import SkillExecutor
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
 AGENT_TOOL_NAMES = {"TaskTracker", "CreatePlan", "SpawnAgent"}
@@ -23,15 +25,22 @@ class AgentToolHandler:
         self,
         working_memory: WorkingMemory,
         sub_agent_manager: SubAgentManager | None = None,
+        skill_executor: SkillExecutor | None = None,
+        skills: list[SkillDefinition] | None = None,
     ) -> None:
         self._working_memory = working_memory
         self._sub_agent_manager = sub_agent_manager
+        self._skill_executor = skill_executor
+        self._skills = {s.name: s for s in (skills or [])}
+        self._skill_tool_names = {f"Skill_{s.name}" for s in (skills or [])}
 
     def is_agent_tool(self, name: str) -> bool:
-        """Check if a tool name is an agent-internal tool."""
-        return name in AGENT_TOOL_NAMES
+        """Check if a tool name is an agent-internal tool or a skill."""
+        return name in AGENT_TOOL_NAMES or name in self._skill_tool_names
 
-    async def execute(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def execute(
+        self, tool_name: str, arguments: dict[str, Any], task_id: str = ""
+    ) -> dict[str, Any]:
         """Execute an agent-internal tool and return the result."""
         if tool_name == "TaskTracker":
             return self._handle_task_tracker(arguments)
@@ -39,6 +48,8 @@ class AgentToolHandler:
             return self._handle_create_plan(arguments)
         if tool_name == "SpawnAgent":
             return await self._handle_spawn_agent(arguments)
+        if tool_name in self._skill_tool_names:
+            return await self._handle_skill(tool_name, arguments, task_id)
         return {"status": "error", "message": f"Unknown agent tool: {tool_name}"}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
@@ -133,6 +144,21 @@ class AgentToolHandler:
                     },
                 }
             )
+        # Add skill tools
+        for skill in self._skills.values():
+            skill_def: dict[str, Any] = {
+                "type": "function",
+                "function": {
+                    "name": f"Skill_{skill.name}",
+                    "description": skill.description,
+                },
+            }
+            if skill.input_schema:
+                skill_def["function"]["parameters"] = skill.input_schema
+            else:
+                skill_def["function"]["parameters"] = {"type": "object", "properties": {}}
+            defs.append(skill_def)
+
         return defs
 
     def _handle_task_tracker(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -201,4 +227,23 @@ class AgentToolHandler:
             task=task,
             context=context,
             parent_task_id="",  # Will be set by the caller if needed
+        )
+
+    async def _handle_skill(
+        self, tool_name: str, arguments: dict[str, Any], task_id: str
+    ) -> dict[str, Any]:
+        """Handle skill tool calls by delegating to SkillExecutor."""
+        if not self._skill_executor:
+            return {"status": "error", "message": "Skill execution is not available"}
+
+        # Strip "Skill_" prefix to get the skill name
+        skill_name = tool_name.removeprefix("Skill_")
+        skill = self._skills.get(skill_name)
+        if not skill:
+            return {"status": "error", "message": f"Unknown skill: {skill_name}"}
+
+        return await self._skill_executor.execute(
+            skill=skill,
+            arguments=arguments,
+            parent_task_id=task_id,
         )
