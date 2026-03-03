@@ -21,9 +21,7 @@ def context() -> ExecutionContext:
 
 
 class TestExecuteCodeTool:
-    async def test_simple_execution(
-        self, tool: ExecuteCodeTool, context: ExecutionContext
-    ) -> None:
+    async def test_simple_execution(self, tool: ExecuteCodeTool, context: ExecutionContext) -> None:
         result = await tool.execute(
             {"code": "print(2 + 2)", "description": "Add two numbers"}, context
         )
@@ -58,9 +56,7 @@ class TestExecuteCodeTool:
         )
         assert "TIMED OUT" in result.output_text
 
-    async def test_policy_timeout_takes_precedence(
-        self, tool: ExecuteCodeTool
-    ) -> None:
+    async def test_policy_timeout_takes_precedence(self, tool: ExecuteCodeTool) -> None:
         ctx = ExecutionContext(max_execution_time_seconds=1)
         result = await tool.execute(
             {

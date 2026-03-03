@@ -5,7 +5,7 @@ options for readable text output. Uses underscore-prefixed names to avoid
 polluting the user's namespace.
 """
 
-PREAMBLE = '''
+PREAMBLE = """
 import os as _os, sys as _sys
 
 # Hook matplotlib to save figures instead of displaying
@@ -37,4 +37,4 @@ try:
     _pd.set_option("display.width", 120)
 except ImportError:
     pass
-'''
+"""

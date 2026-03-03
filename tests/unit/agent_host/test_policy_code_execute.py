@@ -18,9 +18,7 @@ class TestCodeExecutePolicy:
         assert result.decision == "ALLOWED"
 
     def test_code_execute_denied_when_not_granted(self) -> None:
-        bundle = make_policy_bundle(
-            capabilities=[{"name": "File.Read"}, {"name": "LLM.Call"}]
-        )
+        bundle = make_policy_bundle(capabilities=[{"name": "File.Read"}, {"name": "LLM.Call"}])
         enforcer = PolicyEnforcer(bundle)
         result = enforcer.check_tool_call(
             "ExecuteCode", CapabilityName.CODE_EXECUTE, {"code": "print(1)"}
@@ -63,9 +61,7 @@ class TestCodeExecutePolicy:
 
     def test_code_execute_allowed_when_no_language_restriction(self) -> None:
         """When allowedLanguages is None, defaults to ['python'] — which allows Python."""
-        bundle = make_policy_bundle(
-            capabilities=[{"name": "Code.Execute"}, {"name": "LLM.Call"}]
-        )
+        bundle = make_policy_bundle(capabilities=[{"name": "Code.Execute"}, {"name": "LLM.Call"}])
         enforcer = PolicyEnforcer(bundle)
         result = enforcer.check_tool_call(
             "ExecuteCode", CapabilityName.CODE_EXECUTE, {"code": "print(1)"}

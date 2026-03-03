@@ -95,8 +95,11 @@ class ExecuteCodeTool(BaseTool):
 
         # Format output (same structure as RunCommand for LLM familiarity)
         formatted = _format_code_output(
-            result.exit_code, result.stdout, result.stderr,
-            result.execution_time, result.timed_out,
+            result.exit_code,
+            result.stdout,
+            result.stderr,
+            result.execution_time,
+            result.timed_out,
         )
         output_text = f"# {description}\n{formatted}"
 
