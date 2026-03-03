@@ -11,11 +11,14 @@ from cowork_platform.tool_result import Error, ToolResult
 from tool_runtime.exceptions import ToolNotFoundError, ToolRuntimeError
 from tool_runtime.models import ExecutionContext, ToolExecutionResult
 from tool_runtime.platform.detection import get_platform
+from tool_runtime.tools.file.create_directory import CreateDirectoryTool
 from tool_runtime.tools.file.delete_file import DeleteFileTool
 from tool_runtime.tools.file.edit_file import EditFileTool
 from tool_runtime.tools.file.find_files import FindFilesTool
 from tool_runtime.tools.file.grep_files import GrepFilesTool
 from tool_runtime.tools.file.list_directory import ListDirectoryTool
+from tool_runtime.tools.file.move_file import MoveFileTool
+from tool_runtime.tools.file.multi_edit import MultiEditTool
 from tool_runtime.tools.file.read_file import ReadFileTool
 from tool_runtime.tools.file.view_image import ViewImageTool
 from tool_runtime.tools.file.write_file import WriteFileTool
@@ -53,7 +56,10 @@ class ToolRouter:
         self._register(WriteFileTool(self._platform))
         self._register(DeleteFileTool(self._platform))
         self._register(EditFileTool(self._platform))
+        self._register(MultiEditTool(self._platform))
         self._register(ListDirectoryTool(self._platform))
+        self._register(CreateDirectoryTool(self._platform))
+        self._register(MoveFileTool(self._platform))
         self._register(ViewImageTool(self._platform))
         self._register(FindFilesTool())
         self._register(GrepFilesTool())

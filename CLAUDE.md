@@ -27,7 +27,7 @@ agent_host/     ← Local Agent Host (custom agent loop)
 tool_runtime/   ← Local Tool Runtime (tool execution)
   router/       — ToolRouter implementation, tool registry, dispatch
   tools/
-    file/       — ReadFile, WriteFile, DeleteFile, EditFile, ListDirectory, FindFiles, GrepFiles, ViewImage
+    file/       — ReadFile, WriteFile, DeleteFile, EditFile, MultiEdit, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage
     shell/      — RunCommand
     network/    — HttpRequest, FetchUrl, WebSearch
   platform/     — OS abstraction (path handling, shell resolution, encoding) for macOS/Windows
@@ -69,11 +69,14 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 | `WriteFile` | `File.Write` | Atomic file write with diff generation |
 | `DeleteFile` | `File.Delete` | Delete a file |
 | `EditFile` | `File.Write` | Exact-match find-and-replace editing |
+| `MultiEdit` | `File.Write` | Batch multiple find-and-replace edits atomically |
+| `CreateDirectory` | `File.Write` | Create directories without shell commands |
+| `MoveFile` | `File.Write` | Move or rename files and directories |
 | `ListDirectory` | `File.Read` | List files and directories at a path |
 | `FindFiles` | `File.Read` | Glob-pattern file discovery across a directory tree |
 | `GrepFiles` | `File.Read` | Regex search across files |
 | `ViewImage` | `File.Read` | Read image file, return base64 for multimodal LLM |
-| `RunCommand` | `Shell.Exec` | Execute shell commands |
+| `RunCommand` | `Shell.Exec` | Execute shell commands (requires description) |
 | `HttpRequest` | `Network.Http` | General HTTP requests |
 | `FetchUrl` | `Network.Http` | Fetch URL, convert HTML→markdown |
 | `WebSearch` | `Search.Web` | Web search via Tavily API |
@@ -141,7 +144,7 @@ cowork-agent-runtime/
       __init__.py
       router/                 # ToolRouter implementation
       tools/
-        file/                 # ReadFile, WriteFile, DeleteFile, EditFile, ListDirectory, FindFiles, GrepFiles, ViewImage
+        file/                 # ReadFile, WriteFile, DeleteFile, EditFile, MultiEdit, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage
         shell/                # RunCommand
         network/              # HttpRequest, FetchUrl, WebSearch
       platform/               # OS abstraction (macOS/Windows)

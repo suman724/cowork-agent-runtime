@@ -29,6 +29,9 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "WriteFile": "File.Write",
     "DeleteFile": "File.Delete",
     "EditFile": "File.Write",
+    "MultiEdit": "File.Write",
+    "CreateDirectory": "File.Write",
+    "MoveFile": "File.Write",
     "ListDirectory": "File.Read",
     "FindFiles": "File.Read",
     "GrepFiles": "File.Read",
@@ -40,8 +43,9 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
 }
 
 # Tools that mutate files
-_FILE_WRITE_TOOLS = {"WriteFile", "EditFile"}
+_FILE_WRITE_TOOLS = {"WriteFile", "EditFile", "MultiEdit"}
 _FILE_DELETE_TOOLS = {"DeleteFile"}
+_FILE_MOVE_TOOLS = {"MoveFile"}
 
 # Maximum length for tool output stored in history messages
 _MAX_TOOL_OUTPUT_LENGTH = 4000
@@ -324,6 +328,13 @@ class ToolExecutor:
                     old_content = Path(file_path_arg).read_text(encoding="utf-8")
                 except (FileNotFoundError, OSError):
                     old_content = ""
+        elif tool_name in _FILE_MOVE_TOOLS:
+            file_path_arg = arguments.get("source", "")
+            if file_path_arg:
+                try:
+                    old_content = Path(file_path_arg).read_text(encoding="utf-8")
+                except (FileNotFoundError, OSError):
+                    old_content = None
 
         return old_content, file_path_arg
 
@@ -347,6 +358,17 @@ class ToolExecutor:
             self._file_change_tracker.record_write(task_id, file_path_arg, old_content, new_content)
         elif tool_name in _FILE_DELETE_TOOLS:
             self._file_change_tracker.record_delete(task_id, file_path_arg, old_content or "")
+        elif tool_name in _FILE_MOVE_TOOLS:
+            source = arguments.get("source", "")
+            dest = arguments.get("destination", "")
+            # Record deletion at source
+            self._file_change_tracker.record_delete(task_id, source, old_content or "")
+            # Record creation at destination
+            try:
+                new_content = Path(dest).read_text(encoding="utf-8")
+            except (FileNotFoundError, OSError):
+                new_content = old_content or ""
+            self._file_change_tracker.record_write(task_id, dest, None, new_content)
 
     def _upload_artifacts(
         self,
