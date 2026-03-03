@@ -9,7 +9,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from openai import AsyncOpenAI
 
-from agent_host.llm.error_classifier import is_transient_llm_error
+from agent_host.exceptions import LLMGatewayError
+from agent_host.llm.error_classifier import (
+    extract_retry_after,
+    is_rate_limit_error,
+    is_transient_llm_error,
+)
 from agent_host.llm.models import LLMResponse, ToolCallMessage
 from agent_host.thread.token_counter import estimate_message_tokens, estimate_tokens
 
@@ -84,10 +89,22 @@ class LLMClient:
             except Exception as exc:
                 last_error = exc
                 if is_transient_llm_error(exc) and attempt < self._max_retries:
-                    delay = min(
-                        self._retry_base_delay * (2**attempt),
-                        self._retry_max_delay,
-                    )
+                    # Use Retry-After header for rate limits when available,
+                    # otherwise fall back to exponential backoff
+                    retry_after = extract_retry_after(exc) if is_rate_limit_error(exc) else None
+                    if retry_after is not None:
+                        delay = min(retry_after, self._retry_max_delay)
+                    elif getattr(exc, "status_code", None) == 529:
+                        # 529 Overloaded: longer backoff (3x base)
+                        delay = min(
+                            self._retry_base_delay * 3 * (2**attempt),
+                            self._retry_max_delay,
+                        )
+                    else:
+                        delay = min(
+                            self._retry_base_delay * (2**attempt),
+                            self._retry_max_delay,
+                        )
                     jitter = random.uniform(0, delay * 0.25)  # noqa: S311
                     delay += jitter
 
@@ -97,6 +114,7 @@ class LLMClient:
                         max_retries=self._max_retries,
                         delay=delay,
                         error=str(exc),
+                        rate_limited=is_rate_limit_error(exc),
                     )
                     if self._event_emitter:
                         self._event_emitter.emit_llm_retry(
@@ -108,10 +126,30 @@ class LLMClient:
                         )
                     await asyncio.sleep(delay)
                     continue
+
+                # Wrap transient errors that exhausted retries in LLMGatewayError
+                # with a user-friendly message (permanent errors re-raise as-is)
+                if is_transient_llm_error(exc):
+                    raise self._wrap_llm_error(exc) from exc
                 raise
 
         # Should not reach here, but satisfy type checker
-        raise last_error  # type: ignore[misc]
+        if last_error:
+            raise self._wrap_llm_error(last_error)
+        raise RuntimeError("unreachable")
+
+    @staticmethod
+    def _wrap_llm_error(exc: Exception) -> LLMGatewayError:
+        """Wrap a raw LLM exception in LLMGatewayError with a clean message."""
+        if is_rate_limit_error(exc):
+            return LLMGatewayError(
+                "Rate limited by the LLM provider. Please wait a moment and try again.",
+                details={"original_error": str(exc), "error_type": "rate_limit"},
+            )
+        return LLMGatewayError(
+            "LLM service is temporarily unavailable. Please try again.",
+            details={"original_error": str(exc), "error_type": "transient"},
+        )
 
     async def _do_stream(
         self,

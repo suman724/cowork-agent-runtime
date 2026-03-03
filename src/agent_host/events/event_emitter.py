@@ -82,9 +82,22 @@ class EventEmitter:
         """Emit task_completed event when a single task finishes successfully."""
         self.emit(EventType.TASK_COMPLETED, task_id=task_id)
 
-    def emit_task_failed(self, task_id: str, reason: str | None = None) -> None:
+    def emit_task_failed(
+        self,
+        task_id: str,
+        reason: str | None = None,
+        *,
+        error_code: str | None = None,
+        error_type: str | None = None,
+        is_recoverable: bool = False,
+    ) -> None:
         """Emit task_failed event when a single task fails."""
-        payload = {"message": reason} if reason else {}
+        payload: dict[str, Any] = {"message": reason or "Task failed"}
+        if error_code:
+            payload["errorCode"] = error_code
+        if error_type:
+            payload["errorType"] = error_type
+        payload["isRecoverable"] = is_recoverable
         self.emit(EventType.TASK_FAILED, task_id=task_id, payload=payload, severity="error")
 
     def emit_session_completed(self) -> None:
