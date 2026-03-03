@@ -30,6 +30,8 @@ tool_runtime/   ← Local Tool Runtime (tool execution)
     file/       — ReadFile, WriteFile, DeleteFile, EditFile, MultiEdit, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage
     shell/      — RunCommand
     network/    — HttpRequest, FetchUrl, WebSearch
+    code/       — ExecuteCode (Python script execution)
+  code/         — Code execution engine (PythonExecutor, preamble, CodeExecutionResult)
   platform/     — OS abstraction (path handling, shell resolution, encoding) for macOS/Windows
   mcp/          — MCP client: discovery, connection, manifest translation (Phase 2+)
   output/       — Output formatting, truncation, artifact extraction
@@ -80,6 +82,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 | `HttpRequest` | `Network.Http` | General HTTP requests |
 | `FetchUrl` | `Network.Http` | Fetch URL, convert HTML→markdown |
 | `WebSearch` | `Search.Web` | Web search via Tavily API |
+| `ExecuteCode` | `Code.Execute` | Execute Python scripts with output capture and matplotlib support |
 
 ## Environment Variables
 
@@ -147,6 +150,8 @@ cowork-agent-runtime/
         file/                 # ReadFile, WriteFile, DeleteFile, EditFile, MultiEdit, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage
         shell/                # RunCommand
         network/              # HttpRequest, FetchUrl, WebSearch
+        code/                 # ExecuteCode
+      code/                   # PythonExecutor, preamble, CodeExecutionResult
       platform/               # OS abstraction (macOS/Windows)
       mcp/                    # MCP client (Phase 2+)
       output/                 # Formatting, truncation, artifact extraction

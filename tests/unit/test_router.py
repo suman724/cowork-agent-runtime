@@ -69,6 +69,7 @@ class TestToolRouter:
             "GrepFiles",
             "ViewImage",
             "RunCommand",
+            "ExecuteCode",
             "HttpRequest",
             "FetchUrl",
             "WebSearch",

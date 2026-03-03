@@ -157,4 +157,13 @@ class PolicyEnforcer:
                 if not allowed:
                     return PolicyCheckResult(decision="DENIED", reason=reason)
 
+        elif capability_name == CapabilityName.CODE_EXECUTE:
+            # Phase 1: Python-only. Validate that "python" is in the allowed languages list.
+            allowed_languages = capability.allowedLanguages or ["python"]
+            if "python" not in allowed_languages:
+                return PolicyCheckResult(
+                    decision="DENIED",
+                    reason="Python execution not permitted by policy",
+                )
+
         return None

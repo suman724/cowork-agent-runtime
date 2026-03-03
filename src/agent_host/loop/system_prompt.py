@@ -5,6 +5,10 @@ from __future__ import annotations
 import platform
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from agent_host.policy.policy_enforcer import PolicyEnforcer
 
 # Base system prompt — same as the prior SYSTEM_PROMPT from agent_factory.py
 _BASE_SYSTEM_PROMPT = """You are Cowork, a capable AI assistant running on the user's desktop.
@@ -28,7 +32,7 @@ class SystemPromptBuilder:
         self._os_family = os_family or platform.system()
         self._workspace_context = self._detect_workspace(workspace_dir)
 
-    def build_static_prompt(self) -> str:
+    def build_static_prompt(self, policy_enforcer: PolicyEnforcer | None = None) -> str:
         """Build the static system prompt (identity + guidelines + workspace context)."""
         parts = [_BASE_SYSTEM_PROMPT]
 
@@ -41,6 +45,12 @@ class SystemPromptBuilder:
         # Workspace context
         if self._workspace_context:
             parts.append(f"\nWorkspace:\n{self._workspace_context}")
+
+        # Capability-dependent guidance
+        if policy_enforcer is not None:
+            cap_guidance = self._build_capability_guidance(policy_enforcer)
+            if cap_guidance:
+                parts.append(cap_guidance)
 
         return "\n".join(parts)
 
@@ -72,6 +82,27 @@ class SystemPromptBuilder:
             parts.append(error_recovery.build_reflection_prompt())
 
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _build_capability_guidance(policy_enforcer: PolicyEnforcer) -> str:
+        """Build guidance text based on granted capabilities."""
+        parts: list[str] = []
+
+        from cowork_platform_sdk import CapabilityName
+
+        if policy_enforcer.get_capability(CapabilityName.CODE_EXECUTE) is not None:
+            parts.append(
+                "\nYou have access to the ExecuteCode tool for running Python scripts.\n"
+                "Use it for: data analysis, calculations, testing code you've written, "
+                "prototyping.\n"
+                "Each execution is independent — write complete, self-contained scripts.\n"
+                "You can generate plots with matplotlib (plt.show() saves images "
+                "automatically).\n"
+                "For file operations on the workspace, prefer the dedicated file tools "
+                "(ReadFile, WriteFile)."
+            )
+
+        return "\n".join(parts)
 
     @staticmethod
     def _detect_workspace(workspace_dir: str | None) -> str:

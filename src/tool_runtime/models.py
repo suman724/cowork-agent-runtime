@@ -39,6 +39,8 @@ class ExecutionContext:
     max_output_bytes: int | None = None
     command_timeout_seconds: int | None = None
     working_directory: str | None = None
+    allow_code_network: bool = False
+    max_execution_time_seconds: int | None = None
 
 
 @dataclass

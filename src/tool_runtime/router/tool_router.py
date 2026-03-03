@@ -25,6 +25,7 @@ from tool_runtime.tools.file.write_file import WriteFileTool
 from tool_runtime.tools.network.fetch_url import FetchUrlTool
 from tool_runtime.tools.network.http_request import HttpRequestTool
 from tool_runtime.tools.network.web_search import WebSearchTool
+from tool_runtime.tools.code.execute_code import ExecuteCodeTool
 from tool_runtime.tools.shell.run_command import RunCommandTool
 
 if TYPE_CHECKING:
@@ -64,6 +65,7 @@ class ToolRouter:
         self._register(FindFilesTool())
         self._register(GrepFilesTool())
         self._register(RunCommandTool(self._platform))
+        self._register(ExecuteCodeTool(self._platform))
         self._register(HttpRequestTool(http_client))
         self._register(FetchUrlTool(http_client))
         self._register(WebSearchTool(http_client))

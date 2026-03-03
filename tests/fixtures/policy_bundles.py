@@ -46,6 +46,7 @@ def make_policy_bundle(
             {"name": "Workspace.Upload"},
             {"name": "LLM.Call"},
             {"name": "Search.Web"},
+            {"name": "Code.Execute"},
         ]
 
     cap_objects = [Capability(**c) for c in capabilities]
