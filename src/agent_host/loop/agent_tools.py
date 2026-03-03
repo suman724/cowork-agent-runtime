@@ -144,8 +144,10 @@ class AgentToolHandler:
                     },
                 }
             )
-        # Add skill tools
+        # Add skill tools (skip skills with disable_model_invocation=True)
         for skill in self._skills.values():
+            if skill.disable_model_invocation:
+                continue  # LLM cannot see or auto-trigger this skill
             skill_def: dict[str, Any] = {
                 "type": "function",
                 "function": {

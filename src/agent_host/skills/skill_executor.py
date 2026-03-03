@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from agent_host.skills.skill_loader import SkillLoader, substitute_arguments
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 
@@ -27,7 +28,7 @@ class SkillExecutor:
     """Executes skills as focused sub-conversations.
 
     Each skill runs with:
-    - Custom system prompt (base + skill additions)
+    - Custom system prompt (base + skill prompt_content with $ARGUMENTS substitution)
     - Restricted tool set (if specified by skill)
     - Dedicated MessageThread
     - Skill-specific max_steps
@@ -67,12 +68,18 @@ class SkillExecutor:
 
         task_id = f"{parent_task_id}-skill-{skill.name}"
 
+        # Stage 2: load full content on demand (no-op for built-in skills)
+        skill = SkillLoader.load_skill_content(skill)
+
+        # Apply argument substitution to prompt content
+        prompt_content = substitute_arguments(skill.prompt_content, arguments)
+
         # Build system prompt
         system_prompt = (
             f"You are executing the '{skill.name}' skill.\n\nSkill: {skill.description}\n\n"
         )
-        if skill.system_prompt_additions:
-            system_prompt += f"{skill.system_prompt_additions}\n\n"
+        if prompt_content:
+            system_prompt += f"{prompt_content}\n\n"
         system_prompt += "Complete the task and report your results clearly."
 
         # Build user message from arguments

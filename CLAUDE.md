@@ -18,7 +18,7 @@ agent_host/     ← Local Agent Host (custom agent loop)
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
   thread/       — Message thread management, context compaction, token counting
   memory/       — Working memory: task tracker, plan, notes (injected per-turn)
-  skills/       — Skill definitions, loader (built-in/YAML/policy), executor
+  skills/       — Skill definitions, loader (built-in/markdown/policy), executor
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
