@@ -122,6 +122,118 @@ class TestCreateSession:
         assert manager._event_emitter is not None
 
 
+class TestWorkspacePathInjection:
+    """Tests for _inject_workspace_path — workspace dir added to policy allowedPaths."""
+
+    async def test_workspace_dir_injected_into_file_capabilities(
+        self, manager: SessionManager
+    ) -> None:
+        """When workspaceHint has localPaths, the dir should appear in allowedPaths."""
+        from cowork_platform.session_create_response import SessionCreateResponse
+
+        resp_dict = _make_session_response_dict()
+        response = SessionCreateResponse.model_validate(resp_dict)
+        manager._session_client.create_session = AsyncMock(return_value=response)
+
+        await manager.create_session(
+            {
+                "tenantId": "t1",
+                "userId": "u1",
+                "workspaceHint": {"localPaths": ["/tmp/test-workspace"]},
+            }
+        )
+
+        assert manager._policy_enforcer is not None
+        bundle = manager._policy_enforcer.policy_bundle
+
+        from pathlib import Path
+
+        resolved_ws = str(Path("/tmp/test-workspace").resolve())
+
+        for cap in bundle.capabilities:
+            if cap.name in {"File.Read", "File.Write"}:
+                assert cap.allowedPaths is not None
+                resolved_allowed = [str(Path(p).resolve()) for p in cap.allowedPaths]
+                assert resolved_ws in resolved_allowed, (
+                    f"{cap.name} allowedPaths should include workspace dir"
+                )
+
+    async def test_no_workspace_dir_leaves_policy_unchanged(self, manager: SessionManager) -> None:
+        """Without workspaceHint, allowedPaths should remain as-is from the policy."""
+        from cowork_platform.session_create_response import SessionCreateResponse
+
+        resp_dict = _make_session_response_dict()
+        response = SessionCreateResponse.model_validate(resp_dict)
+        manager._session_client.create_session = AsyncMock(return_value=response)
+
+        await manager.create_session({"tenantId": "t1", "userId": "u1"})
+
+        assert manager._policy_enforcer is not None
+        bundle = manager._policy_enforcer.policy_bundle
+
+        for cap in bundle.capabilities:
+            if cap.name in {"File.Read", "File.Write"}:
+                # Original policy from _make_session_response_dict has no allowedPaths
+                assert cap.allowedPaths is None
+
+    async def test_workspace_dir_not_duplicated(self, manager: SessionManager) -> None:
+        """If workspace dir is already in allowedPaths, don't add it again."""
+        from cowork_platform.policy_bundle import PolicyBundle
+
+        bundle = PolicyBundle.model_validate(
+            {
+                "policyBundleVersion": "2026-02-28.1",
+                "schemaVersion": "1.0",
+                "tenantId": "t",
+                "userId": "u",
+                "sessionId": "s",
+                "expiresAt": "2099-01-01T00:00:00Z",
+                "capabilities": [
+                    {"name": "File.Read", "allowedPaths": ["/tmp/test-workspace"]},
+                ],
+                "approvalRules": [],
+                "llmPolicy": {
+                    "allowedModels": ["gpt-4o"],
+                    "maxInputTokens": 8000,
+                    "maxOutputTokens": 4000,
+                    "maxSessionTokens": 100000,
+                },
+            }
+        )
+
+        SessionManager._inject_workspace_path(bundle, "/tmp/test-workspace")
+
+        from pathlib import Path
+
+        resolved_ws = str(Path("/tmp/test-workspace").resolve())
+        cap = bundle.capabilities[0]
+        resolved_allowed = [str(Path(p).resolve()) for p in cap.allowedPaths or []]
+        assert resolved_allowed.count(resolved_ws) == 1
+
+    async def test_shell_exec_not_affected(self, manager: SessionManager) -> None:
+        """Shell.Exec capability should not get workspace dir in allowedPaths."""
+        from cowork_platform.session_create_response import SessionCreateResponse
+
+        resp_dict = _make_session_response_dict()
+        response = SessionCreateResponse.model_validate(resp_dict)
+        manager._session_client.create_session = AsyncMock(return_value=response)
+
+        await manager.create_session(
+            {
+                "tenantId": "t1",
+                "userId": "u1",
+                "workspaceHint": {"localPaths": ["/tmp/test-workspace"]},
+            }
+        )
+
+        assert manager._policy_enforcer is not None
+        bundle = manager._policy_enforcer.policy_bundle
+
+        for cap in bundle.capabilities:
+            if cap.name == "Shell.Exec":
+                assert cap.allowedPaths is None
+
+
 class TestResumeSession:
     async def test_resume_session(self, manager: SessionManager) -> None:
         """Should resume session and restore history."""
