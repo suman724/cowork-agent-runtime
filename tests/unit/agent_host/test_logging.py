@@ -40,6 +40,28 @@ class TestConfigureLogging:
         assert record["key"] == "value"
         assert "timestamp" in record
 
+    def test_exception_traceback_in_json_log(self, tmp_path: Path) -> None:
+        """Exception tracebacks should appear in JSON log entries."""
+        configure_logging("info", tmp_path)
+
+        log = structlog.get_logger()
+        try:
+            raise ValueError("something broke")
+        except ValueError:
+            log.exception("test_failure", task_id="t-1")
+
+        log_file = tmp_path / "agent-host.log"
+        lines = [ln for ln in log_file.read_text().splitlines() if ln.strip()]
+        # Find the error line
+        error_lines = [ln for ln in lines if "test_failure" in ln]
+        assert len(error_lines) >= 1
+        record = json.loads(error_lines[-1])
+        assert record["event"] == "test_failure"
+        # format_exc_info converts exc_info tuple → "exception" string with traceback
+        assert "exception" in record
+        assert "ValueError" in record["exception"]
+        assert "something broke" in record["exception"]
+
     def test_stderr_handler_present(self, tmp_path: Path) -> None:
         """Root logger has a stderr StreamHandler attached."""
         configure_logging("debug", tmp_path)

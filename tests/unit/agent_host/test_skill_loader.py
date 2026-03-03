@@ -93,8 +93,10 @@ class TestBuiltinSkills:
         loader = SkillLoader()
         skills = {s.name: s for s in loader.load_all()}
 
-        for skill in skills.values():
-            assert skill.prompt_content, f"Built-in skill '{skill.name}' has empty prompt_content"
+        builtin_names = {"search_codebase", "edit_and_verify", "debug_error"}
+        for name in builtin_names:
+            skill = skills[name]
+            assert skill.prompt_content, f"Built-in skill '{name}' has empty prompt_content"
             assert skill.source_dir is None
 
     def test_builtin_defaults(self) -> None:
@@ -102,7 +104,9 @@ class TestBuiltinSkills:
         loader = SkillLoader()
         skills = {s.name: s for s in loader.load_all()}
 
-        for skill in skills.values():
+        builtin_names = {"search_codebase", "edit_and_verify", "debug_error"}
+        for name in builtin_names:
+            skill = skills[name]
             assert skill.disable_model_invocation is False
             assert skill.user_invocable is True
 

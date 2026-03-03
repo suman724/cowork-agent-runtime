@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import platform
+from datetime import UTC, datetime
 from pathlib import Path
 
 # Base system prompt — same as the prior SYSTEM_PROMPT from agent_factory.py
@@ -30,6 +31,9 @@ class SystemPromptBuilder:
     def build_static_prompt(self) -> str:
         """Build the static system prompt (identity + guidelines + workspace context)."""
         parts = [_BASE_SYSTEM_PROMPT]
+
+        # Current date
+        parts.append(f"\nCurrent date: {datetime.now(tz=UTC).strftime('%Y-%m-%d')}")
 
         # OS context
         parts.append(f"\nOperating system: {self._os_family}")

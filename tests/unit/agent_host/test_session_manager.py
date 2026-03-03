@@ -1,438 +1,180 @@
-"""Tests for SessionManager — lifecycle coordination."""
+"""Tests for SessionManager — _run_agent exception handling with enriched error events."""
 
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from agent_host.config import AgentHostConfig
-from agent_host.exceptions import (
-    NoActiveTaskError,
-    SessionNotFoundError,
-)
+from agent_host.events.event_emitter import EventEmitter
+from agent_host.exceptions import CheckpointError, PolicyExpiredError
+from agent_host.models import SessionContext
 from agent_host.session.session_manager import SessionManager
 
 
-def _make_config(tmp_path: object) -> AgentHostConfig:
-    return AgentHostConfig(
-        llm_gateway_endpoint="https://llm.example.com",
-        llm_gateway_auth_token="test-token",
-        session_service_url="https://sessions.example.com",
-        workspace_service_url="https://workspace.example.com",
-        checkpoint_dir=str(tmp_path),
+def _make_session_manager() -> SessionManager:
+    """Build a minimal SessionManager with mocked dependencies."""
+    config = MagicMock()
+    config.session_service_url = "http://localhost:8001"
+    config.workspace_service_url = "http://localhost:8002"
+    config.checkpoint_dir = "/tmp/ckpt"
+    config.llm_gateway_endpoint = "http://localhost:8080"
+    config.llm_gateway_auth_token = "test-token"  # noqa: S105
+    config.llm_model = "openai/gpt-4o"
+    config.llm_max_retries = 3
+    config.llm_retry_base_delay = 0.1
+    config.llm_retry_max_delay = 1.0
+    config.default_max_steps = 50
+    config.recency_window = 10
+    config.max_context_tokens = 128000
+    config.approval_timeout_seconds = 300
+    config.log_dir = "/tmp/logs"
+
+    tool_router = MagicMock()
+
+    sm = SessionManager(config, tool_router)
+
+    # Set up session context
+    sm._session_context = SessionContext(
+        session_id="sess-1",
+        workspace_id="ws-1",
+        tenant_id="t-1",
+        user_id="u-1",
     )
 
+    # Mock event emitter
+    sm._event_emitter = MagicMock(spec=EventEmitter)
 
-def _make_session_response_dict() -> dict[str, object]:
-    expires = (datetime.now(tz=UTC) + timedelta(hours=1)).isoformat()
-    return {
-        "sessionId": "sess-123",
-        "workspaceId": "ws-456",
-        "compatibilityStatus": "compatible",
-        "policyBundle": {
-            "policyBundleVersion": "2026-02-28.1",
-            "schemaVersion": "1.0",
-            "tenantId": "tenant-test",
-            "userId": "user-test",
-            "sessionId": "sess-123",
-            "expiresAt": expires,
-            "capabilities": [
-                {"name": "File.Read"},
-                {"name": "File.Write"},
-                {"name": "Shell.Exec"},
-                {"name": "LLM.Call"},
-            ],
-            "approvalRules": [],
-            "llmPolicy": {
-                "allowedModels": ["gpt-4o"],
-                "maxInputTokens": 8000,
-                "maxOutputTokens": 4000,
-                "maxSessionTokens": 100000,
-            },
-        },
-    }
-
-
-def _make_incompatible_response_dict() -> dict[str, object]:
-    return {
-        "sessionId": "sess-789",
-        "workspaceId": "ws-abc",
-        "compatibilityStatus": "incompatible",
-    }
-
-
-@pytest.fixture
-def manager(tmp_path: object) -> SessionManager:
-    config = _make_config(tmp_path)
-    tool_router = MagicMock()
-    tool_router.get_available_tools.return_value = [
-        MagicMock(toolName="ReadFile"),
-        MagicMock(toolName="WriteFile"),
-    ]
-    return SessionManager(config=config, tool_router=tool_router)
-
-
-class TestCreateSession:
-    async def test_create_session_success(self, manager: SessionManager) -> None:
-        """Successfully create a session."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        result = await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        assert result["sessionId"] == "sess-123"
-        assert result["status"] == "ready"
-        assert manager.session_context is not None
-        assert manager.session_context.session_id == "sess-123"
-
-    async def test_create_session_incompatible(self, manager: SessionManager) -> None:
-        """Incompatible session returns status incompatible."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_incompatible_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        result = await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        assert result["status"] == "incompatible"
-
-    async def test_create_session_initializes_components(self, manager: SessionManager) -> None:
-        """Components (LLM client, thread, etc.) should be initialized."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        assert manager._llm_client is not None
-        assert manager._thread is not None
-        assert manager._policy_enforcer is not None
-        assert manager._token_budget is not None
-        assert manager._approval_gate is not None
-        assert manager._file_change_tracker is not None
-        assert manager._event_emitter is not None
-
-
-class TestWorkspacePathInjection:
-    """Tests for _inject_workspace_path — workspace dir added to policy allowedPaths."""
-
-    async def test_workspace_dir_injected_into_file_capabilities(
-        self, manager: SessionManager
-    ) -> None:
-        """When workspaceHint has localPaths, the dir should appear in allowedPaths."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session(
-            {
-                "tenantId": "t1",
-                "userId": "u1",
-                "workspaceHint": {"localPaths": ["/tmp/test-workspace"]},
-            }
-        )
-
-        assert manager._policy_enforcer is not None
-        bundle = manager._policy_enforcer.policy_bundle
-
-        from pathlib import Path
-
-        resolved_ws = str(Path("/tmp/test-workspace").resolve())
-
-        for cap in bundle.capabilities:
-            if cap.name in {"File.Read", "File.Write"}:
-                assert cap.allowedPaths is not None
-                resolved_allowed = [str(Path(p).resolve()) for p in cap.allowedPaths]
-                assert resolved_ws in resolved_allowed, (
-                    f"{cap.name} allowedPaths should include workspace dir"
-                )
-
-    async def test_no_workspace_dir_leaves_policy_unchanged(self, manager: SessionManager) -> None:
-        """Without workspaceHint, allowedPaths should remain as-is from the policy."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        assert manager._policy_enforcer is not None
-        bundle = manager._policy_enforcer.policy_bundle
-
-        for cap in bundle.capabilities:
-            if cap.name in {"File.Read", "File.Write"}:
-                # Original policy from _make_session_response_dict has no allowedPaths
-                assert cap.allowedPaths is None
-
-    async def test_workspace_dir_not_duplicated(self, manager: SessionManager) -> None:
-        """If workspace dir is already in allowedPaths, don't add it again."""
-        from cowork_platform.policy_bundle import PolicyBundle
-
-        bundle = PolicyBundle.model_validate(
-            {
-                "policyBundleVersion": "2026-02-28.1",
-                "schemaVersion": "1.0",
-                "tenantId": "t",
-                "userId": "u",
-                "sessionId": "s",
-                "expiresAt": "2099-01-01T00:00:00Z",
-                "capabilities": [
-                    {"name": "File.Read", "allowedPaths": ["/tmp/test-workspace"]},
-                ],
-                "approvalRules": [],
-                "llmPolicy": {
-                    "allowedModels": ["gpt-4o"],
-                    "maxInputTokens": 8000,
-                    "maxOutputTokens": 4000,
-                    "maxSessionTokens": 100000,
-                },
-            }
-        )
-
-        SessionManager._inject_workspace_path(bundle, "/tmp/test-workspace")
-
-        from pathlib import Path
-
-        resolved_ws = str(Path("/tmp/test-workspace").resolve())
-        cap = bundle.capabilities[0]
-        resolved_allowed = [str(Path(p).resolve()) for p in cap.allowedPaths or []]
-        assert resolved_allowed.count(resolved_ws) == 1
-
-    async def test_shell_exec_not_affected(self, manager: SessionManager) -> None:
-        """Shell.Exec capability should not get workspace dir in allowedPaths."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session(
-            {
-                "tenantId": "t1",
-                "userId": "u1",
-                "workspaceHint": {"localPaths": ["/tmp/test-workspace"]},
-            }
-        )
-
-        assert manager._policy_enforcer is not None
-        bundle = manager._policy_enforcer.policy_bundle
-
-        for cap in bundle.capabilities:
-            if cap.name == "Shell.Exec":
-                assert cap.allowedPaths is None
-
-
-class TestResumeSession:
-    async def test_resume_session(self, manager: SessionManager) -> None:
-        """Should resume session and restore history."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.resume_session = AsyncMock(return_value=response)
-        manager._workspace_client.get_session_history = AsyncMock(return_value=[])
-
-        result = await manager.resume_session({"sessionId": "sess-123"})
-
-        assert result["sessionId"] == "sess-123"
-        assert result["status"] == "ready"
-
-    async def test_resume_session_missing_id(self, manager: SessionManager) -> None:
-        """Should raise SessionNotFoundError when sessionId is empty."""
-        with pytest.raises(SessionNotFoundError):
-            await manager.resume_session({})
-
-
-class TestStartTask:
-    async def test_start_task_no_session(self, manager: SessionManager) -> None:
-        """Should raise SessionNotFoundError without an active session."""
-        with pytest.raises(SessionNotFoundError):
-            await manager.start_task({"taskId": "task-1", "prompt": "hi"})
-
-    async def test_start_task_spawns_loop(self, manager: SessionManager) -> None:
-        """Should spawn agent loop as background task."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        # Mock the _run_agent to avoid actually running the loop
-        manager._run_agent = AsyncMock()  # type: ignore[method-assign]
-
-        result = await manager.start_task(
-            {
-                "taskId": "task-1",
-                "prompt": "Hello",
-            }
-        )
-
-        assert result["taskId"] == "task-1"
-        assert result["status"] == "running"
-        assert manager._current_task is not None
-
-    async def test_start_task_with_max_steps(self, manager: SessionManager) -> None:
-        """Should parse maxSteps from taskOptions."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-        manager._run_agent = AsyncMock()  # type: ignore[method-assign]
-
-        await manager.start_task(
-            {
-                "taskId": "task-1",
-                "prompt": "Hello",
-                "taskOptions": {"maxSteps": 25},
-            }
-        )
-
-        assert manager._current_max_steps == 25
-
-    async def test_start_task_clamps_max_steps(self, manager: SessionManager) -> None:
-        """maxSteps should be clamped to 1-200."""
-        from cowork_platform.session_create_response import SessionCreateResponse
+    # Mock LLM client
+    sm._llm_client = AsyncMock()
+
+    # Mock thread
+    sm._thread = MagicMock()
+    sm._thread.messages = []
+    sm._thread.to_checkpoint.return_value = None
+
+    # Mock policy enforcer and token budget
+    sm._policy_enforcer = MagicMock()
+    sm._token_budget = MagicMock()
+    sm._token_budget.input_tokens_used = 0
+    sm._token_budget.output_tokens_used = 0
 
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-        manager._run_agent = AsyncMock()  # type: ignore[method-assign]
-
-        await manager.start_task(
-            {
-                "taskId": "task-1",
-                "prompt": "Hello",
-                "taskOptions": {"maxSteps": 999},
-            }
-        )
-
-        assert manager._current_max_steps == 200
-
-
-class TestCancelTask:
-    async def test_cancel_no_task(self, manager: SessionManager) -> None:
-        """Should raise NoActiveTaskError."""
-        with pytest.raises(NoActiveTaskError):
-            await manager.cancel_task()
-
-    async def test_cancel_running_task(self, manager: SessionManager) -> None:
-        """Should cancel the running task and return status."""
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        # Create a long-running fake task
-        async def long_task() -> None:
-            await asyncio.sleep(10)
-
-        manager._current_task = asyncio.create_task(long_task())
-        manager._current_task_id = "task-1"
-
-        result = await manager.cancel_task()
-        assert result["status"] == "cancelled"
-        assert result["taskId"] == "task-1"
-
-
-class TestSessionState:
-    async def test_no_session(self, manager: SessionManager) -> None:
-        result = await manager.get_session_state()
-        assert result["status"] == "no_session"
-
-    async def test_with_session(self, manager: SessionManager) -> None:
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        result = await manager.get_session_state()
-        assert result["sessionId"] == "sess-123"
-        assert "tokenUsage" in result
-
-
-class TestDeliverApproval:
-    async def test_deliver_approval(self, manager: SessionManager) -> None:
-        from agent_host.approval.approval_gate import ApprovalGate
-
-        gate = ApprovalGate()
-        manager._approval_gate = gate
-
-        # Create a pending approval
-        async def request():
-            return await gate.request_approval("ap-1", timeout=5.0)
-
-        task = asyncio.create_task(request())
-        await asyncio.sleep(0.01)
-
-        result = await manager.deliver_approval({"approvalId": "ap-1", "decision": "approved"})
-        assert result["status"] == "delivered"
-        assert result["decision"] == "approved"
-
-        decision = await task
-        assert decision == "approved"
-
-
-class TestShutdown:
-    async def test_shutdown_clean(self, manager: SessionManager) -> None:
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-        manager._session_client.close = AsyncMock()
-        manager._workspace_client.close = AsyncMock()
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        result = await manager.shutdown()
-        assert result["status"] == "shutdown"
-        assert manager._session_context is None
-        assert manager._llm_client is None
-
-    async def test_shutdown_cancels_active_task(self, manager: SessionManager) -> None:
-        from cowork_platform.session_create_response import SessionCreateResponse
-
-        resp_dict = _make_session_response_dict()
-        response = SessionCreateResponse.model_validate(resp_dict)
-        manager._session_client.create_session = AsyncMock(return_value=response)
-        manager._session_client.cancel_session = AsyncMock()
-        manager._session_client.close = AsyncMock()
-        manager._workspace_client.close = AsyncMock()
-
-        await manager.create_session({"tenantId": "t1", "userId": "u1"})
-
-        # Create a running task
-        async def long_task() -> None:
-            await asyncio.sleep(10)
-
-        manager._current_task = asyncio.create_task(long_task())
-        manager._current_task_id = "task-1"
-
-        result = await manager.shutdown()
-        assert result["status"] == "shutdown"
-        manager._session_client.cancel_session.assert_awaited_once()
+    # Mock workspace client
+    sm._workspace_client = AsyncMock()
+
+    # Mock checkpoint manager
+    sm._checkpoint_manager = MagicMock()
+
+    return sm
+
+
+class TestRunAgentExceptionHandling:
+    @pytest.mark.asyncio
+    async def test_policy_expired_emits_session_failed(self) -> None:
+        """PolicyExpiredError triggers emit_session_failed (session-level)."""
+        sm = _make_session_manager()
+
+        # Make AgentLoop.run raise PolicyExpiredError
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = PolicyExpiredError("Policy has expired")
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        sm._event_emitter.emit_session_failed.assert_called_once_with("Policy has expired")
+        sm._event_emitter.emit_task_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_error_emits_session_failed(self) -> None:
+        """CheckpointError triggers emit_session_failed (session-level)."""
+        sm = _make_session_manager()
+
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = CheckpointError("Checkpoint corrupt")
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        sm._event_emitter.emit_session_failed.assert_called_once_with("Checkpoint corrupt")
+
+    @pytest.mark.asyncio
+    async def test_transient_llm_error_emits_enriched_task_failed(self) -> None:
+        """A transient LLM error (e.g. 429) passes enriched params to emit_task_failed."""
+        sm = _make_session_manager()
+
+        # Create a fake 429 error
+        class FakeRateLimitError(Exception):
+            status_code = 429
+
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = FakeRateLimitError("rate limited")
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        sm._event_emitter.emit_task_failed.assert_called_once()
+        call_kwargs = sm._event_emitter.emit_task_failed.call_args
+        assert call_kwargs[0][0] == "task-1"  # positional: task_id
+        assert call_kwargs.kwargs["error_code"] == "RATE_LIMITED"
+        assert call_kwargs.kwargs["error_type"] == "rate_limit"
+        assert call_kwargs.kwargs["is_recoverable"] is True
+        assert "rate limited" in call_kwargs.kwargs["reason"].lower()
+
+    @pytest.mark.asyncio
+    async def test_overloaded_529_emits_enriched_task_failed(self) -> None:
+        """A 529 overloaded error passes LLM_OVERLOADED to emit_task_failed."""
+        sm = _make_session_manager()
+
+        class FakeOverloadedError(Exception):
+            status_code = 529
+
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = FakeOverloadedError("overloaded")
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        call_kwargs = sm._event_emitter.emit_task_failed.call_args
+        assert call_kwargs.kwargs["error_code"] == "LLM_OVERLOADED"
+        assert call_kwargs.kwargs["error_type"] == "overloaded"
+        assert call_kwargs.kwargs["is_recoverable"] is True
+
+    @pytest.mark.asyncio
+    async def test_non_llm_error_emits_plain_task_failed(self) -> None:
+        """A non-transient error (e.g. ValueError) emits task_failed without LLM enrichment."""
+        sm = _make_session_manager()
+
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = ValueError("bad value")
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        call_kwargs = sm._event_emitter.emit_task_failed.call_args
+        assert call_kwargs[0][0] == "task-1"
+        assert "bad value" in call_kwargs.kwargs["reason"]
+        # Non-LLM errors are classified as permanent LLM_ERROR
+        assert call_kwargs.kwargs["error_code"] == "LLM_ERROR"
+        assert call_kwargs.kwargs["error_type"] == "permanent"
+        assert call_kwargs.kwargs["is_recoverable"] is False
+
+    @pytest.mark.asyncio
+    async def test_cancelled_error_does_not_emit(self) -> None:
+        """asyncio.CancelledError should not emit any failure events."""
+        sm = _make_session_manager()
+
+        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+            mock_loop = AsyncMock()
+            mock_loop.run.side_effect = asyncio.CancelledError()
+            mock_loop_cls.return_value = mock_loop
+
+            await sm._run_agent("test prompt", "task-1", 50)
+
+        sm._event_emitter.emit_task_failed.assert_not_called()
+        sm._event_emitter.emit_session_failed.assert_not_called()

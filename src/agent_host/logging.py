@@ -75,7 +75,10 @@ def configure_logging(log_level: str, log_dir: Path) -> None:
 
     # --- file handler (JSON, rotated) ---
     file_formatter = structlog.stdlib.ProcessorFormatter(
-        processor=structlog.processors.JSONRenderer(),
+        processors=[
+            structlog.processors.format_exc_info,
+            structlog.processors.JSONRenderer(),
+        ],
     )
     file_handler = RotatingFileHandler(
         log_dir / "agent-host.log",

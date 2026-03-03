@@ -426,6 +426,7 @@ class SessionManager:
         ):
             return
 
+        assistant_text = ""
         try:
             # Build tool executor
             tool_executor = ToolExecutor(
@@ -487,12 +488,7 @@ class SessionManager:
 
             # Track step count for get_session_state
             self._current_step_count = result.step_count
-
-            # Persist token budget to checkpoint
-            self._persist_checkpoint()
-
-            # Upload session history (best-effort)
-            await self._upload_history(prompt, result.text, task_id)
+            assistant_text = result.text
 
             # Emit task_completed for successful completion
             if result.reason == "completed" and self._event_emitter:
@@ -501,18 +497,49 @@ class SessionManager:
 
         except asyncio.CancelledError:
             logger.info("task_cancelled", task_id=task_id)
-            return
 
         except Exception as exc:
             # Classify as session-level or task-level failure
             if isinstance(exc, (PolicyExpiredError, CheckpointError)):
-                logger.exception("session_failed", task_id=task_id)
+                logger.exception(
+                    "session_failed",
+                    task_id=task_id,
+                    session_id=self._session_context.session_id,
+                )
                 if self._event_emitter:
                     self._event_emitter.emit_session_failed(str(exc))
             else:
-                logger.exception("task_failed", task_id=task_id)
+                # Classify LLM errors for structured event payload.
+                # Always classify — covers raw transient errors, wrapped
+                # LLMGatewayError (retry-exhausted), and unknown errors.
+                from agent_host.llm.error_classifier import classify_llm_error
+
+                error_info = classify_llm_error(exc)
+                logger.exception(
+                    "task_failed",
+                    task_id=task_id,
+                    session_id=self._session_context.session_id,
+                    step_count=self._current_step_count,
+                    error_type=error_info.get("error_type", type(exc).__name__),
+                )
                 if self._event_emitter:
-                    self._event_emitter.emit_task_failed(task_id, reason=str(exc))
+                    self._event_emitter.emit_task_failed(
+                        task_id,
+                        reason=str(error_info.get("user_message", str(exc))),
+                        error_code=str(error_info["error_code"])
+                        if error_info.get("error_code")
+                        else None,
+                        error_type=str(error_info["error_type"])
+                        if error_info.get("error_type")
+                        else None,
+                        is_recoverable=bool(error_info.get("is_recoverable")),
+                    )
+
+        finally:
+            # Always upload history and persist checkpoint, even on error/cancel.
+            # This ensures the user can see their conversation when they come back.
+            await self._upload_history(prompt, assistant_text, task_id)
+            self._persist_checkpoint()
 
     def _persist_checkpoint(self) -> None:
         """Persist current state into our checkpoint format."""

@@ -14,6 +14,14 @@ class TestSystemPromptBuilder:
         assert "Cowork" in prompt
         assert "tools" in prompt
 
+    def test_static_prompt_includes_current_date(self) -> None:
+        from datetime import UTC, datetime
+
+        builder = SystemPromptBuilder()
+        prompt = builder.build_static_prompt()
+        today = datetime.now(tz=UTC).strftime("%Y-%m-%d")
+        assert today in prompt
+
     def test_static_prompt_includes_os(self) -> None:
         builder = SystemPromptBuilder(os_family="Darwin")
         prompt = builder.build_static_prompt()
