@@ -11,6 +11,7 @@ from cowork_platform.tool_result import Error, ToolResult
 from tool_runtime.exceptions import ToolNotFoundError, ToolRuntimeError
 from tool_runtime.models import ExecutionContext, ToolExecutionResult
 from tool_runtime.platform.detection import get_platform
+from tool_runtime.tools.code.execute_code import ExecuteCodeTool
 from tool_runtime.tools.file.create_directory import CreateDirectoryTool
 from tool_runtime.tools.file.delete_file import DeleteFileTool
 from tool_runtime.tools.file.edit_file import EditFileTool
@@ -25,7 +26,6 @@ from tool_runtime.tools.file.write_file import WriteFileTool
 from tool_runtime.tools.network.fetch_url import FetchUrlTool
 from tool_runtime.tools.network.http_request import HttpRequestTool
 from tool_runtime.tools.network.web_search import WebSearchTool
-from tool_runtime.tools.code.execute_code import ExecuteCodeTool
 from tool_runtime.tools.shell.run_command import RunCommandTool
 
 if TYPE_CHECKING:

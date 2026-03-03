@@ -67,11 +67,12 @@ print(f"sum={x}")
 
     async def test_cleanup_happens(self, executor: PythonExecutor) -> None:
         """Verify temp dir is cleaned up after execution."""
-        import glob
         import tempfile
+        from pathlib import Path
 
-        before = set(glob.glob(f"{tempfile.gettempdir()}/cowork-code-*"))
+        tmp = Path(tempfile.gettempdir())
+        before = set(tmp.glob("cowork-code-*"))
         await executor.execute("print('clean')")
-        after = set(glob.glob(f"{tempfile.gettempdir()}/cowork-code-*"))
+        after = set(tmp.glob("cowork-code-*"))
         # No new leftover temp dirs
         assert after == before

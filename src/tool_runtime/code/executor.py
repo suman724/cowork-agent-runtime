@@ -39,12 +39,13 @@ class PythonExecutor:
     ) -> CodeExecutionResult:
         """Write code to temp file, run as subprocess, return structured result."""
         run_id = uuid.uuid4().hex[:12]
-        output_dir = os.path.join(tempfile.gettempdir(), f"cowork-code-{run_id}")
-        os.makedirs(output_dir, exist_ok=True)
+        output_path = Path(tempfile.gettempdir()) / f"cowork-code-{run_id}"
+        output_path.mkdir(parents=True, exist_ok=True)
+        output_dir = str(output_path)
 
-        script_path = os.path.join(output_dir, "script.py")
+        script_path = str(output_path / "script.py")
         try:
-            with open(script_path, "w", encoding="utf-8") as f:
+            with Path(script_path).open("w", encoding="utf-8") as f:
                 f.write(PREAMBLE)
                 f.write("\n")
                 f.write(code)

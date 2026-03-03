@@ -94,7 +94,11 @@ class ExecuteCodeTool(BaseTool):
             raise ToolExecutionError(f"Failed to execute code: {e}") from e
 
         # Format output (same structure as RunCommand for LLM familiarity)
-        output_text = f"# {description}\n{_format_code_output(result.exit_code, result.stdout, result.stderr, result.execution_time, result.timed_out)}"
+        formatted = _format_code_output(
+            result.exit_code, result.stdout, result.stderr,
+            result.execution_time, result.timed_out,
+        )
+        output_text = f"# {description}\n{formatted}"
 
         # Extract artifact if output is large
         max_output = context.max_output_bytes

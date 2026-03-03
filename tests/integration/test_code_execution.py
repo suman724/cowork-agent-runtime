@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from tests.conftest import make_tool_request
 from tool_runtime.models import ExecutionContext
 from tool_runtime.platform.detection import get_platform
 from tool_runtime.router.tool_router import ToolRouter
-
-from tests.conftest import make_tool_request
 
 
 @pytest.fixture
