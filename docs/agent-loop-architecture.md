@@ -82,11 +82,7 @@ graph TB
 
         subgraph tool_runtime
             TR[Tool Router]
-            RF[ReadFile]
-            WF[WriteFile]
-            DF[DeleteFile]
-            RC[RunCommand]
-            HR[HttpRequest]
+            BT[15 Built-in Tools<br/>File ×11 · Shell ×1 · Network ×3]
         end
     end
 
@@ -111,7 +107,7 @@ graph TB
     TE --> PE
     TE --> AG
     TE -->|ToolRouter interface| TR
-    TR --> RF & WF & DF & RC & HR
+    TR --> BT
     LLM -->|HTTP streaming| GW
     SM -->|HTTPS| SS
     SM -->|HTTPS| WS
@@ -321,9 +317,9 @@ graph LR
 
 **ToolExecutor** (agent_host) handles the full lifecycle:
 
-1. **Policy check** — Is the capability granted? Are scope constraints satisfied?
-2. **Event emission** — `tool_requested`
-3. **Approval gate** — If `APPROVAL_REQUIRED`, block until user decides (or 300s timeout)
+1. **Event emission** — `tool_requested` (always emitted first so the Desktop App creates a ToolCallCard — even for denied tools, the card shows a "Denied" badge)
+2. **Policy check** — Is the capability granted? Are scope constraints satisfied? If DENIED → emit `tool_completed(denied)` → return
+3. **Approval gate** — If `APPROVAL_REQUIRED`, emit `approval_requested`, block until user decides (or 300s timeout)
 4. **File change tracking** — Capture file content before mutation
 5. **ToolRouter.execute()** — Actual tool execution
 6. **Record file changes** — Capture content after mutation for diff
@@ -342,8 +338,18 @@ graph LR
 | `ReadFile` | `File.Read` | Read files with encoding detection, offset/limit |
 | `WriteFile` | `File.Write` | Atomic writes with diff generation |
 | `DeleteFile` | `File.Delete` | Delete files (not directories) |
+| `EditFile` | `File.Write` | Find-and-replace string editing |
+| `MultiEdit` | `File.Write` | Batch find-and-replace edits in a single call |
+| `CreateDirectory` | `File.Write` | Create directories (including parents) |
+| `MoveFile` | `File.Write` | Move or rename files and directories |
+| `ListDirectory` | `File.Read` | List directory contents with metadata |
+| `FindFiles` | `File.Read` | Glob-pattern file search |
+| `GrepFiles` | `File.Read` | Regex content search across files |
+| `ViewImage` | `File.Read` | Read image files as base64 for multimodal LLM |
 | `RunCommand` | `Shell.Exec` | Execute shell commands with timeout + process tree kill |
 | `HttpRequest` | `Network.Http` | HTTP requests with SSRF prevention |
+| `FetchUrl` | `Network.Http` | Fetch URL and convert HTML to markdown |
+| `WebSearch` | `Search.Web` | Web search via Tavily API |
 
 ### Tool Execution Sequence
 
@@ -361,9 +367,13 @@ sequenceDiagram
     AL->>TE: execute_tool_calls(calls, task_id)
 
     loop For each tool call
+        TE->>EE: emit_tool_requested(name, capability, args, tool_call_id)
+        Note over EE: Always emitted first so Desktop App<br/>creates ToolCallCard (even for denied tools)
+
         TE->>PE: check_tool_call(name, capability, args)
         alt DENIED
             PE-->>TE: PolicyCheckResult(DENIED)
+            TE->>EE: emit_tool_completed(status=denied)
             TE-->>AL: ToolCallResult(status=denied)
         else APPROVAL_REQUIRED
             PE-->>TE: PolicyCheckResult(APPROVAL_REQUIRED)
@@ -375,7 +385,6 @@ sequenceDiagram
             PE-->>TE: PolicyCheckResult(ALLOWED)
         end
 
-        TE->>EE: emit_tool_requested(...)
         TE->>FCT: capture pre-state (old file content)
         TE->>TR: execute(ToolRequest, ExecutionContext)
         TR-->>TE: ToolExecutionResult
@@ -428,9 +437,10 @@ flowchart TD
 
 | Capability | Matcher | Checks |
 |-----------|---------|--------|
-| `File.Read`, `File.Write`, `File.Delete` | **PathMatcher** | `allowedPaths`, `blockedPaths` (glob patterns) |
+| `File.Read`, `File.Write`, `File.Delete` | **PathMatcher** | `allowedPaths`, `blockedPaths` (prefix matching via `str.startswith()`) |
 | `Shell.Exec` | **CommandMatcher** | `allowedCommands`, `blockedCommands` |
 | `Network.Http` | **DomainMatcher** | `allowedDomains`, `blockedDomains` (includes subdomains) |
+| `Search.Web` | — | No scope constraints; allowed if capability is granted |
 
 The `check_llm_call()` method verifies the `LLM.Call` capability is granted and the policy is not expired.
 
@@ -447,6 +457,7 @@ When a capability has `requiresApproval: true`, the `assess_risk()` function det
 | `File.Delete` | high |
 | `Shell.Exec` | medium |
 | `Network.Http` | medium |
+| `Search.Web` | high (no explicit entry — falls through to Unknown) |
 | `Workspace.Upload` | low |
 | `BackendTool.Invoke` | medium |
 | Unknown | high |
@@ -877,7 +888,7 @@ class LLMResponse:
 
 ### Token Estimation Fallback
 
-When the API doesn't return usage data (e.g., Anthropic's OpenAI-compatible endpoint), the client falls back to a heuristic: ~1.3 characters per token.
+When the API doesn't return usage data (e.g., Anthropic's OpenAI-compatible endpoint), the client falls back to the character-count heuristic from `token_counter.py`: ~4 characters per token (`len(text) // 4`).
 
 ---
 
