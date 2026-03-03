@@ -109,6 +109,7 @@ class EventEmitter:
         capability: str,
         arguments: dict[str, Any],
         tool_call_id: str = "",
+        tool_type: str = "tool",
     ) -> None:
         """Emit tool_requested event."""
         self.emit(
@@ -118,6 +119,7 @@ class EventEmitter:
                 "toolName": tool_name,
                 "capability": capability,
                 "arguments": arguments,
+                "toolType": tool_type,
             },
         )
 
@@ -128,12 +130,14 @@ class EventEmitter:
         tool_call_id: str = "",
         result: str | None = None,
         error: str | None = None,
+        tool_type: str = "tool",
     ) -> None:
         """Emit tool_completed event."""
         payload: dict[str, Any] = {
             "toolCallId": tool_call_id,
             "toolName": tool_name,
             "status": status,
+            "toolType": tool_type,
         }
         if result is not None:
             payload["result"] = result

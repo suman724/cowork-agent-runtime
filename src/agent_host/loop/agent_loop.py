@@ -211,9 +211,43 @@ class AgentLoop:
                 if handler is None:
                     err_msg = "agent_tool_handler is None but agent_calls is non-empty"
                     raise RuntimeError(err_msg)
+
+                # Classify tool type for event emission
+                if ac.name == "SpawnAgent":
+                    agent_tool_type = "sub_agent"
+                elif ac.name.startswith("Skill_"):
+                    agent_tool_type = "skill"
+                else:
+                    agent_tool_type = "agent"
+
+                # Emit tool_requested for agent-internal tools
+                if self._event_emitter:
+                    self._event_emitter.emit_tool_requested(
+                        tool_name=ac.name,
+                        capability="",
+                        arguments=ac.arguments,
+                        tool_call_id=ac.id,
+                        tool_type=agent_tool_type,
+                    )
+
                 result_dict = await handler.execute(ac.name, ac.arguments, task_id=task_id)
                 result_text = json.dumps(result_dict, default=str)
                 self._thread.add_tool_result(ac.id, ac.name, result_text)
+
+                # Emit tool_completed for agent-internal tools
+                if self._event_emitter:
+                    status = (
+                        result_dict.get("status", "success")
+                        if isinstance(result_dict, dict)
+                        else "success"
+                    )
+                    self._event_emitter.emit_tool_completed(
+                        tool_name=ac.name,
+                        status=str(status),
+                        tool_call_id=ac.id,
+                        result=result_text,
+                        tool_type=agent_tool_type,
+                    )
 
             # Execute external tools (policy-checked, approval-gated)
             if external_calls:

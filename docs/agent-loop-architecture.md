@@ -671,33 +671,71 @@ flowchart TB
 
 ## 11. Skills
 
-**Files:** `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py`
+**Files:** `agent_host/skills/models.py`, `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py`
 
-Skills are **formalized multi-step workflows** — reusable sub-conversations with custom system prompts and optional tool restrictions.
+Skills are **formalized multi-step workflows** — reusable sub-conversations with custom system prompts and optional tool restrictions. Skills use **directory-based Markdown format** with progressive disclosure.
 
 ```mermaid
 graph TD
     subgraph Skill Sources
-        Builtin[Built-in Skills<br/>Python hardcoded]
-        Workspace[Workspace Skills<br/>.cowork/skills/*.yaml]
+        Builtin[Built-in Skills<br/>Embedded Markdown]
+        User[User Skills<br/>~/.cowork/skills/name/SKILL.md]
         Policy[Policy Bundle Skills<br/>from backend]
     end
 
     subgraph SkillLoader
-        Load[load_all]
-        Builtin -->|priority 1| Load
-        Workspace -->|priority 2, overrides| Load
-        Policy -->|priority 3, overrides| Load
-        Load -->|deduplicates by name| Skills[list of SkillDefinition]
+        Stage1[Stage 1: Metadata<br/>Parse frontmatter only]
+        Stage2[Stage 2: Full Content<br/>Load body + supporting .md files]
+        Builtin -->|priority 1| Stage1
+        User -->|priority 2, overrides| Stage1
+        Policy -->|priority 3, overrides| Stage1
+        Stage1 -->|deduplicates by name| Skills[list of SkillDefinition]
+        Skills -->|on invocation| Stage2
     end
 
     subgraph SkillExecutor
         Exec[execute skill]
-        Skills --> Exec
-        Exec --> Thread[Fresh MessageThread<br/>custom system prompt]
-        Exec --> Loop[AgentLoop<br/>skill-specific max_steps]
+        Stage2 --> Exec
+        Exec -->|$ARGUMENTS substitution| Prompt[Build system prompt]
+        Prompt --> Thread[Fresh MessageThread]
+        Thread --> Loop[AgentLoop<br/>skill-specific max_steps]
         Loop --> Result[Result ≤ 4000 chars]
     end
+```
+
+### Skill Directory Structure
+
+```
+~/.cowork/skills/
+  deploy-staging/
+    SKILL.md              # Required: main instructions with YAML frontmatter
+    reference.md          # Optional: auto-appended on invocation
+    examples.md           # Optional: auto-appended on invocation
+  search-codebase/
+    SKILL.md              # Simple skill — no supporting files needed
+```
+
+### SKILL.md Format
+
+```markdown
+---
+name: deploy-staging
+description: Deploy the application to staging environment.
+tool_subset:
+  - RunCommand
+  - ReadFile
+max_steps: 20
+disable_model_invocation: false
+user_invocable: true
+---
+
+You are deploying the application to the staging environment.
+
+## Steps
+
+1. Read the deployment configuration
+2. Run the deployment command targeting `$ARGUMENTS[0]`
+3. Verify the deployment succeeded
 ```
 
 ### SkillDefinition
@@ -705,13 +743,15 @@ graph TD
 ```python
 @dataclass(frozen=True)
 class SkillDefinition:
-    name: str                        # "search_codebase"
-    description: str                 # Human-readable description
-    system_prompt_additions: str     # Injected into system prompt
-    tool_subset: list[str] | None    # Restrict available tools
-    input_schema: dict               # JSON Schema for arguments
-    examples: list | None            # Usage examples
-    max_steps: int = 15              # Step limit for skill execution
+    name: str                              # "search_codebase"
+    description: str                       # Human-readable description
+    prompt_content: str = ""               # SKILL.md body + supporting files (lazy-loaded)
+    source_dir: str | None = None          # Skill directory path (None for built-in)
+    tool_subset: list[str] | None = None   # Restrict available tools
+    input_schema: dict = {}                # JSON Schema for arguments
+    max_steps: int = 15                    # Step limit for skill execution
+    disable_model_invocation: bool = False # True = LLM cannot auto-trigger
+    user_invocable: bool = True            # False = hidden from user menus
 ```
 
 ### Built-in Skills
@@ -722,15 +762,32 @@ class SkillDefinition:
 | `edit_and_verify` | ReadFile, WriteFile, RunCommand | 15 | Write → verify → test cycle |
 | `debug_error` | ReadFile, RunCommand | 15 | Reproduce → trace → identify fix |
 
+Built-in skills are defined as embedded Markdown strings in `skill_loader.py` and parsed with the same frontmatter parser as file-based skills. Their `prompt_content` is pre-populated at load time (no lazy loading).
+
+### Progressive Disclosure
+
+**Stage 1 — Metadata (session start):** Parse frontmatter only from each `SKILL.md`. Extract `name`, `description`, flags, `tool_subset`, `max_steps`, `input_schema`. ~100 tokens per skill. Skill registered as tool with LLM. Supporting files are NOT read.
+
+**Stage 2 — Full Content (on invocation):** `SkillLoader.load_skill_content(skill)` reads full `SKILL.md` body + auto-appends all supporting `.md` files from the skill directory (sorted alphabetically, with `## {Filename}` section headers). Returns new frozen instance with `prompt_content` populated.
+
+### Argument Substitution
+
+- `$ARGUMENTS` → all argument values joined with space
+- `$ARGUMENTS[N]` → positional argument by 0-based index
+- Out-of-range index → empty string
+- No arguments → placeholders replaced with empty strings
+
 ### Skill Loading Priority
 
-1. **Built-in** (always available)
-2. **Workspace** (`.cowork/skills/*.yaml` — overrides built-in by name)
-3. **Policy bundle** (from `policyBundle.skills` — overrides workspace by name)
+1. **Built-in** (embedded markdown, always available)
+2. **User directories** (`~/.cowork/skills/<name>/SKILL.md` — overrides built-in by name)
+3. **Policy bundle** (from `policyBundle.skills` — overrides user by name)
 
 ### Skill Invocation
 
 Skills are registered as agent-internal tools by `AgentToolHandler` with a `Skill_` prefix. For example, the built-in `search_codebase` skill becomes a tool named `Skill_search_codebase`. The LLM sees these alongside other agent tools (TaskTracker, CreatePlan, SpawnAgent) and can invoke them directly.
+
+Skills with `disable_model_invocation=True` are excluded from `get_tool_definitions()` — the LLM cannot see or auto-trigger them. They can still be invoked explicitly (e.g., by user command).
 
 When invoked, `AgentToolHandler._handle_skill()` strips the `Skill_` prefix, resolves the `SkillDefinition`, and delegates to `SkillExecutor.execute()`.
 
@@ -738,7 +795,9 @@ When invoked, `AgentToolHandler._handle_skill()` strips the `Skill_` prefix, res
 
 Skills run as focused sub-conversations, similar to sub-agents but with more structure:
 
-- Custom system prompt: base prompt + `skill.system_prompt_additions`
+- Stage 2 loading: `SkillLoader.load_skill_content()` lazily loads full content
+- `$ARGUMENTS` substitution applied to `prompt_content`
+- Custom system prompt: base prompt + substituted `prompt_content`
 - User message: formatted from skill arguments
 - Dedicated `MessageThread` (isolated)
 - `DropOldestCompactor` with recency_window=10

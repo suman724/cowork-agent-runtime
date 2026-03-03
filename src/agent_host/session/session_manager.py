@@ -112,6 +112,9 @@ class SessionManager:
         self._current_task_id: str | None = None
         self._cancel_event: asyncio.Event = asyncio.Event()
 
+        # Workspace directory (set from workspace hint in create_session)
+        self._workspace_dir: str | None = None
+
         # Cumulative session history (across tasks)
         self._session_messages: list[ConversationMessage] = []
 
@@ -144,6 +147,10 @@ class SessionManager:
                 workspace_hint = WorkspaceHint.model_validate(hint_data)
             except Exception:
                 logger.warning("invalid_workspace_hint", hint_data=hint_data, exc_info=True)
+
+        # Extract workspace directory from hint for system prompt context
+        if workspace_hint and workspace_hint.localPaths:
+            self._workspace_dir = workspace_hint.localPaths[0]
 
         # Derive capabilities from actual tools available in the router
         available_tools = self._tool_router.get_available_tools()
@@ -317,7 +324,7 @@ class SessionManager:
 
         # System prompt
         prompt_builder = SystemPromptBuilder(
-            workspace_dir=None,  # Will be set from workspace context
+            workspace_dir=self._workspace_dir,
             os_family=platform.system(),
         )
 
@@ -355,9 +362,14 @@ class SessionManager:
         # Reset cancellation event for new task
         self._cancel_event.clear()
 
-        # Add user message to thread
+        # Prepend workspace context so the LLM always sees it, even after compaction
+        llm_prompt = prompt
+        if self._workspace_dir:
+            llm_prompt = f"[Workspace: {self._workspace_dir}]\n\n{prompt}"
+
+        # Add user message to thread (with workspace prefix for LLM)
         if self._thread:
-            self._thread.add_user_message(prompt)
+            self._thread.add_user_message(llm_prompt)
 
         # Spawn the agent loop as a background asyncio task
         task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))

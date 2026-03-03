@@ -5,8 +5,12 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# Source project .env if it exists
-if [ -f "$PROJECT_DIR/.env" ]; then
+# Source environment: prefer .env.anthropic, fall back to .env
+if [ -f "$PROJECT_DIR/.env.anthropic" ]; then
+  set -a
+  . "$PROJECT_DIR/.env.anthropic"
+  set +a
+elif [ -f "$PROJECT_DIR/.env" ]; then
   set -a
   . "$PROJECT_DIR/.env"
   set +a

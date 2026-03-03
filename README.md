@@ -75,7 +75,7 @@ Custom agent loop with production-grade harness:
 | `llm/` | LLM Gateway streaming client (openai SDK), response models, error classifier |
 | `thread/` | Message thread management, context compaction, token counting |
 | `memory/` | Working memory: task tracker, plan, notes (injected per-turn) |
-| `skills/` | Skill definitions, loader (built-in/YAML/policy), executor |
+| `skills/` | Skill definitions, loader (built-in/markdown/policy), executor |
 | `session/` | Session/Workspace HTTP clients, checkpoint manager, SessionManager |
 | `policy/` | Policy enforcer, path/command/domain matchers, risk assessor |
 | `budget/` | Session token budget tracking |

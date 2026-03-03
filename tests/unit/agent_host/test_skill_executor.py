@@ -19,13 +19,13 @@ def _make_skill(
     description: str = "A test skill.",
     max_steps: int = 15,
     tool_subset: list[str] | None = None,
-    system_prompt_additions: str = "",
+    prompt_content: str = "",
 ) -> SkillDefinition:
     """Create a SkillDefinition for testing."""
     return SkillDefinition(
         name=name,
         description=description,
-        system_prompt_additions=system_prompt_additions,
+        prompt_content=prompt_content,
         tool_subset=tool_subset,
         input_schema={
             "type": "object",
@@ -111,13 +111,13 @@ class TestSkillExecution:
         assert result["status"] == "completed"
         assert result["steps"] == 2
 
-    async def test_execute_with_system_prompt_additions(self) -> None:
-        """Skill with system_prompt_additions should include them."""
+    async def test_execute_with_prompt_content(self) -> None:
+        """Skill with prompt_content should include it in system prompt."""
         mock = MockLLMClient()
         mock.enqueue_text("Search complete.")
         executor = _make_skill_executor(mock)
         skill = _make_skill(
-            system_prompt_additions="Focus on Python files only.",
+            prompt_content="Focus on Python files only.",
         )
 
         await executor.execute(
@@ -131,6 +131,26 @@ class TestSkillExecution:
         system_msg = call["messages"][0]
         assert system_msg["role"] == "system"
         assert "Focus on Python files only." in system_msg["content"]
+
+    async def test_argument_substitution_in_prompt(self) -> None:
+        """$ARGUMENTS placeholders should be substituted in prompt_content."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Done.")
+        executor = _make_skill_executor(mock)
+        skill = _make_skill(
+            prompt_content="Search for $ARGUMENTS[0] in the codebase.",
+        )
+
+        await executor.execute(
+            skill=skill,
+            arguments={"query": "authentication"},
+            parent_task_id="task-1",
+        )
+
+        call = mock.call_log[0]
+        system_msg = call["messages"][0]
+        assert "Search for authentication in the codebase." in system_msg["content"]
+        assert "$ARGUMENTS" not in system_msg["content"]
 
     async def test_result_truncation(self) -> None:
         """Results longer than 4K chars should be truncated."""
