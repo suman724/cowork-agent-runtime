@@ -46,11 +46,18 @@ class RunCommandTool(BaseTool):
     def input_schema(self) -> dict[str, Any]:
         return {
             "type": "object",
-            "required": ["command"],
+            "required": ["command", "description"],
             "properties": {
                 "command": {
                     "type": "string",
                     "description": "The shell command to execute.",
+                },
+                "description": {
+                    "type": "string",
+                    "description": (
+                        "A brief explanation of what this command does "
+                        "(e.g., 'Install project dependencies')."
+                    ),
                 },
                 "timeout_seconds": {
                     "type": "integer",
@@ -77,6 +84,7 @@ class RunCommandTool(BaseTool):
     ) -> RawToolOutput:
         self.validate_input(arguments)
         command: str = arguments["command"]
+        description: str = arguments["description"]
         timeout: int = arguments.get("timeout_seconds", DEFAULT_COMMAND_TIMEOUT_SECONDS)
         cwd: str | None = arguments.get("working_directory") or context.working_directory
         stdin_data: str | None = arguments.get("stdin")
@@ -124,7 +132,7 @@ class RunCommandTool(BaseTool):
         )
 
         exit_code = process.returncode if process.returncode is not None else 0
-        output_text = _format_output(exit_code, stdout, stderr)
+        output_text = f"# {description}\n{_format_output(exit_code, stdout, stderr)}"
 
         max_output = context.max_output_bytes
         result = maybe_extract_artifact(
