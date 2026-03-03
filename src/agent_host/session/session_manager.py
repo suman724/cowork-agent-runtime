@@ -298,6 +298,13 @@ class SessionManager:
         policy_bundle: PolicyBundle,
     ) -> None:
         """Initialize all agent loop components from a policy bundle."""
+        # Inject workspace directory into path-based capabilities so the agent
+        # can operate on workspace files.  The Policy Service returns static
+        # allowedPaths (e.g. "."); the workspace dir is a local concern and is
+        # enriched here rather than threading local paths through the backend.
+        if self._workspace_dir:
+            self._inject_workspace_path(policy_bundle, self._workspace_dir)
+
         # Policy enforcer
         self._policy_enforcer = PolicyEnforcer(policy_bundle)
 
@@ -336,6 +343,36 @@ class SessionManager:
         self._skills = skill_loader.load_all()
         if self._skills:
             logger.info("skills_loaded", count=len(self._skills))
+
+    @staticmethod
+    def _inject_workspace_path(policy_bundle: PolicyBundle, workspace_dir: str) -> None:
+        """Add the workspace directory to allowedPaths for path-based capabilities.
+
+        The Policy Service returns a static policy bundle where allowedPaths may
+        only contain "." (agent process CWD).  The workspace directory is a local
+        concern — we enrich the bundle here so that the agent can read/write files
+        inside the user's workspace without the backend needing to know local paths.
+        """
+        from agent_host.policy.path_matcher import resolve_path
+
+        resolved_ws = resolve_path(workspace_dir)
+        path_capabilities = {"File.Read", "File.Write", "File.Delete"}
+
+        for cap in policy_bundle.capabilities:
+            if cap.name not in path_capabilities:
+                continue
+            # Build the set of already-resolved allowed paths to avoid duplicates
+            existing = {resolve_path(p) for p in cap.allowedPaths} if cap.allowedPaths else set()
+            if resolved_ws not in existing:
+                if cap.allowedPaths is None:
+                    cap.allowedPaths = [resolved_ws]
+                else:
+                    cap.allowedPaths = [*cap.allowedPaths, resolved_ws]
+                logger.debug(
+                    "workspace_path_injected",
+                    capability=cap.name,
+                    workspace_dir=resolved_ws,
+                )
 
     async def start_task(self, params: dict[str, Any]) -> dict[str, Any]:
         """Start a new task (agent work cycle) from a user prompt.

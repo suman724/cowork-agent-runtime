@@ -115,6 +115,13 @@ class ToolExecutor:
 
         # 1. Policy check
         if capability_name:
+            # Emit tool_requested BEFORE policy check so the desktop always creates
+            # a ToolCallCard — even for denied tools (card shows "Denied" badge).
+            if self._event_emitter:
+                self._event_emitter.emit_tool_requested(
+                    tool_name, capability_name, arguments, tool_call_id=call.id
+                )
+
             check = self._policy_enforcer.check_tool_call(tool_name, capability_name, arguments)
             if check.decision == "DENIED":
                 logger.warning(
@@ -144,13 +151,7 @@ class ToolExecutor:
                     arguments=arguments,
                 )
 
-            # 2. Emit tool_requested event
-            if self._event_emitter:
-                self._event_emitter.emit_tool_requested(
-                    tool_name, capability_name, arguments, tool_call_id=call.id
-                )
-
-            # 3. Approval gate if required
+            # 2. Approval gate if required
             if check.decision == "APPROVAL_REQUIRED":
                 result = await self._handle_approval(call, task_id, capability_name)
                 if result is not None:
