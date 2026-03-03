@@ -336,7 +336,9 @@ class SessionManager:
         )
 
         # Message thread
-        self._thread = MessageThread(system_prompt=prompt_builder.build_static_prompt())
+        self._thread = MessageThread(
+            system_prompt=prompt_builder.build_static_prompt(policy_enforcer=self._policy_enforcer)
+        )
 
         # Load skills
         skill_loader = SkillLoader()

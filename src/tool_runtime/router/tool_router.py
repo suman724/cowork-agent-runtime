@@ -11,6 +11,7 @@ from cowork_platform.tool_result import Error, ToolResult
 from tool_runtime.exceptions import ToolNotFoundError, ToolRuntimeError
 from tool_runtime.models import ExecutionContext, ToolExecutionResult
 from tool_runtime.platform.detection import get_platform
+from tool_runtime.tools.code.execute_code import ExecuteCodeTool
 from tool_runtime.tools.file.create_directory import CreateDirectoryTool
 from tool_runtime.tools.file.delete_file import DeleteFileTool
 from tool_runtime.tools.file.edit_file import EditFileTool
@@ -64,6 +65,7 @@ class ToolRouter:
         self._register(FindFilesTool())
         self._register(GrepFilesTool())
         self._register(RunCommandTool(self._platform))
+        self._register(ExecuteCodeTool(self._platform))
         self._register(HttpRequestTool(http_client))
         self._register(FetchUrlTool(http_client))
         self._register(WebSearchTool(http_client))

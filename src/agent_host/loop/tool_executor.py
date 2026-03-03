@@ -40,6 +40,7 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "HttpRequest": "Network.Http",
     "FetchUrl": "Network.Http",
     "WebSearch": "Search.Web",
+    "ExecuteCode": "Code.Execute",
 }
 
 # Tools that mutate files
