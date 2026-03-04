@@ -262,3 +262,42 @@ class EventEmitter:
                 "tokensAfter": tokens_after,
             },
         )
+
+    def emit_checkpoint_saved(self, task_id: str, step: int) -> None:
+        """Emit checkpoint_saved event after each per-step checkpoint write."""
+        self.emit(
+            EventType.CHECKPOINT_SAVED,
+            task_id=task_id,
+            payload={"stepNumber": step},
+        )
+
+    def emit_checkpoint_restored(self, source: str = "local") -> None:
+        """Emit checkpoint_restored event after state restoration."""
+        self.emit(
+            EventType.CHECKPOINT_RESTORED,
+            payload={"source": source},
+        )
+
+    def emit_checkpoint_failed(self, task_id: str, reason: str) -> None:
+        """Emit checkpoint_failed event when checkpoint write fails."""
+        self.emit(
+            EventType.CHECKPOINT_FAILED,
+            task_id=task_id,
+            payload={"reason": reason},
+            severity="warning",
+        )
+
+    def emit_workspace_sync_completed(self, task_id: str) -> None:
+        """Emit workspace_sync_completed event after periodic sync succeeds."""
+        self.emit(
+            EventType.WORKSPACE_SYNC_COMPLETED,
+            task_id=task_id,
+        )
+
+    def emit_workspace_sync_failed(self, task_id: str) -> None:
+        """Emit workspace_sync_failed event when periodic sync fails."""
+        self.emit(
+            EventType.WORKSPACE_SYNC_FAILED,
+            task_id=task_id,
+            severity="warning",
+        )

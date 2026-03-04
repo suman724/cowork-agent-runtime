@@ -164,6 +164,103 @@ class TestCheckpointManagerThreadRoundTrip:
         assert loaded.working_memory == wm_data
 
 
+class TestCheckpointManagerActiveTask:
+    def test_save_and_load_with_active_task(self, manager: CheckpointManager) -> None:
+        """Active task fields should round-trip correctly."""
+        checkpoint = _make_checkpoint(
+            active_task_id="task-42",
+            active_task_prompt="Fix the bug",
+            active_task_step=7,
+            active_task_max_steps=50,
+            last_workspace_sync_step=5,
+        )
+        manager.save(checkpoint)
+
+        loaded = manager.load("sess-123")
+        assert loaded is not None
+        assert loaded.active_task_id == "task-42"
+        assert loaded.active_task_prompt == "Fix the bug"
+        assert loaded.active_task_step == 7
+        assert loaded.active_task_max_steps == 50
+        assert loaded.last_workspace_sync_step == 5
+
+    def test_backward_compat_old_checkpoint_without_active_task(
+        self, manager: CheckpointManager
+    ) -> None:
+        """Loading a checkpoint written before active task fields were added."""
+        path = manager._checkpoint_path("sess-old")
+        old_data = {
+            "session_id": "sess-old",
+            "workspace_id": "ws-1",
+            "tenant_id": "t-1",
+            "user_id": "u-1",
+            "token_input_used": 50,
+            "token_output_used": 25,
+            "session_messages": [],
+            "checkpointed_at": "2026-01-01T00:00:00+00:00",
+        }
+        path.write_text(json.dumps(old_data))
+
+        loaded = manager.load("sess-old")
+        assert loaded is not None
+        assert loaded.active_task_id is None
+        assert loaded.active_task_prompt is None
+        assert loaded.active_task_step == 0
+        assert loaded.active_task_max_steps == 0
+        assert loaded.last_workspace_sync_step == 0
+
+    def test_active_task_cleared_on_task_end(self, manager: CheckpointManager) -> None:
+        """When task ends, checkpoint should have None/0 for active task fields."""
+        # First save with active task
+        checkpoint = _make_checkpoint(
+            active_task_id="task-1",
+            active_task_step=10,
+        )
+        manager.save(checkpoint)
+
+        # Then save without active task (task completed)
+        checkpoint2 = _make_checkpoint(
+            active_task_id=None,
+            active_task_step=0,
+        )
+        manager.save(checkpoint2)
+
+        loaded = manager.load("sess-123")
+        assert loaded is not None
+        assert loaded.active_task_id is None
+        assert loaded.active_task_step == 0
+
+
+class TestCheckpointManagerWorkspaceDir:
+    def test_workspace_dir_round_trip(self, manager: CheckpointManager) -> None:
+        """workspace_dir should survive checkpoint save/load."""
+        checkpoint = _make_checkpoint(workspace_dir="/home/user/project")
+        manager.save(checkpoint)
+
+        loaded = manager.load("sess-123")
+        assert loaded is not None
+        assert loaded.workspace_dir == "/home/user/project"
+
+    def test_old_checkpoint_without_workspace_dir(self, manager: CheckpointManager) -> None:
+        """Loading an old checkpoint without workspace_dir should default to None."""
+        path = manager._checkpoint_path("sess-old")
+        old_data = {
+            "session_id": "sess-old",
+            "workspace_id": "ws-1",
+            "tenant_id": "t-1",
+            "user_id": "u-1",
+            "token_input_used": 50,
+            "token_output_used": 25,
+            "session_messages": [],
+            "checkpointed_at": "2026-01-01T00:00:00+00:00",
+        }
+        path.write_text(json.dumps(old_data))
+
+        loaded = manager.load("sess-old")
+        assert loaded is not None
+        assert loaded.workspace_dir is None
+
+
 class TestCheckpointManagerAtomicWrite:
     def test_creates_dir_if_needed(self, tmp_path: Path) -> None:
         new_dir = tmp_path / "nested" / "dir"

@@ -32,8 +32,19 @@ class SystemPromptBuilder:
         self._os_family = os_family or platform.system()
         self._workspace_context = self._detect_workspace(workspace_dir)
 
-    def build_static_prompt(self, policy_enforcer: PolicyEnforcer | None = None) -> str:
-        """Build the static system prompt (identity + guidelines + workspace context)."""
+    def build_static_prompt(
+        self,
+        policy_enforcer: PolicyEnforcer | None = None,
+        project_instructions: str = "",
+        has_persistent_memory: bool = False,
+    ) -> str:
+        """Build the static system prompt (identity + guidelines + workspace context).
+
+        Args:
+            policy_enforcer: Used for capability-dependent guidance.
+            project_instructions: Concatenated COWORK.md content (injected after workspace).
+            has_persistent_memory: Whether auto-memory is available (adds usage guidance).
+        """
         parts = [_BASE_SYSTEM_PROMPT]
 
         # Current date
@@ -51,6 +62,43 @@ class SystemPromptBuilder:
             cap_guidance = self._build_capability_guidance(policy_enforcer)
             if cap_guidance:
                 parts.append(cap_guidance)
+
+        # Project instructions (COWORK.md files)
+        if project_instructions:
+            parts.append(f"\n# Project Instructions\n\n{project_instructions}")
+
+        # Memory guidance (when auto-memory is available)
+        if has_persistent_memory:
+            parts.append(
+                "\n# Persistent Memory\n\n"
+                "You have persistent memory that survives across sessions via markdown files.\n\n"
+                "## Tools\n"
+                "- **SaveMemory** — write/update a memory file (default: MEMORY.md)\n"
+                "- **RecallMemory** — read a specific topic file\n"
+                "- **ListMemories** — list all memory files\n"
+                "- **DeleteMemory** — remove an outdated topic file\n\n"
+                "## MEMORY.md (Index File)\n"
+                "Loaded automatically every turn. Keep it concise (under 200 lines).\n"
+                "Use it as an index — link to topic files for detailed notes.\n\n"
+                "## Topic Files\n"
+                "Create separate files (e.g., `patterns.md`, `debugging.md`) for detailed notes.\n"
+                "These are read on-demand via RecallMemory.\n\n"
+                "## What to Save\n"
+                "- User preferences for workflow, tools, and communication style\n"
+                "- Key architectural decisions, important file paths, project structure\n"
+                "- Stable patterns and conventions confirmed across interactions\n"
+                "- Solutions to recurring problems and debugging insights\n\n"
+                "## What NOT to Save\n"
+                "- Session-specific context (current task details, in-progress work)\n"
+                "- Information that duplicates project instructions (COWORK.md)\n"
+                "- Speculative conclusions — verify before saving\n"
+                "- Sensitive data (tokens, passwords, API keys)\n\n"
+                "## Rules\n"
+                "- Check existing memories before writing — update, don't duplicate\n"
+                "- When the user says 'remember X', save it immediately\n"
+                "- When the user says 'forget X', find and remove the relevant entry\n"
+                "- Organize semantically by topic, not chronologically\n"
+            )
 
         return "\n".join(parts)
 

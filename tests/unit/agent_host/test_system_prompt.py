@@ -56,3 +56,27 @@ class TestSystemPromptBuilder:
         builder = SystemPromptBuilder()
         injection = builder.build_dynamic_injection()
         assert injection == ""
+
+    def test_static_prompt_includes_project_instructions(self) -> None:
+        builder = SystemPromptBuilder()
+        prompt = builder.build_static_prompt(project_instructions="Use pytest for all tests.")
+        assert "# Project Instructions" in prompt
+        assert "Use pytest for all tests." in prompt
+
+    def test_static_prompt_without_project_instructions(self) -> None:
+        builder = SystemPromptBuilder()
+        prompt = builder.build_static_prompt(project_instructions="")
+        assert "# Project Instructions" not in prompt
+
+    def test_memory_guidance_when_persistent_memory(self) -> None:
+        builder = SystemPromptBuilder()
+        prompt = builder.build_static_prompt(has_persistent_memory=True)
+        assert "# Persistent Memory" in prompt
+        assert "SaveMemory" in prompt
+        assert "RecallMemory" in prompt
+        assert "DeleteMemory" in prompt
+
+    def test_no_memory_guidance_without_persistent_memory(self) -> None:
+        builder = SystemPromptBuilder()
+        prompt = builder.build_static_prompt(has_persistent_memory=False)
+        assert "# Persistent Memory" not in prompt

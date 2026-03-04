@@ -22,6 +22,8 @@ def _make_loop(
     max_context_tokens: int = 100_000,
     event_emitter: MagicMock | None = None,
     cancel_event: asyncio.Event | None = None,
+    memory_manager: MagicMock | None = None,
+    working_memory: MagicMock | None = None,
 ) -> AgentLoop:
     """Helper to build an AgentLoop with test components."""
     from agent_host.policy.policy_enforcer import PolicyEnforcer
@@ -49,6 +51,8 @@ def _make_loop(
         cancellation_event=cancel_event or asyncio.Event(),
         max_steps=max_steps,
         max_context_tokens=max_context_tokens,
+        memory_manager=memory_manager,
+        working_memory=working_memory,  # type: ignore[arg-type]
     )
 
 
@@ -225,6 +229,77 @@ class TestAgentLoopBudget:
         assert loop._token_budget.output_tokens_used == 50
 
 
+class TestAgentLoopStepCallback:
+    async def test_on_step_complete_called_each_step(self) -> None:
+        """on_step_complete callback should be called after each step."""
+        mock = MockLLMClient()
+        mock.enqueue_tool_call("ReadFile", {"path": "/a"}, tool_call_id="tc-1")
+        mock.enqueue_tool_call("ReadFile", {"path": "/b"}, tool_call_id="tc-2")
+        mock.enqueue_text("Done!")
+
+        callback_calls: list[tuple[str, int]] = []
+
+        async def on_step(task_id: str, step: int) -> None:
+            callback_calls.append((task_id, step))
+
+        loop = _make_loop(mock)
+        loop._on_step_complete = on_step
+
+        async def mock_execute(calls, task_id):
+            return [
+                ToolCallResult(
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
+                    status="success",
+                    result_text='{"status": "success"}',
+                )
+            ]
+
+        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+        assert result.step_count == 3
+        assert callback_calls == [("task-1", 1), ("task-1", 2), ("task-1", 3)]
+
+    async def test_on_step_complete_failure_does_not_abort_loop(self) -> None:
+        """Callback failure should be logged but not abort the agent loop."""
+        mock = MockLLMClient()
+        mock.enqueue_tool_call("ReadFile", tool_call_id="tc-1")
+        mock.enqueue_text("Done!")
+
+        async def failing_callback(task_id: str, step: int) -> None:
+            raise RuntimeError("checkpoint write failed")
+
+        loop = _make_loop(mock)
+        loop._on_step_complete = failing_callback
+
+        async def mock_execute(calls, task_id):
+            return [
+                ToolCallResult(
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
+                    status="success",
+                    result_text='{"status": "success"}',
+                )
+            ]
+
+        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+        assert result.step_count == 2
+
+    async def test_on_step_complete_not_called_when_none(self) -> None:
+        """When on_step_complete is None, loop runs normally without callback."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Hello!")
+        loop = _make_loop(mock)
+        assert loop._on_step_complete is None
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+
+
 class TestAgentLoopCompaction:
     async def test_compaction_at_90_percent(self) -> None:
         """Loop should compact at 90% of max_context_tokens."""
@@ -245,3 +320,104 @@ class TestAgentLoopCompaction:
         await loop.run("task-1")
         # With max_context_tokens=10 and 90% budget=9, compaction must have happened
         emitter.emit_context_compacted.assert_called()
+
+
+class TestAgentLoopMemoryInjection:
+    async def test_persistent_memory_injected_into_messages(self) -> None:
+        """Memory context should be injected as a system message after the system prompt."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Done")
+
+        mm = MagicMock()
+        mm.render_memory_context.return_value = "# Persistent Memory\n\nUser prefers dark mode"
+
+        loop = _make_loop(mock, memory_manager=mm)
+        await loop.run("task-1")
+
+        # Inspect messages sent to LLM
+        call_args = mock.last_messages
+        assert call_args is not None
+        # messages[0] is system prompt, messages[1] should be memory
+        memory_msgs = [
+            m
+            for m in call_args
+            if m.get("role") == "system" and "Persistent Memory" in m.get("content", "")
+        ]
+        assert len(memory_msgs) == 1
+        assert "dark mode" in memory_msgs[0]["content"]
+
+    async def test_working_memory_injected_after_persistent_memory(self) -> None:
+        """Working memory should be injected after persistent memory."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Done")
+
+        mm = MagicMock()
+        mm.render_memory_context.return_value = "# Persistent Memory\n\nFact 1"
+
+        wm = MagicMock()
+        wm.render.return_value = "# Working Memory\n\n- Task 1: pending"
+        wm.task_tracker = MagicMock()
+
+        loop = _make_loop(mock, memory_manager=mm, working_memory=wm)
+        await loop.run("task-1")
+
+        call_args = mock.last_messages
+        assert call_args is not None
+
+        # Find indices of memory and working memory injections
+        mem_idx = next(
+            i
+            for i, m in enumerate(call_args)
+            if m.get("role") == "system" and "Persistent Memory" in m.get("content", "")
+        )
+        wm_idx = next(
+            i
+            for i, m in enumerate(call_args)
+            if m.get("role") == "system" and "Working Memory" in m.get("content", "")
+        )
+        assert mem_idx < wm_idx
+
+    async def test_no_injection_when_memory_is_empty(self) -> None:
+        """No extra system messages when memory returns empty string."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Done")
+
+        mm = MagicMock()
+        mm.render_memory_context.return_value = ""
+
+        loop = _make_loop(mock, memory_manager=mm)
+        await loop.run("task-1")
+
+        call_args = mock.last_messages
+        assert call_args is not None
+        # Only system prompt + user message should be system messages
+        system_msgs = [m for m in call_args if m.get("role") == "system"]
+        assert len(system_msgs) == 1  # just the system prompt
+
+    async def test_memory_re_read_each_turn(self) -> None:
+        """render_memory_context should be called once per loop iteration."""
+        mock = MockLLMClient()
+        mock.enqueue_tool_call("ReadFile", {"path": "/a"}, tool_call_id="tc-1")
+        mock.enqueue_text("Done")
+
+        mm = MagicMock()
+        mm.render_memory_context.return_value = "# Persistent Memory\n\nFact"
+
+        loop = _make_loop(mock, memory_manager=mm)
+
+        async def mock_execute(calls, task_id):
+            return [
+                ToolCallResult(
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
+                    status="success",
+                    result_text='{"status": "success"}',
+                )
+            ]
+
+        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+
+        await loop.run("task-1")
+
+        # Should be called once per step (2 steps in this test)
+        assert mm.render_memory_context.call_count == 2

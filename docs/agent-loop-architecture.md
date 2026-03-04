@@ -24,7 +24,8 @@ This document provides a detailed walkthrough of the `cowork-agent-runtime` impl
 16. [Token Budget](#16-token-budget)
 17. [Crash Recovery (Checkpoints)](#17-crash-recovery-checkpoints)
 18. [Code Execution](#18-code-execution)
-19. [Package Boundary & Dependency Rules](#19-package-boundary--dependency-rules)
+19. [Persistent Memory](#19-persistent-memory)
+20. [Package Boundary & Dependency Rules](#20-package-boundary--dependency-rules)
 
 ---
 
@@ -40,7 +41,7 @@ cowork-agent-runtime/src/
 │   ├── loop/            # Core agent loop, tool executor, agent tools, error recovery
 │   ├── llm/             # LLM Gateway streaming client (OpenAI SDK)
 │   ├── thread/          # Message thread, context compaction, token counting
-│   ├── memory/          # Working memory (task tracker, plan, notes)
+│   ├── memory/          # Working memory + persistent memory (project instructions, auto-memory)
 │   ├── skills/          # Skill definitions, loader, executor
 │   ├── policy/          # Policy enforcer, matchers, risk assessor
 │   ├── budget/          # Token budget tracking
@@ -81,6 +82,7 @@ graph TB
             LLM[LLM Client]
             MT[Message Thread]
             WM[Working Memory]
+            MM[Memory Manager<br/>Project Instructions + Auto-Memory]
             ER[Error Recovery]
             EE[Event Emitter]
             CP[Checkpoint Manager]
@@ -605,11 +607,14 @@ graph LR
     ATH --> CP[CreatePlan<br/>goal + steps]
     ATH --> SA[SpawnAgent<br/>delegate to sub-agent]
     ATH --> SK[Skill_*<br/>delegate to SkillExecutor]
+    ATH --> SM2[SaveMemory<br/>write to memory files]
+    ATH --> RM[RecallMemory<br/>read memory files]
+    ATH --> LM[ListMemories<br/>list memory files]
 ```
 
-The `AgentToolHandler` is initialized with `WorkingMemory`, `SubAgentManager`, `SkillExecutor`, and the loaded `SkillDefinition` list. It builds tool definitions for all agent-internal tools plus one `Skill_{name}` tool per loaded skill.
+The `AgentToolHandler` is initialized with `WorkingMemory`, `SubAgentManager`, `SkillExecutor`, the loaded `SkillDefinition` list, and optionally a `MemoryManager`. It builds tool definitions for all agent-internal tools plus one `Skill_{name}` tool per loaded skill. Memory tools (`SaveMemory`, `RecallMemory`, `ListMemories`) are only included when a `MemoryManager` is provided.
 
-The `is_agent_tool()` method checks both the static `AGENT_TOOL_NAMES` set (`TaskTracker`, `CreatePlan`, `SpawnAgent`) and the dynamic `_skill_tool_names` set (e.g., `Skill_search_codebase`).
+The `is_agent_tool()` method checks both the static `AGENT_TOOL_NAMES` set (`TaskTracker`, `CreatePlan`, `SpawnAgent`, `SaveMemory`, `RecallMemory`, `ListMemories`) and the dynamic `_skill_tool_names` set (e.g., `Skill_search_codebase`).
 
 The `execute()` method takes `tool_name`, `arguments`, and `task_id` — the `task_id` is passed through to the `SkillExecutor` for tracking.
 
@@ -638,6 +643,27 @@ Creates or replaces the current plan in working memory.
 | `context` | string? | Relevant context from current work |
 
 Only available when `SubAgentManager` is configured. Delegates to the sub-agent system (see next section).
+
+### SaveMemory Tool
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `file` | string? | Memory filename (default: `MEMORY.md`), must match `[a-zA-Z0-9_-]+.md` |
+| `content` | string | Full content to write to the file |
+
+Writes to persistent memory files. Only available when `MemoryManager` is configured (see Section 19).
+
+### RecallMemory Tool
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `file` | string | Memory filename to read (e.g., `debugging.md`) |
+
+Reads a specific persistent memory file. Use `ListMemories` first to see available files.
+
+### ListMemories Tool
+
+No parameters. Returns a list of all `.md` files in the memory directory with their sizes.
 
 ### Skill Tools (`Skill_*`)
 
@@ -1139,33 +1165,50 @@ graph LR
 
 ## 17. Crash Recovery (Checkpoints)
 
-**File:** `agent_host/session/checkpoint_manager.py`
+**Files:** `agent_host/session/checkpoint_manager.py`, `agent_host/loop/agent_loop.py`, `agent_host/session/session_manager.py`
 
-Atomic JSON file checkpoints enable crash recovery.
+Atomic JSON file checkpoints enable crash recovery. Checkpoints are written **after each completed step** (not just at task end), and periodic workspace syncs provide machine-level durability.
 
 ```mermaid
 sequenceDiagram
     participant AL as Agent Loop
     participant SM as SessionManager
     participant CM as CheckpointManager
+    participant WS as Workspace Service
     participant FS as File System
 
     Note over CM: Checkpoint = JSON file per session<br/>in platform app data dir
 
-    AL->>SM: Task completes
-    SM->>CM: save(checkpoint)
-    CM->>FS: Write to tempfile
-    CM->>FS: os.replace → atomic swap
-    Note over FS: cowork_{session_id}.json
+    loop Each completed step
+        AL->>SM: on_step_complete(task_id, step)
+        SM->>CM: save(checkpoint with active task state)
+        CM->>FS: Write to tempfile
+        CM->>FS: os.replace → atomic swap
+        Note over FS: cowork_{session_id}.json
+
+        alt Every N steps (workspace_sync_interval)
+            SM->>WS: upload_session_history (best-effort)
+            WS-->>SM: OK / error (logged, not propagated)
+        end
+    end
+
+    AL->>SM: Task completes (finally block)
+    SM->>CM: save(checkpoint with active_task_id=None)
 
     Note over SM: On next session creation...
     SM->>CM: load(session_id)
     CM->>FS: Read JSON file
-    CM-->>SM: SessionCheckpoint
-    SM->>SM: Restore token budget
-    SM->>SM: Restore message thread
-    SM->>SM: Restore working memory
-    SM->>SM: Restore session messages
+    alt Checkpoint found
+        CM-->>SM: SessionCheckpoint
+        SM->>SM: Restore token budget
+        SM->>SM: Restore message thread
+        SM->>SM: Restore working memory
+        SM->>SM: Restore session messages
+        SM->>SM: Detect incomplete task (if active_task_id set)
+    else No checkpoint (corrupt/missing)
+        SM->>WS: get_session_history (fallback)
+        WS-->>SM: ConversationMessages (best-effort)
+    end
 
     Note over SM: On clean shutdown...
     SM->>CM: delete(session_id)
@@ -1187,7 +1230,26 @@ class SessionCheckpoint:
     thread: list[dict] | None = None    # MessageThread state
     working_memory: dict | None = None  # WorkingMemory state (tasks, plan, notes)
     checkpointed_at: str = ""           # ISO 8601 timestamp
+
+    # In-progress task state (backward-compatible defaults)
+    active_task_id: str | None = None          # Non-None = task in progress
+    active_task_prompt: str | None = None       # The user prompt
+    active_task_step: int = 0                   # Last completed step
+    active_task_max_steps: int = 0              # Max steps for this task
+    last_workspace_sync_step: int = 0           # Last step that synced to workspace
 ```
+
+### on_step_complete Callback
+
+`AgentLoop` accepts an optional `on_step_complete: Callable[[str, int], Awaitable[None]]` callback. It is invoked after `emit_step_completed` and before the 80% step warning check:
+
+- **Awaited** (synchronous relative to the loop) — checkpoint must flush before the next step
+- **Exception-safe** — failures are caught and logged; checkpoint failure never aborts the loop
+- **Not called on loop exit** — the `_run_agent()` finally block handles end-of-task checkpoint
+
+### Periodic Workspace Sync
+
+Controlled by `WORKSPACE_SYNC_INTERVAL` (default: 5 steps, 0 = disabled). Every N steps, `_sync_history_to_workspace()` uploads `_session_messages` to the Workspace Service. This provides machine-level durability — if the disk is lost, conversation history survives in the backend.
 
 ### Restore Flow
 
@@ -1197,16 +1259,44 @@ On session creation or resume, `_restore_from_checkpoint()` restores state in th
 2. **Message thread** — `MessageThread.from_checkpoint()` rebuilds full conversation history
 3. **Working memory** — `WorkingMemory.from_checkpoint()` restores tasks, plan, and notes
 4. **Session messages** — Cumulative `ConversationMessage` list for history upload
+5. **Incomplete task detection** — if `active_task_id` is set, stores task info for resume UI
 
 Each restore step is independent — a failure in one does not block the others.
 
+### Workspace Fallback
+
+If the local checkpoint is corrupt or missing, `_restore_from_checkpoint()` falls back to the Workspace Service:
+
+- Fetches conversation history via `get_session_history()`
+- Restores `_session_messages` for continuity
+- Cannot recover thread state, working memory, or token budget (those are local-only)
+- Best-effort — failure is logged, session continues with empty state
+
+### Mid-Task Resume
+
+When `GetSessionState` includes an `incompleteTask` field (from checkpoint with `active_task_id` set), the Desktop App can offer "Resume interrupted task?" UI. On resume via `StartTask` with the same `taskId`:
+
+- The user message is **not** re-added to the thread (already present from checkpoint)
+- The agent loop continues from where it left off
+- `_incomplete_task` is cleared after resume
+
 ### Corrupt Checkpoint Handling
 
-If a checkpoint file is corrupt (invalid JSON, missing keys), it is **deleted** and the session starts fresh. This prevents a bad checkpoint from permanently blocking session creation.
+If a checkpoint file is corrupt (invalid JSON, missing keys), it is **deleted** and the workspace fallback is attempted. This prevents a bad checkpoint from permanently blocking session creation.
 
 **Write strategy:** `tempfile` → `os.replace()` (atomic on all platforms)
 **File naming:** `cowork_{session_id}.json` in the platform checkpoint directory
-**Lifecycle:** Saved after each task completion (including working memory). Deleted on clean `Shutdown`.
+**Lifecycle:** Saved after each completed step. Cleared (active_task_id=None) on task completion. Deleted on clean `Shutdown`.
+
+### Checkpoint Events
+
+| Event | When | Severity |
+|-------|------|----------|
+| `checkpoint_saved` | After each per-step checkpoint write | info |
+| `checkpoint_restored` | After state restoration from checkpoint | info |
+| `checkpoint_failed` | When checkpoint write fails | warning |
+| `workspace_sync_completed` | After successful periodic workspace sync | info |
+| `workspace_sync_failed` | When periodic workspace sync fails | warning |
 
 ---
 
@@ -1371,7 +1461,107 @@ The `ExecuteCodeTool` respects the `maxExecutionTimeSeconds` from the policy bun
 
 ---
 
-## 19. Package Boundary & Dependency Rules
+## 19. Persistent Memory
+
+The persistent memory system provides cross-session knowledge that survives between conversations. It implements a two-tier model inspired by Claude Code's memory architecture.
+
+### Architecture
+
+```mermaid
+graph TD
+    subgraph "Tier 1: Project Instructions (Human-Written)"
+        CW[COWORK.md<br/>Team-shared, version-controlled]
+        CWL[COWORK.local.md<br/>Personal, gitignored]
+    end
+
+    subgraph "Tier 2: Auto Memory (AI-Written)"
+        MEM[MEMORY.md<br/>Concise index, 200 lines max]
+        TF1[debugging.md]
+        TF2[patterns.md]
+        TFN[...topic files]
+    end
+
+    subgraph "Session Context"
+        SP[System Prompt<br/>Includes project instructions]
+        MI[Memory Injection<br/>MEMORY.md loaded every turn]
+        MT[Memory Tools<br/>SaveMemory / RecallMemory / ListMemories]
+    end
+
+    CW --> SP
+    CWL --> SP
+    MEM --> MI
+    TF1 -.->|on-demand via RecallMemory| MT
+    TF2 -.->|on-demand via RecallMemory| MT
+    TFN -.->|on-demand via RecallMemory| MT
+```
+
+### Tier 1: Project Instructions
+
+**Files:** `COWORK.md` (team-shared) and `COWORK.local.md` (personal) at the project root and parent directories.
+
+**Loading:** `ProjectInstructionsLoader` walks up the directory tree from `workspace_dir` to the filesystem root. At each level, it checks for `COWORK.md` and `COWORK.local.md`. Ancestors are loaded first (broadest scope), with workspace-level files last (most specific). Files are concatenated with `--- <path> ---` separators.
+
+**Injection:** Loaded once at session start and appended to the static system prompt. Because the system prompt is always the first message, project instructions survive context compaction.
+
+### Tier 2: Auto Memory
+
+**Location:** `~/.cowork/projects/<hash>/memory/` where `<hash>` is the first 16 hex characters of the SHA-256 of the resolved workspace path.
+
+**MEMORY.md:** The concise index file. First 200 lines are loaded automatically at the start of every session and injected as a system message after the system prompt. The agent is instructed to keep this file concise and move detailed notes to topic files.
+
+**Topic files:** Additional `.md` files (e.g., `debugging.md`, `patterns.md`) created by the agent for detailed notes. These are NOT loaded automatically — the agent reads them on-demand using the `RecallMemory` tool.
+
+**Tools:** Three agent-internal tools (bypass PolicyEnforcer):
+
+| Tool | Purpose |
+|------|---------|
+| `SaveMemory` | Write/update memory files (atomic write) |
+| `RecallMemory` | Read a specific topic file |
+| `ListMemories` | List all `.md` files with sizes |
+
+### Context Injection Order
+
+```
+messages[0]: System prompt (base + date + OS + workspace + project instructions + memory guidance)
+messages[1]: Persistent memory (MEMORY.md first 200 lines)
+messages[2]: Working memory (TaskTracker + Plan + Notes)
+messages[3+]: Conversation history...
+```
+
+Both persistent memory and working memory are re-injected every LLM turn, so they survive context compaction.
+
+### Key Components
+
+| Component | File | Responsibility |
+|-----------|------|---------------|
+| **ProjectInstructionsLoader** | `memory/project_instructions.py` | Load COWORK.md from directory tree |
+| **PersistentMemory** | `memory/persistent_memory.py` | Read/write auto-memory files |
+| **MemoryManager** | `memory/memory_manager.py` | Orchestrate instructions + auto-memory |
+
+### Sequence: Memory Loading at Session Start
+
+```mermaid
+sequenceDiagram
+    participant SM as SessionManager
+    participant MM as MemoryManager
+    participant PIL as ProjectInstructionsLoader
+    participant PM as PersistentMemory
+    participant SPB as SystemPromptBuilder
+
+    SM->>MM: MemoryManager(workspace_dir)
+    SM->>MM: load_all()
+    MM->>PIL: load(workspace_dir)
+    PIL->>PIL: Walk directory tree
+    PIL-->>MM: Concatenated COWORK.md content
+    MM->>PM: load_index(max_lines=200)
+    PM-->>MM: MEMORY.md content (≤200 lines)
+    SM->>SPB: build_static_prompt(project_instructions=..., has_persistent_memory=True)
+    SPB-->>SM: System prompt with instructions + memory guidance
+```
+
+---
+
+## 20. Package Boundary & Dependency Rules
 
 ```mermaid
 graph TD
@@ -1428,5 +1618,8 @@ graph TD
 | **CheckpointManager** | `session/checkpoint_manager.py` | Crash recovery persistence |
 | **SystemPromptBuilder** | `loop/system_prompt.py` | Dynamic system prompt |
 | **FileChangeTracker** | `agent/file_change_tracker.py` | Track file mutations for diffs |
+| **MemoryManager** | `memory/memory_manager.py` | Orchestrate project instructions + auto-memory |
+| **ProjectInstructionsLoader** | `memory/project_instructions.py` | Load COWORK.md from directory tree |
+| **PersistentMemory** | `memory/persistent_memory.py` | AI-writable memory file storage |
 | **PythonExecutor** | `tool_runtime/code/executor.py` | Stateless Python script execution |
 | **ExecuteCodeTool** | `tool_runtime/tools/code/execute_code.py` | Python code execution tool (Code.Execute) |

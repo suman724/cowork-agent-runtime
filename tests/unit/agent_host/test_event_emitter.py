@@ -114,3 +114,59 @@ class TestEmitSessionFailed:
             assert severity == "error"
             payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
             assert payload["message"] == "Policy expired"
+
+
+class TestEmitCheckpointSaved:
+    def test_emits_with_step_number(self) -> None:
+        emitter = _make_emitter()
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_checkpoint_saved("task-1", 5)
+
+            mock_emit.assert_called_once()
+            call_kwargs = mock_emit.call_args
+            payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+            assert payload["stepNumber"] == 5
+
+
+class TestEmitCheckpointRestored:
+    def test_emits_with_source(self) -> None:
+        emitter = _make_emitter()
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_checkpoint_restored(source="local")
+
+            mock_emit.assert_called_once()
+            call_kwargs = mock_emit.call_args
+            payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+            assert payload["source"] == "local"
+
+
+class TestEmitCheckpointFailed:
+    def test_emits_with_warning_severity(self) -> None:
+        emitter = _make_emitter()
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_checkpoint_failed("task-1", "disk full")
+
+            call_kwargs = mock_emit.call_args
+            severity = call_kwargs.kwargs.get("severity") or call_kwargs[1].get("severity")
+            assert severity == "warning"
+            payload = call_kwargs.kwargs.get("payload") or call_kwargs[1].get("payload")
+            assert payload["reason"] == "disk full"
+
+
+class TestEmitWorkspaceSyncCompleted:
+    def test_emits_sync_completed(self) -> None:
+        emitter = _make_emitter()
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_workspace_sync_completed("task-1")
+            mock_emit.assert_called_once()
+
+
+class TestEmitWorkspaceSyncFailed:
+    def test_emits_with_warning_severity(self) -> None:
+        emitter = _make_emitter()
+        with patch.object(emitter, "emit") as mock_emit:
+            emitter.emit_workspace_sync_failed("task-1")
+
+            call_kwargs = mock_emit.call_args
+            severity = call_kwargs.kwargs.get("severity") or call_kwargs[1].get("severity")
+            assert severity == "warning"
