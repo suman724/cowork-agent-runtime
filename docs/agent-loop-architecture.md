@@ -23,7 +23,8 @@ This document provides a detailed walkthrough of the `cowork-agent-runtime` impl
 15. [Event System](#15-event-system)
 16. [Token Budget](#16-token-budget)
 17. [Crash Recovery (Checkpoints)](#17-crash-recovery-checkpoints)
-18. [Package Boundary & Dependency Rules](#18-package-boundary--dependency-rules)
+18. [Code Execution](#18-code-execution)
+19. [Package Boundary & Dependency Rules](#19-package-boundary--dependency-rules)
 
 ---
 
@@ -49,8 +50,13 @@ cowork-agent-runtime/src/
 │
 └── tool_runtime/        # Tool execution (isolated from agent_host)
     ├── router/          # ToolRouter (registry, dispatch)
-    ├── tools/           # Built-in tools (file, shell, network)
-    ├── platform/        # OS abstraction (macOS/Windows)
+    ├── tools/           # Built-in tools (file, shell, network, code)
+    │   ├── file/        # 11 file manipulation tools
+    │   ├── shell/       # RunCommand (Shell.Exec)
+    │   ├── network/     # HttpRequest, FetchUrl, WebSearch
+    │   └── code/        # ExecuteCode (Code.Execute)
+    ├── code/            # Python execution engine (PythonExecutor, preamble)
+    ├── platform/        # OS abstraction (macOS/Windows/Linux)
     └── output/          # Output formatting, truncation, artifact extraction
 ```
 
@@ -82,7 +88,7 @@ graph TB
 
         subgraph tool_runtime
             TR[Tool Router]
-            BT[15 Built-in Tools<br/>File ×11 · Shell ×1 · Network ×3]
+            BT[16 Built-in Tools<br/>File ×11 · Shell ×1 · Network ×3 · Code ×1]
         end
     end
 
@@ -331,6 +337,24 @@ graph LR
 - Routes `ToolRequest` → tool → `ToolExecutionResult`
 - **Never raises** — all errors captured as `status="failed"`
 
+**ExecutionContext** carries policy-derived constraints from `agent_host` to `tool_runtime`:
+
+```python
+@dataclass(frozen=True)
+class ExecutionContext:
+    allowed_paths: list[str] | None = None         # File.Read/Write/Delete
+    blocked_paths: list[str] | None = None         # File.Read/Write/Delete
+    allowed_commands: list[str] | None = None      # Shell.Exec
+    blocked_commands: list[str] | None = None      # Shell.Exec
+    allowed_domains: list[str] | None = None       # Network.Http
+    max_file_size_bytes: int | None = None         # File.Read (default 10MB)
+    max_output_bytes: int | None = None            # All tools (default 100KB)
+    command_timeout_seconds: int | None = None     # Shell.Exec (default 300s)
+    working_directory: str | None = None           # CWD for Shell.Exec / Code.Execute
+    allow_code_network: bool = False               # Code.Execute — network access
+    max_execution_time_seconds: int | None = None  # Code.Execute — timeout (default 120s)
+```
+
 ### Tool-to-Capability Mapping
 
 | Tool | Capability | Description |
@@ -347,6 +371,7 @@ graph LR
 | `GrepFiles` | `File.Read` | Regex content search across files |
 | `ViewImage` | `File.Read` | Read image files as base64 for multimodal LLM |
 | `RunCommand` | `Shell.Exec` | Execute shell commands with timeout + process tree kill |
+| `ExecuteCode` | `Code.Execute` | Execute Python scripts with rich output (images, structured data) |
 | `HttpRequest` | `Network.Http` | HTTP requests with SSRF prevention |
 | `FetchUrl` | `Network.Http` | Fetch URL and convert HTML to markdown |
 | `WebSearch` | `Search.Web` | Web search via Tavily API |
@@ -441,6 +466,7 @@ flowchart TD
 | `Shell.Exec` | **CommandMatcher** | `allowedCommands`, `blockedCommands` |
 | `Network.Http` | **DomainMatcher** | `allowedDomains`, `blockedDomains` (includes subdomains) |
 | `Search.Web` | — | No scope constraints; allowed if capability is granted |
+| `Code.Execute` | — | Language allowlist check (`allowedLanguages`); allowed if capability is granted |
 
 The `check_llm_call()` method verifies the `LLM.Call` capability is granted and the policy is not expired.
 
@@ -457,6 +483,7 @@ When a capability has `requiresApproval: true`, the `assess_risk()` function det
 | `File.Delete` | high |
 | `Shell.Exec` | medium |
 | `Network.Http` | medium |
+| `Code.Execute` | medium |
 | `Search.Web` | high (no explicit entry — falls through to Unknown) |
 | `Workspace.Upload` | low |
 | `BackendTool.Invoke` | medium |
@@ -1183,7 +1210,168 @@ If a checkpoint file is corrupt (invalid JSON, missing keys), it is **deleted** 
 
 ---
 
-## 18. Package Boundary & Dependency Rules
+## 18. Code Execution
+
+**Files:** `tool_runtime/code/executor.py`, `tool_runtime/code/preamble.py`, `tool_runtime/tools/code/execute_code.py`
+
+The code execution system enables the agent to run Python scripts as subprocesses with rich output support (images, structured data). It uses **stateless script execution** — each `ExecuteCode` call runs a complete, self-contained Python script. No state persists between calls.
+
+### Architecture
+
+```mermaid
+flowchart LR
+    subgraph agent_host
+        TE[ToolExecutor]
+    end
+
+    subgraph tool_runtime
+        TR[ToolRouter]
+        ECT[ExecuteCodeTool]
+        PE_[PythonExecutor]
+    end
+
+    subgraph Subprocess
+        Script[python3 script.py]
+        Output[Output Dir<br/>figures, data]
+    end
+
+    TE -->|ToolRequest| TR
+    TR --> ECT
+    ECT --> PE_
+    PE_ -->|spawn| Script
+    Script -->|stdout/stderr| PE_
+    Script -->|images| Output
+    PE_ -->|collect images| Output
+    PE_ -->|CodeExecutionResult| ECT
+    ECT -->|RawToolOutput| TR
+    TR -->|ToolExecutionResult| TE
+```
+
+### Execution Flow
+
+```mermaid
+sequenceDiagram
+    participant LLM as LLM
+    participant AL as Agent Loop
+    participant TE as ToolExecutor
+    participant TR as ToolRouter
+    participant ECT as ExecuteCodeTool
+    participant PE as PythonExecutor
+    participant Proc as Python Subprocess
+
+    LLM->>AL: tool_call: ExecuteCode({code, description})
+    AL->>TE: execute_tool_calls([call])
+    TE->>TE: Policy check (Code.Execute capability)
+    TE->>TE: Approval gate (if required)
+    TE->>TR: execute(ToolRequest, ExecutionContext)
+    TR->>ECT: execute(arguments, context)
+
+    ECT->>PE: execute(code, working_directory, timeout)
+    PE->>PE: Create temp dir /tmp/cowork-code-{uuid}/
+    PE->>PE: Write preamble + code → script.py
+    PE->>Proc: spawn python3 script.py<br/>env: MPLBACKEND=Agg, COWORK_OUTPUT_DIR
+    Proc->>Proc: Execute script (preamble hooks plt.show)
+
+    alt Success
+        Proc-->>PE: stdout + stderr + exit_code=0
+    else Error
+        Proc-->>PE: stderr with traceback + exit_code=1
+    else Timeout
+        PE->>Proc: SIGTERM → 5s → SIGKILL (process group)
+        PE-->>ECT: CodeExecutionResult(timed_out=True)
+    end
+
+    PE->>PE: Collect images from output dir
+    PE->>PE: Cleanup temp dir
+    PE-->>ECT: CodeExecutionResult
+
+    ECT->>ECT: Format output text
+    ECT->>ECT: Attach first image as ImageContent
+    ECT-->>TR: RawToolOutput
+    TR-->>TE: ToolExecutionResult
+    TE-->>AL: ToolCallResult (with image_url if present)
+```
+
+### PythonExecutor
+
+**File:** `tool_runtime/code/executor.py`
+
+Manages the subprocess lifecycle for each code execution:
+
+1. **Temp directory creation** — `/tmp/cowork-code-{uuid}/` for script + output files
+2. **Script assembly** — Prepend preamble (matplotlib/pandas hooks) to user code, write to `script.py`
+3. **Subprocess spawn** — `asyncio.create_subprocess_exec("python3", script_path)` with:
+   - `cwd` = workspace directory (from `ExecutionContext`)
+   - `env` = `MPLBACKEND=Agg` + `COWORK_OUTPUT_DIR={output_dir}`
+   - `preexec_fn=os.setsid` (Unix) for process group management
+   - `stdout=PIPE`, `stderr=PIPE`
+4. **Timeout enforcement** — `asyncio.wait_for()` with configurable timeout (default 120s, max 600s)
+5. **Process tree kill on timeout** — `os.killpg(pid, SIGTERM)` → wait 5s → `os.killpg(pid, SIGKILL)` (Unix); `taskkill /T /F` (Windows)
+6. **Image collection** — Scan output dir for `*.png`, `*.jpg`, `*.jpeg`, `*.svg`, read as bytes
+7. **Cleanup** — `shutil.rmtree(output_dir, ignore_errors=True)`
+
+```python
+@dataclass
+class CodeExecutionResult:
+    stdout: str
+    stderr: str
+    exit_code: int
+    images: list[bytes]      # PNG/JPG image data from output dir
+    execution_time: float    # seconds
+    timed_out: bool
+```
+
+### Preamble Injection
+
+**File:** `tool_runtime/code/preamble.py`
+
+A Python code string prepended to every script before execution:
+
+- **matplotlib hook** — Sets `matplotlib.use("Agg")` backend (non-interactive), overrides `plt.show()` to save each figure as `figure_{N}.png` in the output directory, then closes all figures
+- **pandas display** — Sets `display.max_rows=50`, `display.max_columns=20`, `display.width=120` for readable text output
+- **Namespace safety** — All preamble variables use underscore prefixes (`_plt`, `_fig_count`, `_output_dir`) to avoid polluting the user's namespace
+- **Graceful fallback** — `try/except ImportError` around matplotlib and pandas imports; preamble is a no-op if libraries aren't installed
+
+### ExecuteCodeTool
+
+**File:** `tool_runtime/tools/code/execute_code.py`
+
+| Input | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `code` | string | yes | — | Python code to execute |
+| `description` | string | yes | — | What the code does (audit trail + approval dialog) |
+| `timeout_seconds` | integer | no | 120 | Max execution time (1–600s) |
+
+**Output format** (consistent with RunCommand):
+```
+# {description}
+Exit code: {code}
+--- stdout ---
+{stdout}
+--- stderr ---
+{stderr}
+[Execution time: X.XXs]
+[TIMED OUT] (if applicable)
+```
+
+**Rich output:**
+- First image from the output directory → `ImageContent` (returned as multimodal content to the LLM)
+- Additional images → artifacts (uploaded to Workspace Service)
+- Large text output (>10KB) → artifact extraction with truncation for LLM view
+
+### Policy: `Code.Execute` Capability
+
+| Scope Field | Type | Description |
+|-------------|------|-------------|
+| `allowedLanguages` | `string[]` | Languages permitted (e.g., `["python"]`) |
+| `maxExecutionTimeSeconds` | `integer` | Max timeout per execution (1–600s) |
+| `allowCodeNetwork` | `boolean` | Whether code can access the network (default: false) |
+
+The `ExecuteCodeTool` respects the `maxExecutionTimeSeconds` from the policy bundle — if the tool's `timeout_seconds` argument exceeds the policy limit, the policy limit wins (takes the minimum).
+
+---
+
+## 19. Package Boundary & Dependency Rules
 
 ```mermaid
 graph TD
@@ -1240,3 +1428,5 @@ graph TD
 | **CheckpointManager** | `session/checkpoint_manager.py` | Crash recovery persistence |
 | **SystemPromptBuilder** | `loop/system_prompt.py` | Dynamic system prompt |
 | **FileChangeTracker** | `agent/file_change_tracker.py` | Track file mutations for diffs |
+| **PythonExecutor** | `tool_runtime/code/executor.py` | Stateless Python script execution |
+| **ExecuteCodeTool** | `tool_runtime/tools/code/execute_code.py` | Python code execution tool (Code.Execute) |
