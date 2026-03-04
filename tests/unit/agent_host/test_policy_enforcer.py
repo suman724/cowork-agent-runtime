@@ -291,6 +291,75 @@ class TestDomainEnforcement:
         )
         assert result.decision == "DENIED"
 
+    def test_blocked_domain(self) -> None:
+        bundle = make_restrictive_bundle(blocked_domains=["evil.com", "localhost"])
+        enforcer = PolicyEnforcer(bundle)
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "https://evil.com/data"},
+        )
+        assert result.decision == "DENIED"
+        assert "blocked" in result.reason.lower()
+
+    def test_blocked_subdomain(self) -> None:
+        bundle = make_restrictive_bundle(blocked_domains=["internal.corp"])
+        enforcer = PolicyEnforcer(bundle)
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "https://api.internal.corp/secret"},
+        )
+        assert result.decision == "DENIED"
+        assert "blocked" in result.reason.lower()
+
+    def test_blocked_overrides_allowed(self) -> None:
+        bundle = make_restrictive_bundle(
+            allowed_domains=["example.com"],
+            blocked_domains=["example.com"],
+        )
+        enforcer = PolicyEnforcer(bundle)
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "https://example.com/data"},
+        )
+        assert result.decision == "DENIED"
+        assert "blocked" in result.reason.lower()
+
+    def test_not_blocked_domain_allowed(self) -> None:
+        bundle = make_restrictive_bundle(blocked_domains=["localhost", "127.0.0.1"])
+        enforcer = PolicyEnforcer(bundle)
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "https://www.tradingview.com/markets/"},
+        )
+        assert result.decision == "ALLOWED"
+
+    def test_blocklist_only_ssrf_protection(self) -> None:
+        """Blocklist without allowlist: public URLs allowed, internal blocked."""
+        bundle = make_restrictive_bundle(
+            blocked_domains=["169.254.169.254", "localhost", "127.0.0.1"]
+        )
+        enforcer = PolicyEnforcer(bundle)
+
+        # Public URL should be allowed
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "https://api.github.com/repos"},
+        )
+        assert result.decision == "ALLOWED"
+
+        # SSRF target should be blocked
+        result = enforcer.check_tool_call(
+            "FetchUrl",
+            CapabilityName.NETWORK_HTTP,
+            {"url": "http://169.254.169.254/latest/meta-data/"},
+        )
+        assert result.decision == "DENIED"
+
 
 # ---- Approval required ----
 

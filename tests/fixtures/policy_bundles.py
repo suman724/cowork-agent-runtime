@@ -80,6 +80,7 @@ def make_restrictive_bundle(
     allowed_commands: list[str] | None = None,
     blocked_commands: list[str] | None = None,
     allowed_domains: list[str] | None = None,
+    blocked_domains: list[str] | None = None,
     requires_approval: bool = False,
     approval_rule_id: str = "rule-1",
 ) -> PolicyBundle:
@@ -112,6 +113,7 @@ def make_restrictive_bundle(
         {
             "name": "Network.Http",
             "allowedDomains": allowed_domains,
+            "blockedDomains": blocked_domains,
         },
         {"name": "LLM.Call"},
     ]
