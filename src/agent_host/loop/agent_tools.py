@@ -6,12 +6,20 @@ from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from agent_host.loop.sub_agent import SubAgentManager
+    from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.skills.models import SkillDefinition
     from agent_host.skills.skill_executor import SkillExecutor
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
-AGENT_TOOL_NAMES = {"TaskTracker", "CreatePlan", "SpawnAgent"}
+AGENT_TOOL_NAMES = {
+    "TaskTracker",
+    "CreatePlan",
+    "SpawnAgent",
+    "SaveMemory",
+    "RecallMemory",
+    "ListMemories",
+}
 
 
 class AgentToolHandler:
@@ -27,12 +35,14 @@ class AgentToolHandler:
         sub_agent_manager: SubAgentManager | None = None,
         skill_executor: SkillExecutor | None = None,
         skills: list[SkillDefinition] | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self._working_memory = working_memory
         self._sub_agent_manager = sub_agent_manager
         self._skill_executor = skill_executor
         self._skills = {s.name: s for s in (skills or [])}
         self._skill_tool_names = {f"Skill_{s.name}" for s in (skills or [])}
+        self._memory_manager = memory_manager
 
     def is_agent_tool(self, name: str) -> bool:
         """Check if a tool name is an agent-internal tool or a skill."""
@@ -48,6 +58,12 @@ class AgentToolHandler:
             return self._handle_create_plan(arguments)
         if tool_name == "SpawnAgent":
             return await self._handle_spawn_agent(arguments)
+        if tool_name == "SaveMemory":
+            return self._handle_save_memory(arguments)
+        if tool_name == "RecallMemory":
+            return self._handle_recall_memory(arguments)
+        if tool_name == "ListMemories":
+            return self._handle_list_memories()
         if tool_name in self._skill_tool_names:
             return await self._handle_skill(tool_name, arguments, task_id)
         return {"status": "error", "message": f"Unknown agent tool: {tool_name}"}
@@ -116,6 +132,76 @@ class AgentToolHandler:
                 },
             },
         ]
+        # Add memory tools if memory_manager is configured
+        if self._memory_manager:
+            defs.extend(
+                [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "SaveMemory",
+                            "description": (
+                                "Save information to persistent memory that"
+                                " survives across sessions. Write to"
+                                " MEMORY.md (concise index, loaded every"
+                                " session) or topic files (e.g.,"
+                                " 'debugging.md') for detailed notes."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "file": {
+                                        "type": "string",
+                                        "description": (
+                                            "Memory filename (default: MEMORY.md). "
+                                            "Must be [a-zA-Z0-9_-]+.md"
+                                        ),
+                                        "default": "MEMORY.md",
+                                    },
+                                    "content": {
+                                        "type": "string",
+                                        "description": "The full content to write to the file.",
+                                    },
+                                },
+                                "required": ["content"],
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "RecallMemory",
+                            "description": (
+                                "Read a specific memory topic file. "
+                                "Use ListMemories first to see available files."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "file": {
+                                        "type": "string",
+                                        "description": (
+                                            "The memory filename to read (e.g., 'debugging.md')."
+                                        ),
+                                    },
+                                },
+                                "required": ["file"],
+                            },
+                        },
+                    },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "ListMemories",
+                            "description": (
+                                "List all available persistent memory files with their sizes."
+                            ),
+                            "parameters": {"type": "object", "properties": {}},
+                        },
+                    },
+                ]
+            )
+
         # Add SpawnAgent if sub_agent_manager is configured
         if self._sub_agent_manager:
             defs.append(
@@ -230,6 +316,24 @@ class AgentToolHandler:
             context=context,
             parent_task_id="",  # Will be set by the caller if needed
         )
+
+    def _handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle SaveMemory tool calls."""
+        if not self._memory_manager:
+            return {"status": "error", "message": "Persistent memory is not available"}
+        return self._memory_manager.handle_save_memory(arguments)
+
+    def _handle_recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle RecallMemory tool calls."""
+        if not self._memory_manager:
+            return {"status": "error", "message": "Persistent memory is not available"}
+        return self._memory_manager.handle_recall_memory(arguments)
+
+    def _handle_list_memories(self) -> dict[str, Any]:
+        """Handle ListMemories tool calls."""
+        if not self._memory_manager:
+            return {"status": "error", "message": "Persistent memory is not available"}
+        return self._memory_manager.handle_list_memories()
 
     async def _handle_skill(
         self, tool_name: str, arguments: dict[str, Any], task_id: str

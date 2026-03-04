@@ -14,12 +14,14 @@ from agent_host.loop.models import LoopResult
 
 if TYPE_CHECKING:
     import asyncio
+    from collections.abc import Awaitable, Callable
 
     from agent_host.budget.token_budget import TokenBudget
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
     from agent_host.loop.sub_agent import SubAgentManager
     from agent_host.loop.tool_executor import ToolExecutor
+    from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.policy.policy_enforcer import PolicyEnforcer
     from agent_host.skills.models import SkillDefinition
@@ -53,6 +55,8 @@ class AgentLoop:
         sub_agent_manager: SubAgentManager | None = None,
         skill_executor: SkillExecutor | None = None,
         skills: list[SkillDefinition] | None = None,
+        on_step_complete: Callable[[str, int], Awaitable[None]] | None = None,
+        memory_manager: MemoryManager | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -65,16 +69,19 @@ class AgentLoop:
         self._max_steps = max_steps
         self._max_context_tokens = max_context_tokens
         self._working_memory = working_memory
+        self._memory_manager = memory_manager
         self._agent_tool_handler = (
             AgentToolHandler(
                 working_memory,
                 sub_agent_manager=sub_agent_manager,
                 skill_executor=skill_executor,
                 skills=skills,
+                memory_manager=memory_manager,
             )
             if working_memory
             else None
         )
+        self._on_step_complete = on_step_complete
         self._error_recovery = ErrorRecovery()
 
     async def run(self, task_id: str) -> LoopResult:
@@ -97,13 +104,22 @@ class AgentLoop:
             messages = self._thread.build_llm_payload(compaction_budget, self._compactor)
             post_count = len(messages)
 
-            # 1b. Inject working memory after system prompt (Wave 3)
+            # 1b. Inject persistent memory + working memory after system prompt.
+            # Track insertion offset so working memory goes after persistent memory.
+            inject_offset = 1  # after system prompt (messages[0])
+
+            if self._memory_manager:
+                mem_text = self._memory_manager.render_memory_context()
+                if mem_text and len(messages) > 0:
+                    messages.insert(inject_offset, {"role": "system", "content": mem_text})
+                    inject_offset += 1
+
             if self._working_memory:
                 wm_text = self._working_memory.render()
                 if wm_text and len(messages) > 0:
-                    messages.insert(1, {"role": "system", "content": wm_text})
+                    messages.insert(inject_offset, {"role": "system", "content": wm_text})
 
-            # 1c. Inject error recovery prompts if needed (Wave 5)
+            # 1d. Inject error recovery prompts if needed (Wave 5)
             if self._error_recovery.detect_loop():
                 loop_prompt = self._error_recovery.build_loop_break_prompt()
                 self._thread.add_system_injection(loop_prompt)
@@ -163,6 +179,18 @@ class AgentLoop:
             # Emit step_completed
             if self._event_emitter:
                 self._event_emitter.emit_step_completed(task_id, step)
+
+            # Per-step checkpoint callback
+            if self._on_step_complete:
+                try:
+                    await self._on_step_complete(task_id, step)
+                except Exception:
+                    logger.warning(
+                        "on_step_complete_callback_failed",
+                        task_id=task_id,
+                        step=step,
+                        exc_info=True,
+                    )
 
             # 80% warning
             warning_threshold = math.floor(self._max_steps * 0.8)

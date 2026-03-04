@@ -32,8 +32,19 @@ class SystemPromptBuilder:
         self._os_family = os_family or platform.system()
         self._workspace_context = self._detect_workspace(workspace_dir)
 
-    def build_static_prompt(self, policy_enforcer: PolicyEnforcer | None = None) -> str:
-        """Build the static system prompt (identity + guidelines + workspace context)."""
+    def build_static_prompt(
+        self,
+        policy_enforcer: PolicyEnforcer | None = None,
+        project_instructions: str = "",
+        has_persistent_memory: bool = False,
+    ) -> str:
+        """Build the static system prompt (identity + guidelines + workspace context).
+
+        Args:
+            policy_enforcer: Used for capability-dependent guidance.
+            project_instructions: Concatenated COWORK.md content (injected after workspace).
+            has_persistent_memory: Whether auto-memory is available (adds usage guidance).
+        """
         parts = [_BASE_SYSTEM_PROMPT]
 
         # Current date
@@ -51,6 +62,22 @@ class SystemPromptBuilder:
             cap_guidance = self._build_capability_guidance(policy_enforcer)
             if cap_guidance:
                 parts.append(cap_guidance)
+
+        # Project instructions (COWORK.md files)
+        if project_instructions:
+            parts.append(f"\n# Project Instructions\n\n{project_instructions}")
+
+        # Memory guidance (when auto-memory is available)
+        if has_persistent_memory:
+            parts.append(
+                "\n# Memory\n"
+                "You have persistent memory that survives across sessions.\n"
+                "Use SaveMemory to record important learnings, patterns, and preferences.\n"
+                "Use RecallMemory to read detailed topic files.\n"
+                "Use ListMemories to see what memory files exist.\n"
+                "Keep MEMORY.md concise (under 200 lines). "
+                "Move detailed notes to topic files."
+            )
 
         return "\n".join(parts)
 

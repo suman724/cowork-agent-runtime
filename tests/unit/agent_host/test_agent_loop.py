@@ -225,6 +225,77 @@ class TestAgentLoopBudget:
         assert loop._token_budget.output_tokens_used == 50
 
 
+class TestAgentLoopStepCallback:
+    async def test_on_step_complete_called_each_step(self) -> None:
+        """on_step_complete callback should be called after each step."""
+        mock = MockLLMClient()
+        mock.enqueue_tool_call("ReadFile", {"path": "/a"}, tool_call_id="tc-1")
+        mock.enqueue_tool_call("ReadFile", {"path": "/b"}, tool_call_id="tc-2")
+        mock.enqueue_text("Done!")
+
+        callback_calls: list[tuple[str, int]] = []
+
+        async def on_step(task_id: str, step: int) -> None:
+            callback_calls.append((task_id, step))
+
+        loop = _make_loop(mock)
+        loop._on_step_complete = on_step
+
+        async def mock_execute(calls, task_id):
+            return [
+                ToolCallResult(
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
+                    status="success",
+                    result_text='{"status": "success"}',
+                )
+            ]
+
+        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+        assert result.step_count == 3
+        assert callback_calls == [("task-1", 1), ("task-1", 2), ("task-1", 3)]
+
+    async def test_on_step_complete_failure_does_not_abort_loop(self) -> None:
+        """Callback failure should be logged but not abort the agent loop."""
+        mock = MockLLMClient()
+        mock.enqueue_tool_call("ReadFile", tool_call_id="tc-1")
+        mock.enqueue_text("Done!")
+
+        async def failing_callback(task_id: str, step: int) -> None:
+            raise RuntimeError("checkpoint write failed")
+
+        loop = _make_loop(mock)
+        loop._on_step_complete = failing_callback
+
+        async def mock_execute(calls, task_id):
+            return [
+                ToolCallResult(
+                    tool_call_id=calls[0].id,
+                    tool_name=calls[0].name,
+                    status="success",
+                    result_text='{"status": "success"}',
+                )
+            ]
+
+        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+        assert result.step_count == 2
+
+    async def test_on_step_complete_not_called_when_none(self) -> None:
+        """When on_step_complete is None, loop runs normally without callback."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Hello!")
+        loop = _make_loop(mock)
+        assert loop._on_step_complete is None
+        result = await loop.run("task-1")
+        assert result.reason == "completed"
+
+
 class TestAgentLoopCompaction:
     async def test_compaction_at_90_percent(self) -> None:
         """Loop should compact at 90% of max_context_tokens."""

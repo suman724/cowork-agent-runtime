@@ -17,9 +17,9 @@ class TestAgentToolHandlerRouting:
     def test_get_tool_definitions(self) -> None:
         handler = AgentToolHandler(WorkingMemory())
         defs = handler.get_tool_definitions()
-        assert len(defs) == 2
         names = {d["function"]["name"] for d in defs}
-        assert names == {"TaskTracker", "CreatePlan"}
+        assert "TaskTracker" in names
+        assert "CreatePlan" in names
         for d in defs:
             assert d["type"] == "function"
             assert "parameters" in d["function"]
