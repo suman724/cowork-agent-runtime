@@ -197,6 +197,46 @@ class TestHandleListMemories:
         assert result["files"] == []
 
 
+class TestAutoIndexIntegration:
+    @pytest.mark.asyncio
+    async def test_save_topic_file_auto_indexes(self, tmp_path: Path) -> None:
+        """Saving a topic file via MemoryManager creates MEMORY.md with index entry."""
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        mm._persistent_memory._memory_dir = mem_dir
+
+        result = await mm.handle_save_memory(
+            {"file": "patterns.md", "content": "Factory pattern notes"}
+        )
+        assert result["status"] == "success"
+
+        # MEMORY.md should exist with an index entry
+        memory_md = (mem_dir / "MEMORY.md").read_text()
+        assert "patterns.md" in memory_md
+
+        # render_memory_context should return content (not empty)
+        context = mm.render_memory_context()
+        assert "patterns.md" in context
+
+    @pytest.mark.asyncio
+    async def test_delete_topic_file_removes_index_entry(self, tmp_path: Path) -> None:
+        """Deleting a topic file via MemoryManager removes its MEMORY.md index entry."""
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        mm._persistent_memory._memory_dir = mem_dir
+
+        await mm.handle_save_memory({"file": "temp.md", "content": "temporary"})
+        assert "temp.md" in (mem_dir / "MEMORY.md").read_text()
+
+        await mm.handle_delete_memory({"file": "temp.md"})
+        # After deleting the only topic file, index entry should be gone
+        if (mem_dir / "MEMORY.md").exists():
+            content = (mem_dir / "MEMORY.md").read_text()
+            assert "temp.md" not in content
+
+
 class TestStructuredErrorHandling:
     @pytest.mark.asyncio
     async def test_no_false_positive_on_error_content(self, tmp_path: Path) -> None:
