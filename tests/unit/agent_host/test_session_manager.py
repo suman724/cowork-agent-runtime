@@ -351,6 +351,57 @@ class TestResumeIncompleteTask:
         sm._thread.add_user_message.assert_called_once()
 
 
+class TestWorkspaceDirCheckpoint:
+    @pytest.mark.asyncio
+    async def test_resume_restores_workspace_dir_from_checkpoint(self) -> None:
+        """_restore_from_checkpoint should restore workspace_dir when missing."""
+        sm = _make_session_manager()
+        sm._workspace_dir = None  # Simulate lost workspace_dir on resume
+
+        sm._checkpoint_manager.load.return_value = SessionCheckpoint(
+            session_id="sess-1",
+            workspace_id="ws-1",
+            tenant_id="t-1",
+            user_id="u-1",
+            workspace_dir="/home/user/project",
+        )
+
+        await sm._restore_from_checkpoint()
+
+        assert sm._workspace_dir == "/home/user/project"
+
+    @pytest.mark.asyncio
+    async def test_workspace_dir_not_overwritten_if_already_set(self) -> None:
+        """_restore_from_checkpoint should not overwrite existing workspace_dir."""
+        sm = _make_session_manager()
+        sm._workspace_dir = "/current/workspace"
+
+        sm._checkpoint_manager.load.return_value = SessionCheckpoint(
+            session_id="sess-1",
+            workspace_id="ws-1",
+            tenant_id="t-1",
+            user_id="u-1",
+            workspace_dir="/old/workspace",
+        )
+
+        await sm._restore_from_checkpoint()
+
+        # Should keep the current one, not overwrite with checkpoint value
+        assert sm._workspace_dir == "/current/workspace"
+
+    @pytest.mark.asyncio
+    async def test_persist_checkpoint_includes_workspace_dir(self) -> None:
+        """_persist_checkpoint should include workspace_dir in the saved checkpoint."""
+        sm = _make_session_manager()
+        sm._workspace_dir = "/home/user/project"
+
+        sm._persist_checkpoint()
+
+        sm._checkpoint_manager.save.assert_called()
+        saved_checkpoint = sm._checkpoint_manager.save.call_args[0][0]
+        assert saved_checkpoint.workspace_dir == "/home/user/project"
+
+
 class TestWorkspaceFallback:
     @pytest.mark.asyncio
     async def test_workspace_fallback_on_missing_checkpoint(self) -> None:

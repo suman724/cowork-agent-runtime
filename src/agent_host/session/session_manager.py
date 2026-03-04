@@ -344,7 +344,7 @@ class SessionManager:
 
         # Persistent memory manager (project instructions + auto-memory)
         if self._workspace_dir:
-            self._memory_manager = MemoryManager(self._workspace_dir)
+            self._memory_manager = MemoryManager(self._workspace_dir, config=self._config)
             self._memory_manager.load_all()
 
         # System prompt
@@ -611,6 +611,7 @@ class SessionManager:
             session_messages=[msg.model_dump(mode="json") for msg in self._session_messages],
             thread=self._thread.to_checkpoint() if self._thread else None,
             working_memory=(self._working_memory.to_checkpoint() if self._working_memory else None),
+            workspace_dir=self._workspace_dir,
             active_task_id=active_task_id,
             active_task_prompt=active_task_prompt,
             active_task_step=active_task_step,
@@ -703,6 +704,13 @@ class SessionManager:
             except Exception:
                 logger.warning("workspace_fallback_failed", exc_info=True)
             return
+
+        # Restore workspace_dir (critical for memory + project instructions after crash)
+        if checkpoint.workspace_dir and not self._workspace_dir:
+            self._workspace_dir = checkpoint.workspace_dir
+            logger.info(
+                "workspace_dir_restored_from_checkpoint", workspace_dir=checkpoint.workspace_dir
+            )
 
         # Restore token budget
         if self._token_budget and (checkpoint.token_input_used or checkpoint.token_output_used):

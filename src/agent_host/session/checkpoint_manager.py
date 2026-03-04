@@ -30,6 +30,9 @@ class SessionCheckpoint:
     working_memory: dict[str, Any] | None = None  # Wave 3
     checkpointed_at: str = ""
 
+    # Workspace directory path for memory restoration on crash recovery
+    workspace_dir: str | None = None
+
     # In-progress task state (all with defaults for backward compat)
     active_task_id: str | None = None  # Non-None = task in progress
     active_task_prompt: str | None = None  # The user prompt
@@ -97,6 +100,7 @@ class CheckpointManager:
                 thread=data.get("thread"),
                 working_memory=data.get("working_memory"),
                 checkpointed_at=data.get("checkpointed_at", ""),
+                workspace_dir=data.get("workspace_dir"),
                 active_task_id=data.get("active_task_id"),
                 active_task_prompt=data.get("active_task_prompt"),
                 active_task_step=data.get("active_task_step", 0),

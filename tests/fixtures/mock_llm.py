@@ -37,6 +37,13 @@ class MockLLMClient:
         """Log of all stream_chat calls (messages, tools, task_id)."""
         return list(self._call_log)
 
+    @property
+    def last_messages(self) -> list[dict[str, Any]] | None:
+        """Messages from the most recent stream_chat call."""
+        if not self._call_log:
+            return None
+        return self._call_log[-1]["messages"]
+
     def enqueue(self, response: LLMResponse | Exception) -> None:
         """Add a response (or exception) to the queue."""
         self._responses.append(response)

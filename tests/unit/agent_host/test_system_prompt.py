@@ -71,11 +71,12 @@ class TestSystemPromptBuilder:
     def test_memory_guidance_when_persistent_memory(self) -> None:
         builder = SystemPromptBuilder()
         prompt = builder.build_static_prompt(has_persistent_memory=True)
-        assert "# Memory" in prompt
+        assert "# Persistent Memory" in prompt
         assert "SaveMemory" in prompt
         assert "RecallMemory" in prompt
+        assert "DeleteMemory" in prompt
 
     def test_no_memory_guidance_without_persistent_memory(self) -> None:
         builder = SystemPromptBuilder()
         prompt = builder.build_static_prompt(has_persistent_memory=False)
-        assert "# Memory" not in prompt
+        assert "# Persistent Memory" not in prompt

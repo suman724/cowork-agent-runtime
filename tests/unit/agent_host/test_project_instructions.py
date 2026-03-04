@@ -1,4 +1,4 @@
-"""Tests for ProjectInstructionsLoader — load COWORK.md from directory tree."""
+"""Tests for ProjectInstructionsLoader — load COWORK.md from workspace directory."""
 
 from __future__ import annotations
 
@@ -34,8 +34,8 @@ class TestProjectInstructionsLoader:
         local_pos = result.index("My local notes")
         assert team_pos < local_pos
 
-    def test_walk_up_directory_tree(self, tmp_path: Path) -> None:
-        """Files in ancestor directories are collected."""
+    def test_does_not_walk_up_directory_tree(self, tmp_path: Path) -> None:
+        """Files in ancestor directories are NOT collected (no ancestor walk)."""
         parent = tmp_path / "parent"
         child = parent / "child"
         child.mkdir(parents=True)
@@ -46,32 +46,9 @@ class TestProjectInstructionsLoader:
         loader = ProjectInstructionsLoader()
         result = loader.load(str(child))
 
-        assert "Parent rules" in result
+        # Only child directory files should be loaded
         assert "Child rules" in result
-
-    def test_ancestor_first_deepest_last(self, tmp_path: Path) -> None:
-        """Ancestor instructions appear before deeper directories."""
-        parent = tmp_path / "parent"
-        child = parent / "child"
-        child.mkdir(parents=True)
-
-        (parent / "COWORK.md").write_text("Parent first")
-        (child / "COWORK.md").write_text("Child last")
-
-        loader = ProjectInstructionsLoader()
-        result = loader.load(str(child))
-
-        parent_pos = result.index("Parent first")
-        child_pos = result.index("Child last")
-        assert parent_pos < child_pos
-
-    def test_separator_format(self, tmp_path: Path) -> None:
-        """Each file section starts with a --- <path> --- separator."""
-        (tmp_path / "COWORK.md").write_text("content")
-        loader = ProjectInstructionsLoader()
-        result = loader.load(str(tmp_path))
-        assert result.startswith("--- ")
-        assert "COWORK.md ---" in result
+        assert "Parent rules" not in result
 
     def test_empty_file_skipped(self, tmp_path: Path) -> None:
         (tmp_path / "COWORK.md").write_text("")
@@ -80,7 +57,6 @@ class TestProjectInstructionsLoader:
         result = loader.load(str(tmp_path))
         # Empty COWORK.md skipped, local.md present
         assert "Local notes" in result
-        assert result.count("---") == 2  # one separator pair for local.md
 
     def test_nonexistent_dir_returns_empty(self) -> None:
         loader = ProjectInstructionsLoader()
@@ -91,3 +67,10 @@ class TestProjectInstructionsLoader:
         loader = ProjectInstructionsLoader()
         result = loader.load(str(tmp_path))
         assert "Only local" in result
+
+    def test_no_separator_in_output(self, tmp_path: Path) -> None:
+        """Output should not contain --- separators (simplified loader)."""
+        (tmp_path / "COWORK.md").write_text("content")
+        loader = ProjectInstructionsLoader()
+        result = loader.load(str(tmp_path))
+        assert "---" not in result

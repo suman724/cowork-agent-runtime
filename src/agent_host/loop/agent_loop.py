@@ -11,6 +11,7 @@ import structlog
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.error_recovery import ErrorRecovery
 from agent_host.loop.models import LoopResult
+from agent_host.thread.token_counter import estimate_message_tokens
 
 if TYPE_CHECKING:
     import asyncio
@@ -98,26 +99,40 @@ class AgentLoop:
                 logger.info("agent_loop_cancelled", task_id=task_id, step=step)
                 return LoopResult(reason="cancelled", step_count=step)
 
-            # 1. Build messages (compact at 90% of context limit to leave headroom)
-            compaction_budget = int(self._max_context_tokens * 0.9)
+            # 1. Pre-compute memory injection texts and estimate their token overhead
+            mem_text = ""
+            wm_text = ""
+            injection_overhead = 0
+
+            if self._memory_manager:
+                mem_text = self._memory_manager.render_memory_context()
+                if mem_text:
+                    injection_overhead += estimate_message_tokens(
+                        {"role": "system", "content": mem_text}
+                    )
+
+            if self._working_memory:
+                wm_text = self._working_memory.render()
+                if wm_text:
+                    injection_overhead += estimate_message_tokens(
+                        {"role": "system", "content": wm_text}
+                    )
+
+            # Build messages (compact at 90% of context limit, minus injection overhead)
+            compaction_budget = int(self._max_context_tokens * 0.9) - injection_overhead
             pre_count = self._thread.message_count + 1  # +1 for system prompt
             messages = self._thread.build_llm_payload(compaction_budget, self._compactor)
             post_count = len(messages)
 
             # 1b. Inject persistent memory + working memory after system prompt.
-            # Track insertion offset so working memory goes after persistent memory.
             inject_offset = 1  # after system prompt (messages[0])
 
-            if self._memory_manager:
-                mem_text = self._memory_manager.render_memory_context()
-                if mem_text and len(messages) > 0:
-                    messages.insert(inject_offset, {"role": "system", "content": mem_text})
-                    inject_offset += 1
+            if mem_text and len(messages) > 0:
+                messages.insert(inject_offset, {"role": "system", "content": mem_text})
+                inject_offset += 1
 
-            if self._working_memory:
-                wm_text = self._working_memory.render()
-                if wm_text and len(messages) > 0:
-                    messages.insert(inject_offset, {"role": "system", "content": wm_text})
+            if wm_text and len(messages) > 0:
+                messages.insert(inject_offset, {"role": "system", "content": wm_text})
 
             # 1d. Inject error recovery prompts if needed (Wave 5)
             if self._error_recovery.detect_loop():

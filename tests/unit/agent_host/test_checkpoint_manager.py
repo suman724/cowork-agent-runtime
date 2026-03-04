@@ -231,6 +231,36 @@ class TestCheckpointManagerActiveTask:
         assert loaded.active_task_step == 0
 
 
+class TestCheckpointManagerWorkspaceDir:
+    def test_workspace_dir_round_trip(self, manager: CheckpointManager) -> None:
+        """workspace_dir should survive checkpoint save/load."""
+        checkpoint = _make_checkpoint(workspace_dir="/home/user/project")
+        manager.save(checkpoint)
+
+        loaded = manager.load("sess-123")
+        assert loaded is not None
+        assert loaded.workspace_dir == "/home/user/project"
+
+    def test_old_checkpoint_without_workspace_dir(self, manager: CheckpointManager) -> None:
+        """Loading an old checkpoint without workspace_dir should default to None."""
+        path = manager._checkpoint_path("sess-old")
+        old_data = {
+            "session_id": "sess-old",
+            "workspace_id": "ws-1",
+            "tenant_id": "t-1",
+            "user_id": "u-1",
+            "token_input_used": 50,
+            "token_output_used": 25,
+            "session_messages": [],
+            "checkpointed_at": "2026-01-01T00:00:00+00:00",
+        }
+        path.write_text(json.dumps(old_data))
+
+        loaded = manager.load("sess-old")
+        assert loaded is not None
+        assert loaded.workspace_dir is None
+
+
 class TestCheckpointManagerAtomicWrite:
     def test_creates_dir_if_needed(self, tmp_path: Path) -> None:
         new_dir = tmp_path / "nested" / "dir"

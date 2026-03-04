@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from agent_host.memory.memory_manager import MemoryManager
 
 
@@ -67,63 +69,112 @@ class TestRenderMemoryContext:
 
 
 class TestHandleSaveMemory:
-    def test_save_memory(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_save_memory(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
         mm._persistent_memory._memory_dir = mem_dir
 
-        result = mm.handle_save_memory({"content": "# Notes\nSome content"})
+        result = await mm.handle_save_memory({"content": "# Notes\nSome content"})
         assert result["status"] == "success"
         assert "MEMORY.md" in result["message"]
 
-    def test_save_to_named_file(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_save_to_named_file(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
         mm._persistent_memory._memory_dir = mem_dir
 
-        result = mm.handle_save_memory({"file": "debugging.md", "content": "Debug notes"})
+        result = await mm.handle_save_memory({"file": "debugging.md", "content": "Debug notes"})
         assert result["status"] == "success"
         assert (mem_dir / "debugging.md").read_text() == "Debug notes"
 
-    def test_save_empty_content_rejected(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_save_empty_content_rejected(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
-        result = mm.handle_save_memory({"content": ""})
+        result = await mm.handle_save_memory({"content": ""})
         assert result["status"] == "error"
 
-    def test_save_invalid_filename(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_save_invalid_filename(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
-        result = mm.handle_save_memory({"file": "../escape.md", "content": "bad"})
+        result = await mm.handle_save_memory({"file": "../escape.md", "content": "bad"})
         assert result["status"] == "error"
 
 
 class TestHandleRecallMemory:
-    def test_recall_existing_file(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_recall_existing_file(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
         (mem_dir / "patterns.md").write_text("Use factory pattern")
         mm._persistent_memory._memory_dir = mem_dir
 
-        result = mm.handle_recall_memory({"file": "patterns.md"})
+        result = await mm.handle_recall_memory({"file": "patterns.md"})
         assert result["status"] == "success"
         assert result["content"] == "Use factory pattern"
 
-    def test_recall_missing_file(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_recall_missing_file(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mm._persistent_memory._memory_dir = tmp_path / "memory"
-        result = mm.handle_recall_memory({"file": "nonexistent.md"})
+        result = await mm.handle_recall_memory({"file": "nonexistent.md"})
         assert result["status"] == "error"
 
-    def test_recall_missing_filename(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_recall_missing_filename(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
-        result = mm.handle_recall_memory({})
+        result = await mm.handle_recall_memory({})
         assert result["status"] == "error"
+
+
+class TestHandleDeleteMemory:
+    @pytest.mark.asyncio
+    async def test_delete_success(self, tmp_path: Path) -> None:
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "old.md").write_text("obsolete")
+        mm._persistent_memory._memory_dir = mem_dir
+
+        result = await mm.handle_delete_memory({"file": "old.md"})
+        assert result["status"] == "success"
+        assert "Deleted" in result["message"]
+        assert not (mem_dir / "old.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_missing_file(self, tmp_path: Path) -> None:
+        mm = MemoryManager(str(tmp_path))
+        mm._persistent_memory._memory_dir = tmp_path / "memory"
+        result = await mm.handle_delete_memory({"file": "nonexistent.md"})
+        assert result["status"] == "error"
+
+    @pytest.mark.asyncio
+    async def test_delete_missing_filename(self, tmp_path: Path) -> None:
+        mm = MemoryManager(str(tmp_path))
+        result = await mm.handle_delete_memory({})
+        assert result["status"] == "error"
+        assert "file is required" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_delete_memory_md_rejected(self, tmp_path: Path) -> None:
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "MEMORY.md").write_text("index")
+        mm._persistent_memory._memory_dir = mem_dir
+
+        result = await mm.handle_delete_memory({"file": "MEMORY.md"})
+        assert result["status"] == "error"
+        assert "Cannot delete" in result["message"]
 
 
 class TestHandleListMemories:
-    def test_list_memories(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_list_memories(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mem_dir = tmp_path / "memory"
         mem_dir.mkdir()
@@ -131,15 +182,34 @@ class TestHandleListMemories:
         (mem_dir / "api.md").write_text("api notes")
         mm._persistent_memory._memory_dir = mem_dir
 
-        result = mm.handle_list_memories()
+        result = await mm.handle_list_memories()
         assert result["status"] == "success"
         names = [f["name"] for f in result["files"]]
         assert "MEMORY.md" in names
         assert "api.md" in names
 
-    def test_list_empty_directory(self, tmp_path: Path) -> None:
+    @pytest.mark.asyncio
+    async def test_list_empty_directory(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
         mm._persistent_memory._memory_dir = tmp_path / "memory"
-        result = mm.handle_list_memories()
+        result = await mm.handle_list_memories()
         assert result["status"] == "success"
         assert result["files"] == []
+
+
+class TestStructuredErrorHandling:
+    @pytest.mark.asyncio
+    async def test_no_false_positive_on_error_content(self, tmp_path: Path) -> None:
+        """File content starting with 'Error' should not be treated as an error."""
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        mm._persistent_memory._memory_dir = mem_dir
+
+        # Save a file whose content starts with "Error"
+        await mm.handle_save_memory({"file": "errors.md", "content": "Error handling notes"})
+
+        # Read it back — should succeed, not be treated as error
+        result = await mm.handle_recall_memory({"file": "errors.md"})
+        assert result["status"] == "success"
+        assert result["content"] == "Error handling notes"

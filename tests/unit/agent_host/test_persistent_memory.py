@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from agent_host.memory.persistent_memory import PersistentMemory
+from agent_host.memory.persistent_memory import MAX_FILENAME_LENGTH, MemoryResult, PersistentMemory
 
 
 class TestResolveMemoryDir:
@@ -60,59 +60,145 @@ class TestSaveAndReadFile:
         pm = PersistentMemory(str(tmp_path))
         pm.ensure_dir()
         result = pm.save_file("notes.md", "Hello world")
-        assert "Saved" in result
-        assert "notes.md" in result
+        assert result.success
+        assert "Saved" in result.content
+        assert "notes.md" in result.content
 
-        content = pm.read_file("notes.md")
-        assert content == "Hello world"
+        read_result = pm.read_file("notes.md")
+        assert read_result.success
+        assert read_result.content == "Hello world"
 
     def test_overwrite_existing(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
         pm.ensure_dir()
         pm.save_file("notes.md", "Version 1")
         pm.save_file("notes.md", "Version 2")
-        assert pm.read_file("notes.md") == "Version 2"
+        result = pm.read_file("notes.md")
+        assert result.success
+        assert result.content == "Version 2"
 
     def test_read_missing_file(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
         result = pm.read_file("nonexistent.md")
-        assert result.startswith("Error")
+        assert not result.success
+        assert "not found" in result.content
 
     def test_save_creates_directory(self, tmp_path: Path) -> None:
         nested = tmp_path / "deep" / "memory"
         pm = PersistentMemory(str(nested))
         result = pm.save_file("test.md", "content")
-        assert "Saved" in result
+        assert result.success
+        assert "Saved" in result.content
         assert nested.is_dir()
+
+    def test_returns_memory_result(self, tmp_path: Path) -> None:
+        """All methods return MemoryResult (structured, not string prefix)."""
+        pm = PersistentMemory(str(tmp_path))
+        pm.ensure_dir()
+        save_result = pm.save_file("test.md", "content")
+        assert isinstance(save_result, MemoryResult)
+
+        read_result = pm.read_file("test.md")
+        assert isinstance(read_result, MemoryResult)
 
 
 class TestFilenameValidation:
     def test_rejects_path_traversal(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
-        assert pm.save_file("../escape.md", "bad").startswith("Error")
-        assert pm.read_file("../escape.md").startswith("Error")
+        assert not pm.save_file("../escape.md", "bad").success
+        assert not pm.read_file("../escape.md").success
 
     def test_rejects_slashes(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
-        assert pm.save_file("sub/file.md", "bad").startswith("Error")
-        assert pm.save_file("sub\\file.md", "bad").startswith("Error")
+        assert not pm.save_file("sub/file.md", "bad").success
+        assert not pm.save_file("sub\\file.md", "bad").success
 
     def test_rejects_non_md(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
-        assert pm.save_file("notes.txt", "bad").startswith("Error")
-        assert pm.save_file("script.py", "bad").startswith("Error")
+        assert not pm.save_file("notes.txt", "bad").success
+        assert not pm.save_file("script.py", "bad").success
 
     def test_rejects_empty_filename(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
-        assert pm.save_file("", "content").startswith("Error")
+        assert not pm.save_file("", "content").success
 
     def test_allows_valid_names(self, tmp_path: Path) -> None:
         pm = PersistentMemory(str(tmp_path))
         pm.ensure_dir()
-        assert "Saved" in pm.save_file("MEMORY.md", "ok")
-        assert "Saved" in pm.save_file("debugging.md", "ok")
-        assert "Saved" in pm.save_file("api-patterns.md", "ok")
-        assert "Saved" in pm.save_file("notes_v2.md", "ok")
+        assert pm.save_file("MEMORY.md", "ok").success
+        assert pm.save_file("debugging.md", "ok").success
+        assert pm.save_file("api-patterns.md", "ok").success
+        assert pm.save_file("notes_v2.md", "ok").success
+
+    def test_rejects_filename_exceeding_max_length(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        long_name = "a" * (MAX_FILENAME_LENGTH + 1) + ".md"
+        result = pm.save_file(long_name, "content")
+        assert not result.success
+        assert "too long" in result.content
+
+
+class TestResourceLimits:
+    def test_rejects_content_exceeding_max_file_size(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path), max_file_size=100)
+        pm.ensure_dir()
+        result = pm.save_file("big.md", "x" * 200)
+        assert not result.success
+        assert "max file size" in result.content
+
+    def test_rejects_when_max_file_count_reached(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path), max_file_count=2)
+        pm.ensure_dir()
+        pm.save_file("a.md", "content")
+        pm.save_file("b.md", "content")
+        result = pm.save_file("c.md", "content")
+        assert not result.success
+        assert "Max file count" in result.content
+
+    def test_allows_overwrite_at_max_count(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path), max_file_count=2)
+        pm.ensure_dir()
+        pm.save_file("a.md", "v1")
+        pm.save_file("b.md", "v1")
+        # Overwriting existing file should succeed even at limit
+        result = pm.save_file("a.md", "v2")
+        assert result.success
+
+
+class TestDeleteFile:
+    def test_delete_topic_file(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        pm.ensure_dir()
+        pm.save_file("old-notes.md", "content")
+        result = pm.delete_file("old-notes.md")
+        assert result.success
+        assert "Deleted" in result.content
+        assert not (tmp_path / "old-notes.md").exists()
+
+    def test_rejects_memory_md_deletion(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        pm.ensure_dir()
+        pm.save_file("MEMORY.md", "index")
+        result = pm.delete_file("MEMORY.md")
+        assert not result.success
+        assert "Cannot delete MEMORY.md" in result.content
+        assert (tmp_path / "MEMORY.md").exists()
+
+    def test_error_for_nonexistent_file(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        result = pm.delete_file("nonexistent.md")
+        assert not result.success
+        assert "not found" in result.content
+
+    def test_returns_memory_result(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        result = pm.delete_file("nonexistent.md")
+        assert isinstance(result, MemoryResult)
+
+    def test_rejects_invalid_filename(self, tmp_path: Path) -> None:
+        pm = PersistentMemory(str(tmp_path))
+        result = pm.delete_file("../escape.md")
+        assert not result.success
 
 
 class TestListFiles:

@@ -15,6 +15,7 @@ class TestMemoryToolsRouting:
         assert handler.is_agent_tool("SaveMemory")
         assert handler.is_agent_tool("RecallMemory")
         assert handler.is_agent_tool("ListMemories")
+        assert handler.is_agent_tool("DeleteMemory")
 
     def test_memory_tools_in_definitions_when_manager_present(self, tmp_path: Path) -> None:
         mm = MemoryManager(str(tmp_path))
@@ -25,6 +26,7 @@ class TestMemoryToolsRouting:
         assert "SaveMemory" in names
         assert "RecallMemory" in names
         assert "ListMemories" in names
+        assert "DeleteMemory" in names
 
     def test_memory_tools_absent_without_manager(self) -> None:
         handler = AgentToolHandler(WorkingMemory())
@@ -33,6 +35,7 @@ class TestMemoryToolsRouting:
         assert "SaveMemory" not in names
         assert "RecallMemory" not in names
         assert "ListMemories" not in names
+        assert "DeleteMemory" not in names
 
 
 class TestMemoryToolExecution:
@@ -87,8 +90,20 @@ class TestMemoryToolExecution:
         assert "MEMORY.md" in names
         assert "api.md" in names
 
+    async def test_delete_memory(self, tmp_path: Path) -> None:
+        mm = MemoryManager(str(tmp_path))
+        mem_dir = tmp_path / "memory"
+        mem_dir.mkdir()
+        (mem_dir / "old.md").write_text("obsolete")
+        mm._persistent_memory._memory_dir = mem_dir
+        handler = AgentToolHandler(WorkingMemory(), memory_manager=mm)
+
+        result = await handler.execute("DeleteMemory", {"file": "old.md"})
+        assert result["status"] == "success"
+        assert not (mem_dir / "old.md").exists()
+
     async def test_memory_tools_fail_gracefully_without_manager(self) -> None:
         handler = AgentToolHandler(WorkingMemory())
-        for tool in ("SaveMemory", "RecallMemory", "ListMemories"):
+        for tool in ("SaveMemory", "RecallMemory", "ListMemories", "DeleteMemory"):
             result = await handler.execute(tool, {"content": "test", "file": "test.md"})
             assert result["status"] == "error"

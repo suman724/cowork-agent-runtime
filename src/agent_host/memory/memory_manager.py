@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
 from agent_host.memory.persistent_memory import PersistentMemory
 from agent_host.memory.project_instructions import ProjectInstructionsLoader
+
+if TYPE_CHECKING:
+    from agent_host.config import AgentHostConfig
 
 logger = structlog.get_logger()
 
@@ -19,14 +23,22 @@ class MemoryManager:
     Provides:
       - Project instructions for system prompt injection
       - Auto-memory index for per-turn context injection
-      - Tool handlers for SaveMemory / RecallMemory / ListMemories
+      - Tool handlers for SaveMemory / RecallMemory / ListMemories / DeleteMemory
     """
 
-    def __init__(self, workspace_dir: str) -> None:
+    def __init__(self, workspace_dir: str, *, config: AgentHostConfig | None = None) -> None:
         self._workspace_dir = workspace_dir
         self._instructions_loader = ProjectInstructionsLoader()
         memory_dir = PersistentMemory.resolve_memory_dir(workspace_dir)
-        self._persistent_memory = PersistentMemory(memory_dir)
+
+        max_file_size = config.memory_max_file_size if config else 102_400
+        max_file_count = config.memory_max_file_count if config else 50
+
+        self._persistent_memory = PersistentMemory(
+            memory_dir,
+            max_file_size=max_file_size,
+            max_file_count=max_file_count,
+        )
         self._project_instructions: str = ""
         self._memory_index: str = ""
 
@@ -68,7 +80,7 @@ class MemoryManager:
     # Tool handlers (called by AgentToolHandler)
     # ------------------------------------------------------------------
 
-    def handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle SaveMemory tool call."""
         filename = arguments.get("file", "MEMORY.md")
         content = arguments.get("content", "")
@@ -76,23 +88,34 @@ class MemoryManager:
         if not content:
             return {"status": "error", "message": "content is required"}
 
-        result = self._persistent_memory.save_file(filename, content)
-        if result.startswith("Error"):
-            return {"status": "error", "message": result}
-        return {"status": "success", "message": result}
+        result = await asyncio.to_thread(self._persistent_memory.save_file, filename, content)
+        if not result.success:
+            return {"status": "error", "message": result.content}
+        return {"status": "success", "message": result.content}
 
-    def handle_recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def handle_recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle RecallMemory tool call."""
         filename = arguments.get("file", "")
         if not filename:
             return {"status": "error", "message": "file is required"}
 
-        result = self._persistent_memory.read_file(filename)
-        if result.startswith("Error"):
-            return {"status": "error", "message": result}
-        return {"status": "success", "content": result}
+        result = await asyncio.to_thread(self._persistent_memory.read_file, filename)
+        if not result.success:
+            return {"status": "error", "message": result.content}
+        return {"status": "success", "content": result.content}
 
-    def handle_list_memories(self) -> dict[str, Any]:
+    async def handle_delete_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle DeleteMemory tool call."""
+        filename = arguments.get("file", "")
+        if not filename:
+            return {"status": "error", "message": "file is required"}
+
+        result = await asyncio.to_thread(self._persistent_memory.delete_file, filename)
+        if not result.success:
+            return {"status": "error", "message": result.content}
+        return {"status": "success", "message": result.content}
+
+    async def handle_list_memories(self) -> dict[str, Any]:
         """Handle ListMemories tool call."""
-        files = self._persistent_memory.list_files()
+        files = await asyncio.to_thread(self._persistent_memory.list_files)
         return {"status": "success", "files": files}

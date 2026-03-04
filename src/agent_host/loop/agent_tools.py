@@ -19,6 +19,7 @@ AGENT_TOOL_NAMES = {
     "SaveMemory",
     "RecallMemory",
     "ListMemories",
+    "DeleteMemory",
 }
 
 
@@ -59,11 +60,13 @@ class AgentToolHandler:
         if tool_name == "SpawnAgent":
             return await self._handle_spawn_agent(arguments)
         if tool_name == "SaveMemory":
-            return self._handle_save_memory(arguments)
+            return await self._handle_save_memory(arguments)
         if tool_name == "RecallMemory":
-            return self._handle_recall_memory(arguments)
+            return await self._handle_recall_memory(arguments)
         if tool_name == "ListMemories":
-            return self._handle_list_memories()
+            return await self._handle_list_memories()
+        if tool_name == "DeleteMemory":
+            return await self._handle_delete_memory(arguments)
         if tool_name in self._skill_tool_names:
             return await self._handle_skill(tool_name, arguments, task_id)
         return {"status": "error", "message": f"Unknown agent tool: {tool_name}"}
@@ -199,6 +202,27 @@ class AgentToolHandler:
                             "parameters": {"type": "object", "properties": {}},
                         },
                     },
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "DeleteMemory",
+                            "description": (
+                                "Delete a persistent memory topic file. Cannot delete MEMORY.md."
+                            ),
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "file": {
+                                        "type": "string",
+                                        "description": (
+                                            "The memory filename to delete (e.g., 'old-notes.md')."
+                                        ),
+                                    },
+                                },
+                                "required": ["file"],
+                            },
+                        },
+                    },
                 ]
             )
 
@@ -317,23 +341,29 @@ class AgentToolHandler:
             parent_task_id="",  # Will be set by the caller if needed
         )
 
-    def _handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle SaveMemory tool calls."""
         if not self._memory_manager:
             return {"status": "error", "message": "Persistent memory is not available"}
-        return self._memory_manager.handle_save_memory(arguments)
+        return await self._memory_manager.handle_save_memory(arguments)
 
-    def _handle_recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_recall_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle RecallMemory tool calls."""
         if not self._memory_manager:
             return {"status": "error", "message": "Persistent memory is not available"}
-        return self._memory_manager.handle_recall_memory(arguments)
+        return await self._memory_manager.handle_recall_memory(arguments)
 
-    def _handle_list_memories(self) -> dict[str, Any]:
+    async def _handle_list_memories(self) -> dict[str, Any]:
         """Handle ListMemories tool calls."""
         if not self._memory_manager:
             return {"status": "error", "message": "Persistent memory is not available"}
-        return self._memory_manager.handle_list_memories()
+        return await self._memory_manager.handle_list_memories()
+
+    async def _handle_delete_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle DeleteMemory tool calls."""
+        if not self._memory_manager:
+            return {"status": "error", "message": "Persistent memory is not available"}
+        return await self._memory_manager.handle_delete_memory(arguments)
 
     async def _handle_skill(
         self, tool_name: str, arguments: dict[str, Any], task_id: str
