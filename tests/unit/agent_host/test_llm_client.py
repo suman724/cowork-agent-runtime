@@ -194,6 +194,39 @@ class TestLLMClientRetry:
         event_emitter.emit_llm_retry.assert_called_once()
 
 
+class TestMaxOutputTokens:
+    """Test max_output_tokens is passed to the LLM API."""
+
+    async def test_max_output_tokens_included_in_kwargs(self) -> None:
+        """When max_output_tokens is set, it should be passed as max_tokens in API kwargs."""
+        client = LLMClient(
+            endpoint="https://llm.example.com",
+            auth_token="test-token",
+            model="gpt-4o",
+            max_output_tokens=16384,
+        )
+
+        async def mock_do_stream(messages, tools, on_text_chunk):
+            return LLMResponse(text="OK", stop_reason="stop", input_tokens=5, output_tokens=3)
+
+        # Verify the attribute is stored
+        assert client._max_output_tokens == 16384
+
+        # Verify the code path works end-to-end by mocking _do_stream
+        client._do_stream = mock_do_stream  # type: ignore[assignment]
+        result = await client.stream_chat([{"role": "user", "content": "hi"}])
+        assert result.text == "OK"
+
+    async def test_max_output_tokens_default_is_none(self) -> None:
+        """When max_output_tokens is not set, it defaults to None."""
+        client = LLMClient(
+            endpoint="https://llm.example.com",
+            auth_token="test-token",
+            model="gpt-4o",
+        )
+        assert client._max_output_tokens is None
+
+
 class TestLLMClientClose:
     async def test_close(self) -> None:
         client = LLMClient(

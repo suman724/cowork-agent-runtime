@@ -39,6 +39,7 @@ class LLMClient:
         auth_token: str,
         model: str,
         *,
+        max_output_tokens: int | None = None,
         max_retries: int = 3,
         retry_base_delay: float = 1.0,
         retry_max_delay: float = 30.0,
@@ -53,6 +54,7 @@ class LLMClient:
         )
         # Strip LiteLLM-style provider prefix (e.g. "openai/gpt-4o" → "gpt-4o")
         self._model = model.split("/", 1)[-1] if "/" in model else model
+        self._max_output_tokens = max_output_tokens
         self._max_retries = max_retries
         self._retry_base_delay = retry_base_delay
         self._retry_max_delay = retry_max_delay
@@ -164,6 +166,8 @@ class LLMClient:
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self._max_output_tokens is not None:
+            kwargs["max_tokens"] = self._max_output_tokens
         if tools:
             kwargs["tools"] = tools
 
