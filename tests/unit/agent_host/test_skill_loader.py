@@ -8,6 +8,8 @@ from typing import Any
 from agent_host.skills.models import SkillDefinition
 from agent_host.skills.skill_loader import (
     SkillLoader,
+    _collect_scripts,
+    _resolve_script_dirs,
     _split_frontmatter,
 )
 
@@ -440,6 +442,305 @@ class TestSupportingFiles:
         assert "## Empty" not in loaded.prompt_content
         assert "## Whitespace" not in loaded.prompt_content
         assert "---\n\n" not in loaded.prompt_content  # no separator if no supporting content
+
+
+class TestScriptPathInjection:
+    """Tests for script path injection in load_skill_content().
+
+    Scripts are discovered via:
+    1. Explicit ``scripts_dir`` frontmatter key (string or list)
+    2. Default fallback to ``scripts/`` directory if no frontmatter key
+    """
+
+    # -- Default fallback (no frontmatter key) --
+
+    def test_default_fallback_scripts_dir(self, tmp_path: Path) -> None:
+        """Without scripts_dir in frontmatter, auto-detect scripts/ directory."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "pdf"
+        (skill_dir / "scripts").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: pdf\ndescription: PDF tools.\n---\n\nUse the scripts below."
+        )
+        (skill_dir / "scripts" / "check_fields.py").write_text("print('check')")
+        (skill_dir / "scripts" / "convert.sh").write_text("echo convert")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["pdf"])
+
+        assert "## Available Scripts" in loaded.prompt_content
+        assert f"`{skill_dir / 'scripts' / 'check_fields.py'}`" in loaded.prompt_content
+        assert f"`{skill_dir / 'scripts' / 'convert.sh'}`" in loaded.prompt_content
+        assert "Run scripts using their full absolute paths" in loaded.prompt_content
+
+    def test_no_scripts_directory(self, tmp_path: Path) -> None:
+        """Skill without scripts/ dir and no frontmatter key — no section."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "plain"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: plain\ndescription: Plain skill.\n---\n\nJust text."
+        )
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["plain"])
+
+        assert "Available Scripts" not in loaded.prompt_content
+
+    # -- Explicit frontmatter scripts_dir --
+
+    def test_frontmatter_scripts_dir_string(self, tmp_path: Path) -> None:
+        """Frontmatter scripts_dir as a single string."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "custom"
+        (skill_dir / "helpers").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: custom\ndescription: Custom.\nscripts_dir: helpers\n---\n\nBody."
+        )
+        (skill_dir / "helpers" / "run.py").write_text("print('run')")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["custom"])
+
+        assert "## Available Scripts" in loaded.prompt_content
+        assert "helpers/run.py" in loaded.prompt_content
+        assert f"`{skill_dir / 'helpers' / 'run.py'}`" in loaded.prompt_content
+        assert "Run scripts using their full absolute paths" in loaded.prompt_content
+
+    def test_frontmatter_scripts_dir_list(self, tmp_path: Path) -> None:
+        """Frontmatter scripts_dir as a list of directories."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "multi"
+        (skill_dir / "bin").mkdir(parents=True)
+        (skill_dir / "utils").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: multi\ndescription: Multi dirs.\n"
+            "scripts_dir:\n  - bin\n  - utils\n---\n\nBody."
+        )
+        (skill_dir / "bin" / "start.sh").write_text("#!/bin/bash")
+        (skill_dir / "utils" / "helper.py").write_text("print('help')")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["multi"])
+
+        assert "bin/start.sh" in loaded.prompt_content
+        assert "utils/helper.py" in loaded.prompt_content
+
+    def test_only_declared_dir_scanned(self, tmp_path: Path) -> None:
+        """Only the declared scripts_dir is scanned, not other directories."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "selective"
+        (skill_dir / "scripts").mkdir(parents=True)
+        (skill_dir / "tools").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: selective\ndescription: Selective.\nscripts_dir: tools\n---\n\nBody."
+        )
+        (skill_dir / "scripts" / "ignored.py").write_text("should not appear")
+        (skill_dir / "tools" / "used.py").write_text("should appear")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["selective"])
+
+        assert "tools/used.py" in loaded.prompt_content
+        assert "ignored.py" not in loaded.prompt_content
+
+    # -- Nested directories and hidden files --
+
+    def test_nested_dirs_require_explicit_declaration(self, tmp_path: Path) -> None:
+        """Nested subdirectories are not scanned unless declared in scripts_dir."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "docx"
+        (skill_dir / "scripts" / "office").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: docx\ndescription: Docx tools.\n---\n\nBody."
+        )
+        (skill_dir / "scripts" / "accept_changes.py").write_text("print('accept')")
+        (skill_dir / "scripts" / "office" / "soffice.py").write_text("print('office')")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["docx"])
+
+        # Top-level script listed, nested one not (subdirs are skipped)
+        assert "accept_changes.py" in loaded.prompt_content
+        assert "soffice.py" not in loaded.prompt_content
+
+    def test_nested_dirs_listed_when_declared(self, tmp_path: Path) -> None:
+        """Nested subdirectories are listed when explicitly declared in scripts_dir."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "docx"
+        (skill_dir / "scripts" / "office").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: docx\ndescription: Docx tools.\n"
+            "scripts_dir:\n  - scripts\n  - scripts/office\n---\n\nBody."
+        )
+        (skill_dir / "scripts" / "accept_changes.py").write_text("print('accept')")
+        (skill_dir / "scripts" / "office" / "soffice.py").write_text("print('office')")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["docx"])
+
+        assert "accept_changes.py" in loaded.prompt_content
+        assert "soffice.py" in loaded.prompt_content
+
+    def test_hidden_files_excluded(self, tmp_path: Path) -> None:
+        """Hidden files should not be listed."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "hidden"
+        (skill_dir / "scripts").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: hidden\ndescription: Hidden test.\n---\n\nBody."
+        )
+        (skill_dir / "scripts" / "visible.py").write_text("print('hi')")
+        (skill_dir / "scripts" / ".hidden").write_text("secret")
+        (skill_dir / "scripts" / ".DS_Store").write_text("")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["hidden"])
+
+        assert "visible.py" in loaded.prompt_content
+        assert ".hidden" not in loaded.prompt_content
+        assert ".DS_Store" not in loaded.prompt_content
+
+    def test_subdirectories_not_listed_as_scripts(self, tmp_path: Path) -> None:
+        """Subdirectories inside scripts/ should not appear as script entries."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "xlsx"
+        (skill_dir / "scripts" / "office" / "schemas").mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: xlsx\ndescription: Xlsx tools.\n---\n\nBody."
+        )
+        (skill_dir / "scripts" / "recalc.py").write_text("print('recalc')")
+        (skill_dir / "scripts" / "office" / "soffice.py").write_text("print('office')")
+        (skill_dir / "scripts" / "office" / "schemas" / "schema.xsd").write_text("<xsd/>")
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["xlsx"])
+
+        # Only top-level file listed, nested dirs and their contents excluded
+        assert "recalc.py" in loaded.prompt_content
+        assert "soffice.py" not in loaded.prompt_content
+        assert "schema.xsd" not in loaded.prompt_content
+
+    # -- Security: path traversal --
+
+    def test_path_traversal_rejected(self, tmp_path: Path) -> None:
+        """scripts_dir with .. traversal should be rejected."""
+        skills_dir = tmp_path / "skills"
+        skill_dir = skills_dir / "evil"
+        skill_dir.mkdir(parents=True)
+
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: evil\ndescription: Evil.\nscripts_dir: ../../../etc\n---\n\nBody."
+        )
+
+        loader = SkillLoader(user_skills_dir=str(skills_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        loaded = SkillLoader.load_skill_content(skills["evil"])
+
+        assert "Available Scripts" not in loaded.prompt_content
+
+
+class TestResolveScriptDirs:
+    """Unit tests for the _resolve_script_dirs helper."""
+
+    def test_no_metadata_with_scripts_dir(self, tmp_path: Path) -> None:
+        """None metadata with existing scripts/ falls back to default."""
+        (tmp_path / "scripts").mkdir()
+        result = _resolve_script_dirs(tmp_path, None)
+        assert len(result) == 1
+        assert result[0] == tmp_path / "scripts"
+
+    def test_no_metadata_no_scripts_dir(self, tmp_path: Path) -> None:
+        """None metadata without scripts/ returns empty."""
+        result = _resolve_script_dirs(tmp_path, None)
+        assert result == []
+
+    def test_metadata_without_key(self, tmp_path: Path) -> None:
+        """Metadata without scripts_dir key falls back to default."""
+        (tmp_path / "scripts").mkdir()
+        result = _resolve_script_dirs(tmp_path, {"name": "test"})
+        assert len(result) == 1
+
+    def test_metadata_string(self, tmp_path: Path) -> None:
+        """scripts_dir as string resolves to that directory."""
+        (tmp_path / "helpers").mkdir()
+        result = _resolve_script_dirs(tmp_path, {"scripts_dir": "helpers"})
+        assert len(result) == 1
+        assert result[0].name == "helpers"
+
+    def test_metadata_list(self, tmp_path: Path) -> None:
+        """scripts_dir as list resolves each directory."""
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        result = _resolve_script_dirs(tmp_path, {"scripts_dir": ["a", "b"]})
+        assert len(result) == 2
+
+    def test_nonexistent_dir_skipped(self, tmp_path: Path) -> None:
+        """Non-existent directory in scripts_dir is skipped."""
+        result = _resolve_script_dirs(tmp_path, {"scripts_dir": "nonexistent"})
+        assert result == []
+
+    def test_invalid_type_returns_empty(self, tmp_path: Path) -> None:
+        """Non-string, non-list scripts_dir returns empty."""
+        result = _resolve_script_dirs(tmp_path, {"scripts_dir": 42})
+        assert result == []
+
+
+class TestCollectScripts:
+    """Unit tests for the _collect_scripts helper."""
+
+    def test_deduplication_across_dirs(self, tmp_path: Path) -> None:
+        """Same file referenced via overlapping dir declarations is listed once."""
+        dir_a = tmp_path / "a"
+        dir_b = tmp_path / "b"
+        dir_a.mkdir()
+        dir_b.mkdir()
+        (dir_a / "shared.py").write_text("shared")
+        (dir_b / "unique.py").write_text("unique")
+
+        result = _collect_scripts([dir_a, dir_b])
+        names = [f.name for f in result]
+        assert "shared.py" in names
+        assert "unique.py" in names
+
+    def test_only_files_not_subdirs(self, tmp_path: Path) -> None:
+        """Subdirectories should not be included in the result."""
+        scripts = tmp_path / "scripts"
+        (scripts / "nested").mkdir(parents=True)
+        (scripts / "run.py").write_text("run")
+        (scripts / "nested" / "deep.py").write_text("deep")
+
+        result = _collect_scripts([scripts])
+        names = [f.name for f in result]
+        assert names == ["run.py"]
 
 
 class TestPolicySkills:
