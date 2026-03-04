@@ -23,6 +23,10 @@ MAX_FILENAME_LENGTH = 64
 # Only .md files are allowed in the memory directory
 _VALID_FILENAME_RE = re.compile(r"^[a-zA-Z0-9_\-]+\.md$")
 
+# Sentinel markers for the auto-maintained topic file index in MEMORY.md
+_AUTO_INDEX_START = "<!-- AUTO-INDEX:START -->"
+_AUTO_INDEX_END = "<!-- AUTO-INDEX:END -->"
+
 
 @dataclass(frozen=True)
 class MemoryResult:
@@ -133,6 +137,11 @@ class PersistentMemory:
             return MemoryResult(success=False, content=f"Failed to write {filename}")
 
         logger.info("memory_saved", filename=filename, size=len(content))
+
+        # Auto-index topic files (not MEMORY.md itself)
+        if filename != "MEMORY.md":
+            self._update_auto_index(filename, action="add")
+
         return MemoryResult(success=True, content=f"Saved {filename} ({len(content)} characters)")
 
     def read_file(self, filename: str) -> MemoryResult:
@@ -168,10 +177,12 @@ class PersistentMemory:
         try:
             filepath.unlink()
             logger.info("memory_deleted", filename=filename)
-            return MemoryResult(success=True, content=f"Deleted {filename}")
         except OSError:
             logger.warning("memory_delete_failed", filename=filename, exc_info=True)
             return MemoryResult(success=False, content=f"Failed to delete {filename}")
+
+        self._update_auto_index(filename, action="remove")
+        return MemoryResult(success=True, content=f"Deleted {filename}")
 
     def list_files(self) -> list[dict[str, str | int]]:
         """List all ``.md`` files in the memory directory with sizes."""
@@ -183,6 +194,98 @@ class PersistentMemory:
             if entry.is_file() and entry.suffix == ".md":
                 result.append({"name": entry.name, "size": entry.stat().st_size})
         return result
+
+    def _update_auto_index(self, filename: str, action: str = "add") -> None:
+        """Best-effort wrapper: update MEMORY.md auto-index, log warning on failure."""
+        try:
+            self._do_update_auto_index(filename, action)
+        except Exception:
+            logger.warning(
+                "auto_index_update_failed",
+                filename=filename,
+                action=action,
+                exc_info=True,
+            )
+
+    def _do_update_auto_index(self, filename: str, action: str) -> None:
+        """Read MEMORY.md, update the auto-index section, atomic-write back."""
+        index_path = self._memory_dir / "MEMORY.md"
+
+        content = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
+
+        manual, entries = _parse_auto_index(content)
+
+        if action == "add":
+            topic_path = self._memory_dir / filename
+            if topic_path.is_file():
+                entries[filename] = topic_path.stat().st_size
+        elif action == "remove":
+            entries.pop(filename, None)
+
+        new_content = _build_memory_md(manual, entries)
+
+        if not new_content and not index_path.is_file():
+            # No manual content, no entries, and no existing file — nothing to do
+            return
+
+        # Atomic write (clears auto-index section when entries are empty)
+        fd, tmp_path = tempfile.mkstemp(dir=str(self._memory_dir), suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            Path(tmp_path).replace(index_path)
+        except BaseException:
+            tmp = Path(tmp_path)
+            if tmp.exists():
+                tmp.unlink()
+            raise
+
+
+def _parse_auto_index(content: str) -> tuple[str, dict[str, int]]:
+    """Split MEMORY.md content into manual content and auto-index entries.
+
+    Returns (manual_content, entries_dict) where entries_dict maps filename → size.
+    """
+    start_idx = content.find(_AUTO_INDEX_START)
+    if start_idx == -1:
+        return (content, {})
+
+    end_idx = content.find(_AUTO_INDEX_END, start_idx)
+    if end_idx == -1:
+        # Malformed: start marker without end marker — treat everything after start as index
+        manual = content[:start_idx].rstrip("\n")
+        block = content[start_idx + len(_AUTO_INDEX_START) :]
+    else:
+        manual = content[:start_idx].rstrip("\n")
+        block = content[start_idx + len(_AUTO_INDEX_START) : end_idx]
+
+    entries: dict[str, int] = {}
+    for line in block.splitlines():
+        line = line.strip()
+        # Format: - [filename.md](filename.md) - 1,234 bytes
+        m = re.match(r"^- \[(.+?)\]\(.+?\) - ([\d,]+) bytes$", line)
+        if m:
+            name = m.group(1)
+            size = int(m.group(2).replace(",", ""))
+            entries[name] = size
+    return (manual, entries)
+
+
+def _build_memory_md(manual_content: str, entries: dict[str, int]) -> str:
+    """Rebuild full MEMORY.md content from manual content and auto-index entries."""
+    parts: list[str] = []
+    if manual_content:
+        parts.append(manual_content)
+
+    if entries:
+        lines = [_AUTO_INDEX_START, "## Topic Files"]
+        for name in sorted(entries):
+            size = entries[name]
+            lines.append(f"- [{name}]({name}) - {size:,} bytes")
+        lines.append(_AUTO_INDEX_END)
+        parts.append("\n".join(lines))
+
+    return "\n\n".join(parts) + "\n" if parts else ""
 
 
 def _validate_filename(filename: str) -> str:
