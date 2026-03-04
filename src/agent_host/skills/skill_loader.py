@@ -202,6 +202,55 @@ def _parse_skill_metadata(skill_dir: Path) -> SkillDefinition | None:
     return skill
 
 
+def _resolve_script_dirs(skill_dir: Path, metadata: dict[str, Any] | None) -> list[Path]:
+    """Resolve script directories from frontmatter ``scripts_dir``.
+
+    Supports:
+    - ``scripts_dir: scripts`` (single string, relative to skill dir)
+    - ``scripts_dir: [scripts, scripts/office]`` (list of strings)
+
+    Falls back to ``scripts/`` if no ``scripts_dir`` key and the directory exists.
+    Path traversal is prevented by verifying resolved paths stay within skill_dir.
+    """
+    if not metadata or "scripts_dir" not in metadata:
+        default = skill_dir / "scripts"
+        return [default] if default.is_dir() else []
+
+    raw = metadata["scripts_dir"]
+    if isinstance(raw, str):
+        dirs = [raw]
+    elif isinstance(raw, list):
+        dirs = [str(d) for d in raw]
+    else:
+        return []
+
+    resolved: list[Path] = []
+    skill_root = skill_dir.resolve()
+    for d in dirs:
+        p = (skill_dir / d).resolve()
+        if p.is_dir() and p.is_relative_to(skill_root):
+            resolved.append(p)
+        else:
+            logger.warning("scripts_dir_invalid", path=d, skill=str(skill_dir))
+    return resolved
+
+
+def _collect_scripts(script_dirs: list[Path]) -> list[Path]:
+    """Collect non-hidden direct children (files only) from each script directory.
+
+    Non-recursive: only lists immediate files in each directory.  If a skill needs
+    nested scripts listed, the author declares multiple directories in ``scripts_dir``.
+    """
+    seen: set[Path] = set()
+    scripts: list[Path] = []
+    for sdir in script_dirs:
+        for f in sorted(sdir.iterdir()):
+            if f.is_file() and f not in seen and not f.name.startswith("."):
+                seen.add(f)
+                scripts.append(f)
+    return scripts
+
+
 class SkillLoader:
     """Loads skill definitions from multiple sources with progressive disclosure.
 
@@ -323,7 +372,7 @@ class SkillLoader:
             logger.warning("skill_content_read_failed", path=str(skill_md))
             return skill
 
-        _metadata, body = _split_frontmatter(text)
+        metadata, body = _split_frontmatter(text)
         full_content = body.strip()
 
         # Collect supporting .md files (everything except SKILL.md)
@@ -338,6 +387,18 @@ class SkillLoader:
                     supporting_parts.append(f"## {section_name}\n\n{content}")
             except OSError:
                 logger.warning("supporting_file_read_failed", path=str(md_file))
+
+        # Collect scripts from frontmatter scripts_dir or default scripts/ fallback
+        script_dirs = _resolve_script_dirs(skill_dir, metadata)
+        script_files = _collect_scripts(script_dirs)
+        if script_files:
+            script_lines = [f"- `{f.relative_to(skill_dir)}`: `{f}`" for f in script_files]
+            supporting_parts.append(
+                "## Available Scripts\n\n"
+                f"Skill directory: `{skill_dir}`\n\n"
+                + "\n".join(script_lines)
+                + "\n\nRun scripts using their full absolute paths shown above."
+            )
 
         if supporting_parts:
             full_content += "\n\n---\n\n" + "\n\n".join(supporting_parts)
