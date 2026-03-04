@@ -122,6 +122,9 @@ class SessionManager:
         # Cumulative session history (across tasks)
         self._session_messages: list[ConversationMessage] = []
 
+        # LLM limits (overridden by policy bundle in _init_components)
+        self._max_context_tokens: int = 100_000
+
         # Step tracking for current task
         self._current_max_steps: int = config.default_max_steps
         self._current_step_count: int = 0
@@ -321,10 +324,13 @@ class SessionManager:
         # Policy enforcer
         self._policy_enforcer = PolicyEnforcer(policy_bundle)
 
+        # LLM policy limits from the policy bundle
+        llm_policy = policy_bundle.llmPolicy
+        max_tokens = llm_policy.maxSessionTokens if llm_policy else 100_000
+        self._max_context_tokens = llm_policy.maxInputTokens if llm_policy else 100_000
+        max_output_tokens = llm_policy.maxOutputTokens if llm_policy else None
+
         # Token budget
-        max_tokens = (
-            policy_bundle.llmPolicy.maxSessionTokens if policy_bundle.llmPolicy else 100_000
-        )
         self._token_budget = TokenBudget(max_session_tokens=max_tokens)
 
         # Approval gate and file change tracker
@@ -336,6 +342,7 @@ class SessionManager:
             endpoint=self._config.llm_gateway_endpoint,
             auth_token=self._config.llm_gateway_auth_token,
             model=self._config.llm_model,
+            max_output_tokens=max_output_tokens,
             max_retries=self._config.llm_max_retries,
             retry_base_delay=self._config.llm_retry_base_delay,
             retry_max_delay=self._config.llm_retry_max_delay,
@@ -495,7 +502,7 @@ class SessionManager:
                 tool_executor=tool_executor,
                 policy_enforcer=self._policy_enforcer,
                 token_budget=self._token_budget,
-                max_context_tokens=self._config.max_context_tokens,
+                max_context_tokens=self._max_context_tokens,
             )
 
             # Skill executor (for skill tools)
@@ -504,7 +511,7 @@ class SessionManager:
                 tool_executor=tool_executor,
                 policy_enforcer=self._policy_enforcer,
                 token_budget=self._token_budget,
-                max_context_tokens=self._config.max_context_tokens,
+                max_context_tokens=self._max_context_tokens,
             )
 
             # Build and run agent loop
@@ -518,7 +525,7 @@ class SessionManager:
                 event_emitter=self._event_emitter,
                 cancellation_event=self._cancel_event,
                 max_steps=max_steps,
-                max_context_tokens=self._config.max_context_tokens,
+                max_context_tokens=self._max_context_tokens,
                 working_memory=self._working_memory,
                 sub_agent_manager=sub_agent_manager,
                 skill_executor=skill_executor,

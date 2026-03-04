@@ -28,7 +28,6 @@ def _make_session_manager() -> SessionManager:
     config.llm_retry_max_delay = 1.0
     config.default_max_steps = 50
     config.recency_window = 10
-    config.max_context_tokens = 128000
     config.approval_timeout_seconds = 300
     config.log_dir = "/tmp/logs"
     config.workspace_sync_interval = 5
