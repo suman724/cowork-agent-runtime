@@ -34,6 +34,7 @@ from agent_host.loop.agent_loop import AgentLoop
 from agent_host.loop.sub_agent import SubAgentManager
 from agent_host.loop.system_prompt import SystemPromptBuilder
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
+from agent_host.memory.memory_manager import MemoryManager
 from agent_host.memory.working_memory import WorkingMemory
 from agent_host.models import SessionContext
 from agent_host.policy.policy_enforcer import PolicyEnforcer
@@ -102,6 +103,9 @@ class SessionManager:
         # Working memory (task tracker, plan, notes — injected per-turn)
         self._working_memory: WorkingMemory | None = None
 
+        # Persistent memory manager (project instructions + auto-memory)
+        self._memory_manager: MemoryManager | None = None
+
         # Skills (loaded from built-in, workspace YAML, and policy bundle)
         self._skills: list[SkillDefinition] = []
 
@@ -121,6 +125,15 @@ class SessionManager:
         # Step tracking for current task
         self._current_max_steps: int = config.default_max_steps
         self._current_step_count: int = 0
+
+        # Active task prompt (for checkpoint persistence)
+        self._current_task_prompt: str = ""
+
+        # Last workspace sync step (for periodic sync)
+        self._last_workspace_sync_step: int = 0
+
+        # Incomplete task from crash recovery (set by _restore_from_checkpoint)
+        self._incomplete_task: dict[str, Any] | None = None
 
     @property
     def session_context(self) -> SessionContext | None:
@@ -210,7 +223,7 @@ class SessionManager:
         self._session_messages = []
 
         # Restore token budget and session messages from checkpoint (crash recovery)
-        self._restore_from_checkpoint()
+        await self._restore_from_checkpoint()
 
         # Emit session_created event
         if self._event_emitter:
@@ -275,7 +288,7 @@ class SessionManager:
             )
 
         # Restore token budget from checkpoint (if available)
-        self._restore_from_checkpoint()
+        await self._restore_from_checkpoint()
 
         if self._event_emitter:
             self._event_emitter.emit_session_created()
@@ -329,6 +342,11 @@ class SessionManager:
             event_emitter=self._event_emitter,
         )
 
+        # Persistent memory manager (project instructions + auto-memory)
+        if self._workspace_dir:
+            self._memory_manager = MemoryManager(self._workspace_dir)
+            self._memory_manager.load_all()
+
         # System prompt
         prompt_builder = SystemPromptBuilder(
             workspace_dir=self._workspace_dir,
@@ -337,7 +355,13 @@ class SessionManager:
 
         # Message thread
         self._thread = MessageThread(
-            system_prompt=prompt_builder.build_static_prompt(policy_enforcer=self._policy_enforcer)
+            system_prompt=prompt_builder.build_static_prompt(
+                policy_enforcer=self._policy_enforcer,
+                project_instructions=(
+                    self._memory_manager.project_instructions if self._memory_manager else ""
+                ),
+                has_persistent_memory=self._memory_manager is not None,
+            )
         )
 
         # Load skills
@@ -398,17 +422,32 @@ class SessionManager:
         self._current_max_steps = max_steps
         self._current_step_count = 0
 
-        # Reset cancellation event for new task
+        # Reset cancellation event and sync tracking for new task
         self._cancel_event.clear()
+        self._current_task_prompt = prompt
+        self._last_workspace_sync_step = 0
 
-        # Prepend workspace context so the LLM always sees it, even after compaction
-        llm_prompt = prompt
-        if self._workspace_dir:
-            llm_prompt = f"[Workspace: {self._workspace_dir}]\n\n{prompt}"
+        # Check if resuming an interrupted task — skip adding user message
+        # since the thread already has it from the checkpoint
+        incomplete = self._incomplete_task
+        is_resume = incomplete is not None and incomplete.get("taskId") == task_id
 
-        # Add user message to thread (with workspace prefix for LLM)
-        if self._thread:
-            self._thread.add_user_message(llm_prompt)
+        if is_resume and incomplete is not None:
+            logger.info(
+                "resuming_incomplete_task",
+                task_id=task_id,
+                last_step=incomplete.get("lastStep", 0),
+            )
+            self._incomplete_task = None
+        else:
+            # Prepend workspace context so the LLM always sees it, even after compaction
+            llm_prompt = prompt
+            if self._workspace_dir:
+                llm_prompt = f"[Workspace: {self._workspace_dir}]\n\n{prompt}"
+
+            # Add user message to thread (with workspace prefix for LLM)
+            if self._thread:
+                self._thread.add_user_message(llm_prompt)
 
         # Spawn the agent loop as a background asyncio task
         task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))
@@ -484,6 +523,8 @@ class SessionManager:
                 sub_agent_manager=sub_agent_manager,
                 skill_executor=skill_executor,
                 skills=self._skills,
+                on_step_complete=self._on_step_complete,
+                memory_manager=self._memory_manager,
             )
 
             result = await loop.run(task_id)
@@ -543,8 +584,20 @@ class SessionManager:
             await self._upload_history(prompt, assistant_text, task_id)
             self._persist_checkpoint()
 
-    def _persist_checkpoint(self) -> None:
-        """Persist current state into our checkpoint format."""
+    def _persist_checkpoint(
+        self,
+        *,
+        active_task_id: str | None = None,
+        active_task_prompt: str | None = None,
+        active_task_step: int = 0,
+        active_task_max_steps: int = 0,
+        last_workspace_sync_step: int = 0,
+    ) -> None:
+        """Persist current state into our checkpoint format.
+
+        When called mid-task with active_task_id set, populates in-progress task state.
+        When called at task end (no args), clears task state.
+        """
         if not self._session_context:
             return
 
@@ -558,16 +611,97 @@ class SessionManager:
             session_messages=[msg.model_dump(mode="json") for msg in self._session_messages],
             thread=self._thread.to_checkpoint() if self._thread else None,
             working_memory=(self._working_memory.to_checkpoint() if self._working_memory else None),
+            active_task_id=active_task_id,
+            active_task_prompt=active_task_prompt,
+            active_task_step=active_task_step,
+            active_task_max_steps=active_task_max_steps,
+            last_workspace_sync_step=last_workspace_sync_step,
         )
         self._checkpoint_manager.save(checkpoint)
 
-    def _restore_from_checkpoint(self) -> None:
-        """Restore token budget and session messages from checkpoint if available."""
+    async def _on_step_complete(self, task_id: str, step: int) -> None:
+        """Callback invoked by AgentLoop after each completed step.
+
+        1. Write local checkpoint with active task state (always)
+        2. Every N steps, sync history to workspace (best-effort)
+        """
+        self._current_step_count = step
+
+        # Always write local checkpoint with in-progress task state
+        self._persist_checkpoint(
+            active_task_id=task_id,
+            active_task_prompt=self._current_task_prompt,
+            active_task_step=step,
+            active_task_max_steps=self._current_max_steps,
+            last_workspace_sync_step=self._last_workspace_sync_step,
+        )
+
+        if self._event_emitter:
+            self._event_emitter.emit_checkpoint_saved(task_id, step)
+
+        # Periodic workspace sync
+        sync_interval = self._config.workspace_sync_interval
+        if sync_interval > 0 and step - self._last_workspace_sync_step >= sync_interval:
+            await self._sync_history_to_workspace(task_id)
+            self._last_workspace_sync_step = step
+            # Update checkpoint with new sync step
+            self._persist_checkpoint(
+                active_task_id=task_id,
+                active_task_prompt=self._current_task_prompt,
+                active_task_step=step,
+                active_task_max_steps=self._current_max_steps,
+                last_workspace_sync_step=self._last_workspace_sync_step,
+            )
+
+    async def _sync_history_to_workspace(self, task_id: str) -> None:
+        """Upload cumulative session messages to workspace (best-effort).
+
+        Reuses existing workspace_client.upload_session_history().
+        Failures logged, not propagated.
+        """
+        if not self._session_context:
+            return
+
+        try:
+            await self._workspace_client.upload_session_history(
+                workspace_id=self._session_context.workspace_id,
+                session_id=self._session_context.session_id,
+                messages=self._session_messages,
+                task_id=task_id,
+            )
+            logger.info("workspace_sync_completed", task_id=task_id)
+            if self._event_emitter:
+                self._event_emitter.emit_workspace_sync_completed(task_id)
+        except Exception:
+            logger.warning("workspace_sync_failed", task_id=task_id, exc_info=True)
+            if self._event_emitter:
+                self._event_emitter.emit_workspace_sync_failed(task_id)
+
+    async def _restore_from_checkpoint(self) -> None:
+        """Restore token budget and session messages from checkpoint if available.
+
+        If no local checkpoint exists (corrupt or missing), falls back to
+        fetching conversation history from the Workspace Service.
+        """
         if not self._session_context:
             return
 
         checkpoint = self._checkpoint_manager.load(self._session_context.session_id)
         if not checkpoint:
+            # Fallback: try workspace service for conversation history
+            try:
+                messages = await self._workspace_client.get_session_history(
+                    workspace_id=self._session_context.workspace_id,
+                    session_id=self._session_context.session_id,
+                )
+                if messages:
+                    self._session_messages = messages
+                    logger.info(
+                        "session_messages_restored_from_workspace",
+                        count=len(messages),
+                    )
+            except Exception:
+                logger.warning("workspace_fallback_failed", exc_info=True)
             return
 
         # Restore token budget
@@ -610,6 +744,23 @@ class SessionManager:
                 )
             except Exception:
                 logger.warning("session_messages_restore_failed", exc_info=True)
+
+        # Detect incomplete task from crash
+        if checkpoint.active_task_id:
+            self._incomplete_task = {
+                "taskId": checkpoint.active_task_id,
+                "prompt": checkpoint.active_task_prompt or "",
+                "lastStep": checkpoint.active_task_step,
+                "maxSteps": checkpoint.active_task_max_steps,
+            }
+            logger.info(
+                "incomplete_task_detected",
+                task_id=checkpoint.active_task_id,
+                last_step=checkpoint.active_task_step,
+            )
+
+        if self._event_emitter:
+            self._event_emitter.emit_checkpoint_restored(source="local")
 
     async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
         """Upload cumulative session history to workspace service (best-effort).
@@ -795,6 +946,9 @@ class SessionManager:
                 "maxSessionTokens": self._token_budget.max_session_tokens,
             }
 
+        if self._incomplete_task:
+            state["incompleteTask"] = self._incomplete_task
+
         return state
 
     async def shutdown(self) -> dict[str, Any]:
@@ -845,6 +999,7 @@ class SessionManager:
         self._file_change_tracker = None
         self._thread = None
         self._working_memory = None
+        self._memory_manager = None
 
         logger.info("session_shutdown", session_id=session_id)
         return {"status": "shutdown", "sessionId": session_id}

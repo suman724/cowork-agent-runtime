@@ -30,6 +30,13 @@ class SessionCheckpoint:
     working_memory: dict[str, Any] | None = None  # Wave 3
     checkpointed_at: str = ""
 
+    # In-progress task state (all with defaults for backward compat)
+    active_task_id: str | None = None  # Non-None = task in progress
+    active_task_prompt: str | None = None  # The user prompt
+    active_task_step: int = 0  # Last completed step
+    active_task_max_steps: int = 0  # Max steps for this task
+    last_workspace_sync_step: int = 0  # Last step that synced to workspace
+
 
 class CheckpointManager:
     """Manages session checkpoints using atomic JSON file writes.
@@ -90,6 +97,11 @@ class CheckpointManager:
                 thread=data.get("thread"),
                 working_memory=data.get("working_memory"),
                 checkpointed_at=data.get("checkpointed_at", ""),
+                active_task_id=data.get("active_task_id"),
+                active_task_prompt=data.get("active_task_prompt"),
+                active_task_step=data.get("active_task_step", 0),
+                active_task_max_steps=data.get("active_task_max_steps", 0),
+                last_workspace_sync_step=data.get("last_workspace_sync_step", 0),
             )
         except (json.JSONDecodeError, KeyError, TypeError, UnicodeDecodeError):
             logger.warning(

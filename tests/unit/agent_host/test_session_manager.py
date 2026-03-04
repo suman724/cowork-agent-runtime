@@ -10,6 +10,7 @@ import pytest
 from agent_host.events.event_emitter import EventEmitter
 from agent_host.exceptions import CheckpointError, PolicyExpiredError
 from agent_host.models import SessionContext
+from agent_host.session.checkpoint_manager import SessionCheckpoint
 from agent_host.session.session_manager import SessionManager
 
 
@@ -30,6 +31,7 @@ def _make_session_manager() -> SessionManager:
     config.max_context_tokens = 128000
     config.approval_timeout_seconds = 300
     config.log_dir = "/tmp/logs"
+    config.workspace_sync_interval = 5
 
     tool_router = MagicMock()
 
@@ -178,3 +180,216 @@ class TestRunAgentExceptionHandling:
 
         sm._event_emitter.emit_task_failed.assert_not_called()
         sm._event_emitter.emit_session_failed.assert_not_called()
+
+
+class TestOnStepComplete:
+    @pytest.mark.asyncio
+    async def test_per_step_checkpoint_saves(self) -> None:
+        """_on_step_complete should call _persist_checkpoint with active task state."""
+        sm = _make_session_manager()
+        sm._current_task_prompt = "Fix the bug"
+        sm._current_max_steps = 50
+
+        await sm._on_step_complete("task-1", 3)
+
+        sm._checkpoint_manager.save.assert_called()
+        saved_checkpoint = sm._checkpoint_manager.save.call_args[0][0]
+        assert saved_checkpoint.active_task_id == "task-1"
+        assert saved_checkpoint.active_task_prompt == "Fix the bug"
+        assert saved_checkpoint.active_task_step == 3
+        assert saved_checkpoint.active_task_max_steps == 50
+
+    @pytest.mark.asyncio
+    async def test_periodic_workspace_sync(self) -> None:
+        """_on_step_complete should sync to workspace at sync_interval steps."""
+        sm = _make_session_manager()
+        sm._config.workspace_sync_interval = 3
+        sm._current_task_prompt = "Test"
+        sm._current_max_steps = 50
+
+        # Steps 1 and 2 should not trigger sync
+        await sm._on_step_complete("task-1", 1)
+        await sm._on_step_complete("task-1", 2)
+        sm._workspace_client.upload_session_history.assert_not_called()
+
+        # Step 3 should trigger sync (3 - 0 >= 3)
+        await sm._on_step_complete("task-1", 3)
+        sm._workspace_client.upload_session_history.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_workspace_sync_disabled_when_interval_zero(self) -> None:
+        """No workspace sync when workspace_sync_interval is 0."""
+        sm = _make_session_manager()
+        sm._config.workspace_sync_interval = 0
+        sm._current_task_prompt = "Test"
+        sm._current_max_steps = 50
+
+        await sm._on_step_complete("task-1", 5)
+        await sm._on_step_complete("task-1", 10)
+        sm._workspace_client.upload_session_history.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_checkpoint_saved_event_emitted(self) -> None:
+        """_on_step_complete should emit checkpoint_saved event."""
+        sm = _make_session_manager()
+        sm._current_task_prompt = "Test"
+        sm._current_max_steps = 50
+
+        await sm._on_step_complete("task-1", 1)
+        sm._event_emitter.emit_checkpoint_saved.assert_called_once_with("task-1", 1)
+
+
+class TestIncompleteTaskDetection:
+    @pytest.mark.asyncio
+    async def test_incomplete_task_detected_on_restore(self) -> None:
+        """_restore_from_checkpoint should detect an in-progress task."""
+        sm = _make_session_manager()
+        sm._checkpoint_manager.load.return_value = SessionCheckpoint(
+            session_id="sess-1",
+            workspace_id="ws-1",
+            tenant_id="t-1",
+            user_id="u-1",
+            active_task_id="task-42",
+            active_task_prompt="Fix the bug",
+            active_task_step=7,
+            active_task_max_steps=50,
+        )
+
+        await sm._restore_from_checkpoint()
+
+        assert sm._incomplete_task is not None
+        assert sm._incomplete_task["taskId"] == "task-42"
+        assert sm._incomplete_task["prompt"] == "Fix the bug"
+        assert sm._incomplete_task["lastStep"] == 7
+        assert sm._incomplete_task["maxSteps"] == 50
+
+    @pytest.mark.asyncio
+    async def test_no_incomplete_task_when_none(self) -> None:
+        """_restore_from_checkpoint should not set _incomplete_task when active_task_id is None."""
+        sm = _make_session_manager()
+        sm._checkpoint_manager.load.return_value = SessionCheckpoint(
+            session_id="sess-1",
+            workspace_id="ws-1",
+            tenant_id="t-1",
+            user_id="u-1",
+            active_task_id=None,
+        )
+
+        await sm._restore_from_checkpoint()
+
+        assert sm._incomplete_task is None
+
+    @pytest.mark.asyncio
+    async def test_incomplete_task_in_get_session_state(self) -> None:
+        """get_session_state should include incompleteTask when set."""
+        sm = _make_session_manager()
+        sm._incomplete_task = {
+            "taskId": "task-42",
+            "prompt": "Fix the bug",
+            "lastStep": 7,
+            "maxSteps": 50,
+        }
+
+        state = await sm.get_session_state()
+        assert "incompleteTask" in state
+        assert state["incompleteTask"]["taskId"] == "task-42"
+
+    @pytest.mark.asyncio
+    async def test_no_incomplete_task_in_get_session_state(self) -> None:
+        """get_session_state should not include incompleteTask when not set."""
+        sm = _make_session_manager()
+        sm._incomplete_task = None
+
+        state = await sm.get_session_state()
+        assert "incompleteTask" not in state
+
+
+class TestResumeIncompleteTask:
+    @pytest.mark.asyncio
+    async def test_resume_skips_add_user_message(self) -> None:
+        """start_task with the same taskId as incomplete should skip add_user_message."""
+        sm = _make_session_manager()
+        sm._incomplete_task = {
+            "taskId": "task-42",
+            "prompt": "Fix the bug",
+            "lastStep": 7,
+            "maxSteps": 50,
+        }
+
+        result = await sm.start_task(
+            {
+                "taskId": "task-42",
+                "prompt": "Fix the bug",
+            }
+        )
+
+        assert result["status"] == "running"
+        # Thread.add_user_message should NOT have been called
+        sm._thread.add_user_message.assert_not_called()
+        # _incomplete_task should be cleared after resume
+        assert sm._incomplete_task is None
+
+    @pytest.mark.asyncio
+    async def test_non_resume_adds_user_message(self) -> None:
+        """start_task with a different taskId should add_user_message normally."""
+        sm = _make_session_manager()
+        sm._incomplete_task = {
+            "taskId": "task-42",
+            "prompt": "Fix the bug",
+            "lastStep": 7,
+            "maxSteps": 50,
+        }
+
+        result = await sm.start_task(
+            {
+                "taskId": "task-99",
+                "prompt": "New task",
+            }
+        )
+
+        assert result["status"] == "running"
+        sm._thread.add_user_message.assert_called_once()
+
+
+class TestWorkspaceFallback:
+    @pytest.mark.asyncio
+    async def test_workspace_fallback_on_missing_checkpoint(self) -> None:
+        """When local checkpoint is None, fall back to workspace service."""
+        sm = _make_session_manager()
+        sm._checkpoint_manager.load.return_value = None
+
+        from datetime import UTC, datetime
+
+        from cowork_platform.conversation_message import ConversationMessage
+
+        mock_messages = [
+            ConversationMessage(
+                messageId="m1",
+                sessionId="sess-1",
+                taskId="task-1",
+                role="user",
+                content="Hello",
+                timestamp=datetime.now(tz=UTC),
+            ),
+        ]
+        sm._workspace_client.get_session_history = AsyncMock(return_value=mock_messages)
+
+        await sm._restore_from_checkpoint()
+
+        sm._workspace_client.get_session_history.assert_called_once_with(
+            workspace_id="ws-1",
+            session_id="sess-1",
+        )
+        assert len(sm._session_messages) == 1
+        assert sm._session_messages[0].content == "Hello"
+
+    @pytest.mark.asyncio
+    async def test_workspace_fallback_failure_is_silent(self) -> None:
+        """Workspace fallback failure should be logged but not raise."""
+        sm = _make_session_manager()
+        sm._checkpoint_manager.load.return_value = None
+        sm._workspace_client.get_session_history = AsyncMock(side_effect=Exception("network error"))
+
+        # Should not raise
+        await sm._restore_from_checkpoint()
+        assert sm._session_messages == []

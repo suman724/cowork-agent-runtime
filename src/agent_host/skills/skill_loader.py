@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import structlog
-import yaml  # type: ignore[import-untyped]
+import yaml
 
 from agent_host.skills.models import SkillDefinition
 

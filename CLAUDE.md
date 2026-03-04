@@ -95,6 +95,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `LOG_LEVEL` — Logging level (default: info)
 - `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
 - `TAVILY_API_KEY` — Tavily API key (optional, required for WebSearch tool)
+- `WORKSPACE_SYNC_INTERVAL` — Sync checkpoint to workspace every N steps (default: 5, 0 = disabled)
 
 ## Platform Adapters
 

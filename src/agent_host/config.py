@@ -59,6 +59,7 @@ class AgentHostConfig:
     llm_retry_base_delay: float = 1.0
     llm_retry_max_delay: float = 30.0
     recency_window: int = 20
+    workspace_sync_interval: int = 5  # Sync to workspace every N steps (0 = disabled)
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -101,4 +102,5 @@ class AgentHostConfig:
             llm_retry_base_delay=float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0")),
             llm_retry_max_delay=float(os.environ.get("LLM_RETRY_MAX_DELAY", "30.0")),
             recency_window=int(os.environ.get("RECENCY_WINDOW", "20")),
+            workspace_sync_interval=int(os.environ.get("WORKSPACE_SYNC_INTERVAL", "5")),
         )
