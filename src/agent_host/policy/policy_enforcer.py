@@ -153,7 +153,9 @@ class PolicyEnforcer:
         elif capability_name == CapabilityName.NETWORK_HTTP:
             url = arguments.get("url", "")
             if url:
-                allowed, reason = check_domain(url, capability.allowedDomains)
+                allowed, reason = check_domain(
+                    url, capability.allowedDomains, capability.blockedDomains
+                )
                 if not allowed:
                     return PolicyCheckResult(decision="DENIED", reason=reason)
 
