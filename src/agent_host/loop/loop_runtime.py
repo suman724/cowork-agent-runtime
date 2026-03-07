@@ -245,6 +245,11 @@ class LoopRuntime:
                 task_id, dropped, pre_count, post_count, step_id=step_id
             )
 
+    def emit_plan_updated(self, task_id: str, goal: str, steps: list[dict[str, object]]) -> None:
+        """Emit plan_updated event."""
+        if self._event_emitter:
+            self._event_emitter.emit_plan_updated(task_id, goal, steps)
+
     def emit_plan_mode_changed(self, task_id: str, plan_mode: bool, source: str) -> None:
         """Emit plan_mode_changed event."""
         if self._event_emitter:

@@ -545,12 +545,18 @@ class SessionManager:
             if plan_only and self._event_emitter:
                 self._event_emitter.emit_plan_mode_changed(task_id, True, "user")
 
+            # Plan updated callback
+            def _on_plan_updated(goal: str, steps: list[dict[str, object]]) -> None:
+                if self._event_emitter:
+                    self._event_emitter.emit_plan_updated(task_id, goal, steps)
+
             # Agent-internal tool handler (TaskTracker, CreatePlan, SpawnAgent, memory, skills)
             agent_tool_handler = AgentToolHandler(
                 self._working_memory,
                 skills=self._skills,
                 memory_manager=self._memory_manager,
                 on_plan_mode_changed=_on_plan_mode_changed,
+                on_plan_updated=_on_plan_updated,
                 plan_mode=plan_only,
                 plan_mode_locked=plan_only,
             )

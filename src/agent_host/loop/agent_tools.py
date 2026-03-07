@@ -15,6 +15,7 @@ if TYPE_CHECKING:
 AGENT_TOOL_NAMES = {
     "TaskTracker",
     "CreatePlan",
+    "UpdatePlanStep",
     "SpawnAgent",
     "SaveMemory",
     "RecallMemory",
@@ -40,6 +41,7 @@ class AgentToolHandler:
         spawn_sub_agent: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         execute_skill: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         on_plan_mode_changed: Callable[[bool, str], None] | None = None,
+        on_plan_updated: Callable[[str, list[dict[str, Any]]], None] | None = None,
         plan_mode: bool = False,
         plan_mode_locked: bool = False,
     ) -> None:
@@ -50,6 +52,7 @@ class AgentToolHandler:
         self._spawn_sub_agent = spawn_sub_agent
         self._execute_skill = execute_skill
         self._on_plan_mode_changed = on_plan_mode_changed
+        self._on_plan_updated = on_plan_updated
         self._plan_mode = plan_mode
         self._plan_mode_locked = plan_mode_locked
 
@@ -65,6 +68,8 @@ class AgentToolHandler:
             return self._handle_task_tracker(arguments)
         if tool_name == "CreatePlan":
             return self._handle_create_plan(arguments)
+        if tool_name == "UpdatePlanStep":
+            return self._handle_update_plan_step(arguments)
         if tool_name == "EnterPlanMode":
             return self._handle_enter_plan_mode()
         if tool_name == "ExitPlanMode":
@@ -143,6 +148,32 @@ class AgentToolHandler:
                             },
                         },
                         "required": ["goal", "steps"],
+                    },
+                },
+            },
+            {
+                "type": "function",
+                "function": {
+                    "name": "UpdatePlanStep",
+                    "description": (
+                        "Update the status of a plan step. Call this as you work through "
+                        "your plan: set to 'in_progress' when starting a step, 'completed' "
+                        "when done, or 'skipped' if not needed."
+                    ),
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "stepIndex": {
+                                "type": "integer",
+                                "description": "Zero-based index of the step to update.",
+                            },
+                            "status": {
+                                "type": "string",
+                                "enum": ["in_progress", "completed", "skipped"],
+                                "description": "New status for the step.",
+                            },
+                        },
+                        "required": ["stepIndex", "status"],
                     },
                 },
             },
@@ -360,11 +391,56 @@ class AgentToolHandler:
         steps = [PlanStep(description=desc) for desc in step_descriptions]
         self._working_memory.plan = Plan(goal=goal, steps=steps)
 
+        self._notify_plan_updated()
+
         return {
             "status": "success",
             "message": f"Plan created with {len(steps)} steps",
             "goal": goal,
         }
+
+    def _handle_update_plan_step(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        """Handle UpdatePlanStep tool calls."""
+        plan = self._working_memory.plan
+        if not plan:
+            return {"status": "error", "message": "No plan exists. Call CreatePlan first."}
+
+        step_index = arguments.get("stepIndex")
+        status = arguments.get("status")
+
+        if step_index is None or not isinstance(step_index, int):
+            return {"status": "error", "message": "stepIndex is required (integer)"}
+        if status not in ("in_progress", "completed", "skipped"):
+            return {
+                "status": "error",
+                "message": "status must be in_progress, completed, or skipped",
+            }
+        if step_index < 0 or step_index >= len(plan.steps):
+            return {
+                "status": "error",
+                "message": f"stepIndex {step_index} out of range (0-{len(plan.steps) - 1})",
+            }
+
+        plan.steps[step_index].status = status
+        self._notify_plan_updated()
+
+        return {
+            "status": "success",
+            "stepIndex": step_index,
+            "newStatus": status,
+            "description": plan.steps[step_index].description,
+        }
+
+    def _notify_plan_updated(self) -> None:
+        """Send plan state to the on_plan_updated callback."""
+        plan = self._working_memory.plan
+        if not plan or not self._on_plan_updated:
+            return
+        steps = [
+            {"index": i, "description": s.description, "status": s.status}
+            for i, s in enumerate(plan.steps)
+        ]
+        self._on_plan_updated(plan.goal, steps)
 
     def _handle_enter_plan_mode(self) -> dict[str, Any]:
         """Handle EnterPlanMode tool calls."""
