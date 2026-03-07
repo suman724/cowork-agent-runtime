@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import uuid
 from typing import TYPE_CHECKING
 
 import structlog
@@ -94,6 +95,9 @@ class AgentLoop:
         last_text = ""
 
         while step < self._max_steps:
+            # Generate a unique step ID for this iteration
+            step_id = str(uuid.uuid4())
+
             # Check cancellation
             if self._cancel.is_set():
                 logger.info("agent_loop_cancelled", task_id=task_id, step=step)
@@ -155,11 +159,13 @@ class AgentLoop:
             if compacted and self._event_emitter:
                 # Marker replaces N dropped messages (marker adds 1, so net = pre - post + 1)
                 dropped = max(0, pre_count - post_count + 1)
-                self._event_emitter.emit_context_compacted(task_id, dropped, pre_count, post_count)
+                self._event_emitter.emit_context_compacted(
+                    task_id, dropped, pre_count, post_count, step_id=step_id
+                )
 
             # 2. Emit step_started event
             if self._event_emitter:
-                self._event_emitter.emit_step_started(task_id, step + 1)
+                self._event_emitter.emit_step_started(task_id, step + 1, step_id=step_id)
 
             # 3. Check policy + budget, then stream LLM call
             self._policy_enforcer.check_llm_call()
@@ -170,15 +176,14 @@ class AgentLoop:
             if self._agent_tool_handler:
                 tool_defs = tool_defs + self._agent_tool_handler.get_tool_definitions()
 
+            def _on_chunk(text: str, _sid: str = step_id) -> None:
+                self._event_emitter.emit_text_chunk(task_id, text, step_id=_sid)  # type: ignore[union-attr]
+
             response = await self._llm_client.stream_chat(
                 messages,
                 tool_defs,
                 task_id=task_id,
-                on_text_chunk=(
-                    (lambda t: self._event_emitter.emit_text_chunk(task_id, t))  # type: ignore[union-attr]
-                    if self._event_emitter
-                    else None
-                ),
+                on_text_chunk=_on_chunk if self._event_emitter else None,
             )
 
             # Record token usage
@@ -193,7 +198,7 @@ class AgentLoop:
 
             # Emit step_completed
             if self._event_emitter:
-                self._event_emitter.emit_step_completed(task_id, step)
+                self._event_emitter.emit_step_completed(task_id, step, step_id=step_id)
 
             # Per-step checkpoint callback
             if self._on_step_complete:
@@ -294,7 +299,9 @@ class AgentLoop:
 
             # Execute external tools (policy-checked, approval-gated)
             if external_calls:
-                results = await self._tool_executor.execute_tool_calls(external_calls, task_id)
+                results = await self._tool_executor.execute_tool_calls(
+                    external_calls, task_id, step_id=step_id
+                )
                 for r in results:
                     self._thread.add_tool_result(
                         r.tool_call_id, r.tool_name, r.result_text, image_url=r.image_url

@@ -82,7 +82,7 @@ class TestAgentLoopCompletion:
             result_text='{"status": "success", "output": "file content"}',
         )
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
         loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
@@ -100,7 +100,7 @@ class TestAgentLoopCompletion:
 
         loop = _make_loop(mock)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
@@ -127,7 +127,7 @@ class TestAgentLoopStepLimit:
 
         loop = _make_loop(mock, max_steps=3)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
@@ -153,7 +153,7 @@ class TestAgentLoopStepLimit:
         emitter = MagicMock()
         loop = _make_loop(mock, max_steps=5, event_emitter=emitter)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
@@ -197,7 +197,7 @@ class TestAgentLoopCancellation:
 
         call_count = 0
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             nonlocal call_count
             call_count += 1
             cancel.set()  # Cancel after first tool execution
@@ -245,7 +245,7 @@ class TestAgentLoopStepCallback:
         loop = _make_loop(mock)
         loop._on_step_complete = on_step
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
@@ -274,7 +274,7 @@ class TestAgentLoopStepCallback:
         loop = _make_loop(mock)
         loop._on_step_complete = failing_callback
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
@@ -405,7 +405,7 @@ class TestAgentLoopMemoryInjection:
 
         loop = _make_loop(mock, memory_manager=mm)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,

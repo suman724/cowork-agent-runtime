@@ -73,7 +73,7 @@ class TestSubAgentSpawn:
             result_text='{"status": "success", "output": "file data"}',
         )
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
         mgr._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
@@ -116,7 +116,7 @@ class TestSubAgentSpawn:
 
         mgr = _make_sub_agent_manager(mock)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,

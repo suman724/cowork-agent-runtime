@@ -96,7 +96,7 @@ class TestSkillExecution:
             result_text='{"status": "success", "output": "def auth(): pass"}',
         )
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
         executor._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
@@ -195,7 +195,7 @@ class TestSkillExecution:
 
         executor = _make_skill_executor(mock)
 
-        async def mock_execute(calls, task_id):
+        async def mock_execute(calls, task_id, **kwargs):
             return [
                 ToolCallResult(
                     tool_call_id=calls[0].id,
