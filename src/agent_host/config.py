@@ -56,7 +56,7 @@ class AgentHostConfig:
     default_max_steps: int = 50
     llm_max_retries: int = 3
     llm_retry_base_delay: float = 1.0
-    llm_retry_max_delay: float = 30.0
+    llm_retry_max_delay: float = 10.0
     recency_window: int = 20
     workspace_sync_interval: int = 5  # Sync to workspace every N steps (0 = disabled)
     memory_max_file_size: int = 102_400  # 100 KB per memory file
@@ -100,7 +100,7 @@ class AgentHostConfig:
             default_max_steps=int(os.environ.get("DEFAULT_MAX_STEPS", "50")),
             llm_max_retries=int(os.environ.get("LLM_MAX_RETRIES", "3")),
             llm_retry_base_delay=float(os.environ.get("LLM_RETRY_BASE_DELAY", "1.0")),
-            llm_retry_max_delay=float(os.environ.get("LLM_RETRY_MAX_DELAY", "30.0")),
+            llm_retry_max_delay=float(os.environ.get("LLM_RETRY_MAX_DELAY", "10.0")),
             recency_window=int(os.environ.get("RECENCY_WINDOW", "20")),
             workspace_sync_interval=int(os.environ.get("WORKSPACE_SYNC_INTERVAL", "5")),
             memory_max_file_size=int(os.environ.get("MEMORY_MAX_FILE_SIZE", "102400")),

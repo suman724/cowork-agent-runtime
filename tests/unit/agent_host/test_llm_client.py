@@ -134,11 +134,11 @@ class TestLLMClientRetry:
         assert call_count == 3
         assert len(delays) == 2
 
-        # base=0.01, 529 uses 3x: attempt 0 → min(0.01*3*1, 0.05)=0.03
-        # attempt 1 → min(0.01*3*2, 0.05)=0.05 (capped by retry_max_delay)
+        # base=0.01, 529 uses 1.5x: attempt 0 → min(0.01*1.5*1, 0.05)=0.015
+        # attempt 1 → min(0.01*1.5*2, 0.05)=0.03
         # Plus up to 25% jitter, so check delay >= base value before jitter
-        assert delays[0] >= 0.03  # 0.01 * 3 * 2^0
-        assert delays[1] >= 0.05  # min(0.01 * 3 * 2^1, max_delay=0.05)
+        assert delays[0] >= 0.015  # 0.01 * 1.5 * 2^0
+        assert delays[1] >= 0.03  # 0.01 * 1.5 * 2^1
 
     async def test_non_529_transient_uses_standard_backoff(self, client: LLMClient) -> None:
         """Non-529 transient errors should use standard 1x base delay."""

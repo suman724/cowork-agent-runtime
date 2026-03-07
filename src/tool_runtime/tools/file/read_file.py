@@ -17,7 +17,7 @@ from tool_runtime.models import (
     RawToolOutput,
 )
 from tool_runtime.tools.base import BaseTool
-from tool_runtime.validation import validate_absolute_path
+from tool_runtime.validation import resolve_relative_path, validate_absolute_path
 
 if TYPE_CHECKING:
     from tool_runtime.platform.base import PlatformAdapter
@@ -81,6 +81,7 @@ class ReadFileTool(BaseTool):
         offset: int | None = arguments.get("offset")
         limit: int | None = arguments.get("limit")
 
+        path = resolve_relative_path(path, context.working_directory)
         validate_absolute_path(path)
         real_path = await self._platform.resolve_symlinks(path)
         validate_absolute_path(real_path)
