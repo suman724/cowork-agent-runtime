@@ -32,6 +32,7 @@ class EventEmitter:
         self,
         event_type: str,
         task_id: str | None = None,
+        step_id: str | None = None,
         payload: dict[str, Any] | None = None,
         severity: str = "info",
     ) -> None:
@@ -48,6 +49,7 @@ class EventEmitter:
             session_id=self._ctx.session_id,
             workspace_id=self._ctx.workspace_id,
             task_id=task_id,
+            step_id=step_id,
             severity=severity,
             payload=payload or {},
         )
@@ -108,11 +110,19 @@ class EventEmitter:
         """Emit session_failed event on session failure."""
         self.emit(EventType.SESSION_FAILED, payload={"message": reason}, severity="error")
 
-    def emit_text_chunk(self, task_id: str, text: str) -> None:
+    def emit_task_started(self, task_id: str, prompt: str = "") -> None:
+        """Emit task_started event when a new task begins."""
+        payload: dict[str, Any] = {}
+        if prompt:
+            payload["prompt"] = prompt[:200]
+        self.emit(EventType.TASK_STARTED, task_id=task_id, payload=payload)
+
+    def emit_text_chunk(self, task_id: str, text: str, step_id: str | None = None) -> None:
         """Emit a text_chunk event (streaming LLM output)."""
         self.emit(
             EventType.TEXT_CHUNK,
             task_id=task_id,
+            step_id=step_id,
             payload={"text": text},
         )
 
@@ -229,19 +239,21 @@ class EventEmitter:
         """Emit policy_expired event."""
         self.emit(EventType.POLICY_EXPIRED, severity="warning")
 
-    def emit_step_started(self, task_id: str, step: int) -> None:
+    def emit_step_started(self, task_id: str, step: int, step_id: str | None = None) -> None:
         """Emit step_started event at the beginning of each agent loop step."""
         self.emit(
             EventType.STEP_STARTED,
             task_id=task_id,
+            step_id=step_id,
             payload={"stepNumber": step},
         )
 
-    def emit_step_completed(self, task_id: str, step: int) -> None:
+    def emit_step_completed(self, task_id: str, step: int, step_id: str | None = None) -> None:
         """Emit step_completed event after each agent loop step finishes."""
         self.emit(
             EventType.STEP_COMPLETED,
             task_id=task_id,
+            step_id=step_id,
             payload={"stepNumber": step},
         )
 
@@ -251,11 +263,13 @@ class EventEmitter:
         messages_dropped: int,
         tokens_before: int,
         tokens_after: int,
+        step_id: str | None = None,
     ) -> None:
         """Emit context_compacted event when message truncation occurs."""
         self.emit(
             EventType.CONTEXT_COMPACTED,
             task_id=task_id,
+            step_id=step_id,
             payload={
                 "messagesDropped": messages_dropped,
                 "tokensBefore": tokens_before,
@@ -263,11 +277,12 @@ class EventEmitter:
             },
         )
 
-    def emit_checkpoint_saved(self, task_id: str, step: int) -> None:
+    def emit_checkpoint_saved(self, task_id: str, step: int, step_id: str | None = None) -> None:
         """Emit checkpoint_saved event after each per-step checkpoint write."""
         self.emit(
             EventType.CHECKPOINT_SAVED,
             task_id=task_id,
+            step_id=step_id,
             payload={"stepNumber": step},
         )
 

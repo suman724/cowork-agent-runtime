@@ -86,6 +86,7 @@ class ToolExecutor:
         self,
         calls: list[ToolCallMessage],
         task_id: str,
+        step_id: str = "",
     ) -> list[ToolCallResult]:
         """Execute tool calls sequentially.
 
@@ -100,7 +101,7 @@ class ToolExecutor:
         """
         results: list[ToolCallResult] = []
         for call in calls:
-            result = await self._execute_single(call, task_id)
+            result = await self._execute_single(call, task_id, step_id=step_id)
             results.append(result)
         return results
 
@@ -108,6 +109,7 @@ class ToolExecutor:
         self,
         call: ToolCallMessage,
         task_id: str,
+        step_id: str = "",
     ) -> ToolCallResult:
         """Execute a single tool call with full lifecycle."""
         tool_name = call.name
@@ -176,7 +178,7 @@ class ToolExecutor:
                 arguments=arguments,
                 sessionId=self._session_id,
                 taskId=task_id,
-                stepId="",
+                stepId=step_id,
                 capability=capability_name or None,
             )
             exec_result = await self._tool_router.execute(request, self._execution_context)

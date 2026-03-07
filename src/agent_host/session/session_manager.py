@@ -456,6 +456,23 @@ class SessionManager:
             if self._thread:
                 self._thread.add_user_message(llm_prompt)
 
+        # Auto-name session from first user prompt (fire-and-forget)
+        if not self._session_messages and prompt and self._session_context:
+            auto_name = prompt[:60].strip()
+            if len(prompt) > 60:
+                auto_name = auto_name.rsplit(" ", 1)[0] + "..."
+            asyncio.create_task(self._update_session_name(auto_name))  # noqa: RUF006
+
+        # Report task started to session service (fire-and-forget)
+        if self._session_context:
+            asyncio.create_task(  # noqa: RUF006
+                self._report_task_started(task_id, prompt, max_steps)
+            )
+
+        # Emit task_started event
+        if self._event_emitter:
+            self._event_emitter.emit_task_started(task_id, prompt)
+
         # Spawn the agent loop as a background asyncio task
         task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))
         self._current_task = task
@@ -586,10 +603,64 @@ class SessionManager:
                     )
 
         finally:
+            # Report task completion to session service (best-effort)
+            if self._session_context and not isinstance(assistant_text, type(None)):
+                completion_status = "completed" if assistant_text else "failed"
+                reason = "completed"
+                if self._current_step_count >= max_steps:
+                    completion_status = "failed"
+                    reason = "max_steps_exceeded"
+                await self._report_task_completed(
+                    task_id, completion_status, self._current_step_count, reason
+                )
+
             # Always upload history and persist checkpoint, even on error/cancel.
             # This ensures the user can see their conversation when they come back.
             await self._upload_history(prompt, assistant_text, task_id)
             self._persist_checkpoint()
+
+    async def _update_session_name(self, name: str) -> None:
+        """Update session name on the backend (best-effort, fire-and-forget)."""
+        if not self._session_context:
+            return
+        try:
+            await self._session_client.update_session_name(
+                self._session_context.session_id, name, auto_named=True
+            )
+        except Exception:
+            logger.warning("auto_name_update_failed", exc_info=True)
+
+    async def _report_task_started(self, task_id: str, prompt: str, max_steps: int) -> None:
+        """Report task creation to session service (best-effort)."""
+        if not self._session_context:
+            return
+        try:
+            await self._session_client.create_task(
+                self._session_context.session_id, task_id, prompt, max_steps
+            )
+        except Exception:
+            logger.warning("task_report_started_failed", task_id=task_id, exc_info=True)
+
+    async def _report_task_completed(
+        self,
+        task_id: str,
+        status: str,
+        step_count: int,
+        completion_reason: str | None = None,
+    ) -> None:
+        """Report task completion to session service (best-effort)."""
+        if not self._session_context:
+            return
+        try:
+            await self._session_client.complete_task(
+                self._session_context.session_id,
+                task_id,
+                status,
+                step_count,
+                completion_reason,
+            )
+        except Exception:
+            logger.warning("task_report_completed_failed", task_id=task_id, exc_info=True)
 
     def _persist_checkpoint(
         self,
