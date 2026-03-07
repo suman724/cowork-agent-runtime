@@ -53,13 +53,15 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - `AgentLoop` (`loop/agent_loop.py`) — thin alias for `ReactLoop` (backward compat).
 - **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
 - **Infrastructure layers inside LoopRuntime:**
-  - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload
-  - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, SpawnAgent, memory, skills) without going through PolicyEnforcer. Uses callbacks to LoopRuntime for sub-agent/skill execution.
+  - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload. Supports **parallel tool execution** via `asyncio.gather()` with intelligent grouping (read-only tools batched, writes serialized per path, shell commands always serial). Also enforces **plan mode** restrictions (filters tool definitions, denies blocked tools with `PLAN_MODE_RESTRICTED`).
+  - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, SpawnAgent, memory, skills, **EnterPlanMode**, **ExitPlanMode**) without going through PolicyEnforcer. Uses callbacks to LoopRuntime for sub-agent/skill execution.
   - `ErrorRecovery` — consecutive failure tracking, loop detection (same tool+args 3+ times), reflection/loop-break prompt injection
   - `WorkingMemory` — task tracker + plan + notes, injected as system message every turn (by ReactLoop)
+  - `VerificationConfig` (`loop/verification.py`) — post-completion self-verification. Injects verification prompt when agent first signals done, extends step budget by `max_verify_steps`, emits `verification_started`/`verification_completed` events.
   - Sub-agent spawning — `LoopRuntime.spawn_sub_agent()` creates child LoopRuntime + ReactLoop with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
   - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
-- **Context compaction** (`thread/compactor.py`) — drop-oldest with recency window, triggered at 90% of max_context_tokens.
+- **Context compaction** (`thread/compactor.py`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
+- **Prompt caching optimization** — `ReactLoop._build_messages()` orders context for LLM provider cache efficiency: stable prefix (system prompt → persistent memory → conversation history) then volatile suffix (working memory → error recovery).
 - **Custom JSON-RPC 2.0 server** (~200 lines). Newline-delimited JSON with write lock.
 - **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
 - **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
