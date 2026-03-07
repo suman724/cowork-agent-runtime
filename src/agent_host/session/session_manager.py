@@ -347,6 +347,7 @@ class SessionManager:
             retry_base_delay=self._config.llm_retry_base_delay,
             retry_max_delay=self._config.llm_retry_max_delay,
             event_emitter=self._event_emitter,
+            default_headers=self._config.llm_gateway_headers or None,
         )
 
         # Persistent memory manager (project instructions + auto-memory)
