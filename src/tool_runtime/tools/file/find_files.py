@@ -11,7 +11,7 @@ from tool_runtime.exceptions import (
 )
 from tool_runtime.output.artifacts import maybe_extract_artifact
 from tool_runtime.tools.base import BaseTool
-from tool_runtime.validation import validate_absolute_path
+from tool_runtime.validation import resolve_relative_path, validate_absolute_path
 
 if TYPE_CHECKING:
     from tool_runtime.models import ExecutionContext, RawToolOutput
@@ -76,6 +76,7 @@ class FindFilesTool(BaseTool):
             _ABSOLUTE_MAX_RESULTS,
         )
 
+        directory = resolve_relative_path(directory, context.working_directory)
         validate_absolute_path(directory)
 
         p = Path(directory)

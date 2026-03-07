@@ -97,9 +97,9 @@ class LLMClient:
                     if retry_after is not None:
                         delay = min(retry_after, self._retry_max_delay)
                     elif getattr(exc, "status_code", None) == 529:
-                        # 529 Overloaded: longer backoff (3x base)
+                        # 529 Overloaded: moderate backoff (1.5x base)
                         delay = min(
-                            self._retry_base_delay * 3 * (2**attempt),
+                            self._retry_base_delay * 1.5 * (2**attempt),
                             self._retry_max_delay,
                         )
                     else:

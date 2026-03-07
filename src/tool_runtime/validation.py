@@ -20,6 +20,21 @@ def validate_no_null_bytes(value: str, field_name: str = "input") -> None:
         raise ToolInputValidationError(f"{field_name} must not contain null bytes")
 
 
+def resolve_relative_path(path: str, working_directory: str | None) -> str:
+    """Resolve a relative path against a working directory.
+
+    If the path is already absolute, returns it unchanged.
+    If relative and a working directory is available, resolves against it.
+    If relative and no working directory, returns the path unchanged
+    (validate_absolute_path will reject it).
+    """
+    if PurePath(path).is_absolute():
+        return path
+    if working_directory:
+        return str(PurePath(working_directory) / path)
+    return path
+
+
 def validate_absolute_path(path: str) -> None:
     """Validate that a path is absolute and contains no null bytes.
 

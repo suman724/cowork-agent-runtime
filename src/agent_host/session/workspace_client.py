@@ -10,11 +10,19 @@ import httpx
 import structlog
 from cowork_platform.artifact import Artifact
 from cowork_platform.artifact_upload_request import ArtifactUploadRequest
-from cowork_platform_sdk import create_http_client, raise_for_status
+from cowork_platform_sdk import CoworkAPIError, create_http_client, raise_for_status
 from pydantic import ValidationError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from agent_host.exceptions import AgentHostError
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient transport errors and retryable API errors (5xx)."""
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, CoworkAPIError) and exc.retryable
+
 
 if TYPE_CHECKING:
     from cowork_platform.conversation_message import ConversationMessage
@@ -40,7 +48,7 @@ class WorkspaceClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def upload_artifact(

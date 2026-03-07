@@ -17,7 +17,7 @@ from tool_runtime.exceptions import (
 )
 from tool_runtime.output.artifacts import maybe_extract_artifact
 from tool_runtime.tools.base import BaseTool
-from tool_runtime.validation import validate_absolute_path
+from tool_runtime.validation import resolve_relative_path, validate_absolute_path
 
 if TYPE_CHECKING:
     from tool_runtime.models import ExecutionContext, RawToolOutput
@@ -82,6 +82,7 @@ class EditFileTool(BaseTool):
         if old_text == new_text:
             raise ToolInputValidationError("old_text and new_text are identical — no change needed")
 
+        path = resolve_relative_path(path, context.working_directory)
         validate_absolute_path(path)
         real_path = await self._platform.resolve_symlinks(path)
         validate_absolute_path(real_path)

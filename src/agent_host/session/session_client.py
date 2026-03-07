@@ -9,11 +9,24 @@ import structlog
 from cowork_platform.session_cancel_request import SessionCancelRequest  # noqa: TC002
 from cowork_platform.session_create_request import SessionCreateRequest  # noqa: TC002
 from cowork_platform.session_create_response import SessionCreateResponse
-from cowork_platform_sdk import create_http_client, raise_for_status
+from cowork_platform_sdk import CoworkAPIError, create_http_client, raise_for_status
 from pydantic import ValidationError
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
+from tenacity import (
+    retry,
+    retry_if_exception,
+    stop_after_attempt,
+    wait_exponential,
+)
 
 from agent_host.exceptions import AgentHostError
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Return True for transient transport errors and retryable API errors (5xx)."""
+    if isinstance(exc, (httpx.TransportError, httpx.TimeoutException)):
+        return True
+    return isinstance(exc, CoworkAPIError) and exc.retryable
+
 
 logger = structlog.get_logger()
 
@@ -35,7 +48,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def create_session(self, request: SessionCreateRequest) -> SessionCreateResponse:
@@ -59,7 +72,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def resume_session(self, session_id: str) -> SessionCreateResponse:
@@ -80,7 +93,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def update_session_name(
@@ -97,7 +110,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def create_task(
@@ -114,7 +127,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def complete_task(
@@ -144,7 +157,7 @@ class SessionClient:
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
-        retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
+        retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
     async def cancel_session(self, session_id: str, request: SessionCancelRequest) -> None:

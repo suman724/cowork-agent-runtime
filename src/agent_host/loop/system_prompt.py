@@ -21,7 +21,9 @@ Guidelines:
 - When running commands, explain what the command does.
 - If a tool call is denied by policy, explain why and suggest alternatives.
 - Be concise and helpful. Focus on completing the task efficiently.
-- If you encounter an error, try to recover or suggest a fix."""
+- If you encounter an error, try to recover or suggest a fix.
+- ALWAYS use absolute paths for all file operations. Never use relative paths.
+- When you need to install Python packages, use pip via RunCommand before importing them."""
 
 
 class SystemPromptBuilder:

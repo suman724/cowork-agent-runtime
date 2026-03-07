@@ -11,7 +11,7 @@ from tool_runtime.exceptions import (
 )
 from tool_runtime.models import RawToolOutput
 from tool_runtime.tools.base import BaseTool
-from tool_runtime.validation import validate_absolute_path
+from tool_runtime.validation import resolve_relative_path, validate_absolute_path
 
 if TYPE_CHECKING:
     from tool_runtime.models import ExecutionContext
@@ -62,12 +62,13 @@ class CreateDirectoryTool(BaseTool):
     async def execute(
         self,
         arguments: dict[str, Any],
-        context: ExecutionContext,  # noqa: ARG002
+        context: ExecutionContext,
     ) -> RawToolOutput:
         self.validate_input(arguments)
         path: str = arguments["path"]
         create_parents: bool = arguments.get("create_parents", True)
 
+        path = resolve_relative_path(path, context.working_directory)
         validate_absolute_path(path)
 
         # Resolve symlinks on parent directory (target may not exist yet)

@@ -13,7 +13,7 @@ from tool_runtime.exceptions import (
 )
 from tool_runtime.models import RawToolOutput
 from tool_runtime.tools.base import BaseTool
-from tool_runtime.validation import validate_absolute_path
+from tool_runtime.validation import resolve_relative_path, validate_absolute_path
 
 if TYPE_CHECKING:
     from tool_runtime.models import ExecutionContext
@@ -68,13 +68,15 @@ class MoveFileTool(BaseTool):
     async def execute(
         self,
         arguments: dict[str, Any],
-        context: ExecutionContext,  # noqa: ARG002
+        context: ExecutionContext,
     ) -> RawToolOutput:
         self.validate_input(arguments)
         source: str = arguments["source"]
         destination: str = arguments["destination"]
         overwrite: bool = arguments.get("overwrite", False)
 
+        source = resolve_relative_path(source, context.working_directory)
+        destination = resolve_relative_path(destination, context.working_directory)
         validate_absolute_path(source)
         validate_absolute_path(destination)
 
