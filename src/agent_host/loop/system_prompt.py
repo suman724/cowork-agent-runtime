@@ -26,7 +26,9 @@ Guidelines:
 - When you need to install Python packages, use pip via RunCommand before importing them.
 - For complex multi-step tasks, consider entering plan mode first (EnterPlanMode)
   to explore and create a structured plan before making changes.
-  Exit plan mode (ExitPlanMode) when ready to execute your plan."""
+  Exit plan mode (ExitPlanMode) when ready to execute your plan.
+- When following a plan, call UpdatePlanStep to mark each step as
+  in_progress when you start it and completed when you finish it."""
 
 
 class SystemPromptBuilder:

@@ -333,6 +333,22 @@ class EventEmitter:
             },
         )
 
+    def emit_plan_updated(
+        self,
+        task_id: str,
+        goal: str,
+        steps: list[dict[str, Any]],
+    ) -> None:
+        """Emit plan_updated event when the agent creates or updates a plan."""
+        self.emit(
+            EventType.PLAN_UPDATED,
+            task_id=task_id,
+            payload={
+                "goal": goal,
+                "steps": steps,
+            },
+        )
+
     def emit_verification_started(self, task_id: str) -> None:
         """Emit verification_started event when verification phase begins."""
         self.emit(EventType.VERIFICATION_STARTED, task_id=task_id)
