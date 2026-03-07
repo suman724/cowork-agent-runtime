@@ -245,6 +245,21 @@ class LoopRuntime:
                 task_id, dropped, pre_count, post_count, step_id=step_id
             )
 
+    def emit_plan_mode_changed(self, task_id: str, plan_mode: bool, source: str) -> None:
+        """Emit plan_mode_changed event."""
+        if self._event_emitter:
+            self._event_emitter.emit_plan_mode_changed(task_id, plan_mode, source)
+
+    def emit_verification_started(self, task_id: str) -> None:
+        """Emit verification_started event."""
+        if self._event_emitter:
+            self._event_emitter.emit_verification_started(task_id)
+
+    def emit_verification_completed(self, task_id: str, *, passed: bool) -> None:
+        """Emit verification_completed event."""
+        if self._event_emitter:
+            self._event_emitter.emit_verification_completed(task_id, passed=passed)
+
     # ── Checkpoint ──────────────────────────────────────────────
 
     async def on_step_complete(self, task_id: str, step: int) -> None:

@@ -63,6 +63,10 @@ class AgentHostConfig:
     memory_max_file_size: int = 102_400  # 100 KB per memory file
     memory_max_file_count: int = 50  # Max memory files per workspace
     llm_gateway_headers: dict[str, str] = field(default_factory=dict)
+    verification_enabled: bool = True
+    verification_max_steps: int = 3
+    compaction_strategy: str = "hybrid"  # "drop_oldest" | "hybrid"
+    compaction_llm_summary: bool = True  # enable LLM summarization phase
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -108,6 +112,12 @@ class AgentHostConfig:
             memory_max_file_size=int(os.environ.get("MEMORY_MAX_FILE_SIZE", "102400")),
             memory_max_file_count=int(os.environ.get("MEMORY_MAX_FILE_COUNT", "50")),
             llm_gateway_headers=_parse_headers(os.environ.get("LLM_GATEWAY_HEADERS", "")),
+            verification_enabled=os.environ.get("VERIFICATION_ENABLED", "true").lower()
+            in ("true", "1", "yes"),
+            verification_max_steps=int(os.environ.get("VERIFICATION_MAX_STEPS", "3")),
+            compaction_strategy=os.environ.get("COMPACTION_STRATEGY", "hybrid"),
+            compaction_llm_summary=os.environ.get("COMPACTION_LLM_SUMMARY", "true").lower()
+            in ("true", "1", "yes"),
         )
 
 

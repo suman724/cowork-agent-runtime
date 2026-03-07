@@ -316,3 +316,36 @@ class EventEmitter:
             task_id=task_id,
             severity="warning",
         )
+
+    def emit_plan_mode_changed(
+        self,
+        task_id: str,
+        plan_mode: bool,
+        source: str = "agent",
+    ) -> None:
+        """Emit plan_mode_changed event when plan mode state changes."""
+        self.emit(
+            EventType.PLAN_MODE_CHANGED,
+            task_id=task_id,
+            payload={
+                "planMode": plan_mode,
+                "source": source,
+            },
+        )
+
+    def emit_verification_started(self, task_id: str) -> None:
+        """Emit verification_started event when verification phase begins."""
+        self.emit(EventType.VERIFICATION_STARTED, task_id=task_id)
+
+    def emit_verification_completed(
+        self,
+        task_id: str,
+        *,
+        passed: bool = True,
+    ) -> None:
+        """Emit verification_completed event when verification phase ends."""
+        self.emit(
+            EventType.VERIFICATION_COMPLETED,
+            task_id=task_id,
+            payload={"passed": passed},
+        )

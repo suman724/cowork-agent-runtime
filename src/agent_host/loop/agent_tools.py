@@ -20,6 +20,8 @@ AGENT_TOOL_NAMES = {
     "RecallMemory",
     "ListMemories",
     "DeleteMemory",
+    "EnterPlanMode",
+    "ExitPlanMode",
 }
 
 
@@ -37,6 +39,9 @@ class AgentToolHandler:
         memory_manager: MemoryManager | None = None,
         spawn_sub_agent: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         execute_skill: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        on_plan_mode_changed: Callable[[bool, str], None] | None = None,
+        plan_mode: bool = False,
+        plan_mode_locked: bool = False,
     ) -> None:
         self._working_memory = working_memory
         self._skills = {s.name: s for s in (skills or [])}
@@ -44,6 +49,9 @@ class AgentToolHandler:
         self._memory_manager = memory_manager
         self._spawn_sub_agent = spawn_sub_agent
         self._execute_skill = execute_skill
+        self._on_plan_mode_changed = on_plan_mode_changed
+        self._plan_mode = plan_mode
+        self._plan_mode_locked = plan_mode_locked
 
     def is_agent_tool(self, name: str) -> bool:
         """Check if a tool name is an agent-internal tool or a skill."""
@@ -57,6 +65,10 @@ class AgentToolHandler:
             return self._handle_task_tracker(arguments)
         if tool_name == "CreatePlan":
             return self._handle_create_plan(arguments)
+        if tool_name == "EnterPlanMode":
+            return self._handle_enter_plan_mode()
+        if tool_name == "ExitPlanMode":
+            return self._handle_exit_plan_mode()
         if tool_name == "SpawnAgent":
             return await self._handle_spawn_agent(arguments)
         if tool_name == "SaveMemory":
@@ -135,6 +147,35 @@ class AgentToolHandler:
                 },
             },
         ]
+        # Plan mode tools
+        defs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "EnterPlanMode",
+                    "description": (
+                        "Switch to plan mode. In plan mode, only read-only tools "
+                        "are available. Use this to explore and analyze before "
+                        "making changes. Call ExitPlanMode when ready to execute."
+                    ),
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+        defs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": "ExitPlanMode",
+                    "description": (
+                        "Exit plan mode and switch to execution mode with all "
+                        "tools available. Call this after creating your plan."
+                    ),
+                    "parameters": {"type": "object", "properties": {}},
+                },
+            }
+        )
+
         # Add memory tools if memory_manager is configured
         if self._memory_manager:
             defs.extend(
@@ -324,6 +365,31 @@ class AgentToolHandler:
             "message": f"Plan created with {len(steps)} steps",
             "goal": goal,
         }
+
+    def _handle_enter_plan_mode(self) -> dict[str, Any]:
+        """Handle EnterPlanMode tool calls."""
+        if self._plan_mode_locked and self._plan_mode:
+            return {"status": "noop", "message": "Already in hard plan-only mode"}
+        if self._plan_mode:
+            return {"status": "noop", "message": "Already in plan mode", "planMode": True}
+        self._plan_mode = True
+        if self._on_plan_mode_changed:
+            self._on_plan_mode_changed(True, "agent")
+        return {"status": "success", "planMode": True}
+
+    def _handle_exit_plan_mode(self) -> dict[str, Any]:
+        """Handle ExitPlanMode tool calls."""
+        if self._plan_mode_locked:
+            return {
+                "status": "error",
+                "message": "Cannot exit plan-only mode (set by user)",
+            }
+        if not self._plan_mode:
+            return {"status": "noop", "message": "Not in plan mode", "planMode": False}
+        self._plan_mode = False
+        if self._on_plan_mode_changed:
+            self._on_plan_mode_changed(False, "agent")
+        return {"status": "success", "planMode": False}
 
     async def _handle_spawn_agent(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle SpawnAgent tool calls."""
