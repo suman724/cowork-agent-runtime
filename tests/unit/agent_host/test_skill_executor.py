@@ -1,15 +1,16 @@
-"""Tests for SkillExecutor — execute skills as focused sub-conversations."""
+"""Tests for skill execution via LoopRuntime.execute_skill()."""
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from agent_host.budget.token_budget import TokenBudget
 from agent_host.llm.models import LLMResponse
+from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.models import ToolCallResult
 from agent_host.policy.policy_enforcer import PolicyEnforcer
 from agent_host.skills.models import SkillDefinition
-from agent_host.skills.skill_executor import SkillExecutor
 from tests.fixtures.mock_llm import MockLLMClient
 from tests.fixtures.policy_bundles import make_policy_bundle
 
@@ -36,14 +37,17 @@ def _make_skill(
     )
 
 
-def _make_skill_executor(
+def _make_loop_runtime(
     mock_llm: MockLLMClient | None = None,
     max_context_tokens: int = 100_000,
-) -> SkillExecutor:
-    """Build a SkillExecutor with test components."""
+) -> LoopRuntime:
+    """Build a LoopRuntime for testing skill execution."""
     if mock_llm is None:
         mock_llm = MockLLMClient()
         mock_llm.enqueue_text("Skill completed successfully.")
+
+    from agent_host.thread.compactor import DropOldestCompactor
+    from agent_host.thread.message_thread import MessageThread
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)
@@ -53,11 +57,18 @@ def _make_skill_executor(
     tool_executor.get_tool_definitions.return_value = []
     tool_executor.execute_tool_calls = AsyncMock(return_value=[])
 
-    return SkillExecutor(
+    thread = MessageThread(system_prompt="test")
+    compactor = DropOldestCompactor(recency_window=10)
+
+    return LoopRuntime(
         llm_client=mock_llm,  # type: ignore[arg-type]
         tool_executor=tool_executor,
+        thread=thread,
+        compactor=compactor,
         policy_enforcer=enforcer,
         token_budget=budget,
+        event_emitter=None,
+        cancellation_event=asyncio.Event(),
         max_context_tokens=max_context_tokens,
     )
 
@@ -67,10 +78,10 @@ class TestSkillExecution:
         """Skill should complete a simple task."""
         mock = MockLLMClient()
         mock.enqueue_text("Found 3 matches in the codebase.")
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill()
 
-        result = await executor.execute(
+        result = await runtime.execute_skill(
             skill=skill,
             arguments={"query": "find auth endpoints"},
             parent_task_id="task-1",
@@ -87,7 +98,7 @@ class TestSkillExecution:
         mock.enqueue_tool_call("ReadFile", {"path": "/src/main.py"})
         mock.enqueue_text("File contains the auth handler.")
 
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
 
         tool_result = ToolCallResult(
             tool_call_id="tc-1",
@@ -99,10 +110,10 @@ class TestSkillExecution:
         async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
-        executor._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        runtime._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         skill = _make_skill()
-        result = await executor.execute(
+        result = await runtime.execute_skill(
             skill=skill,
             arguments={"query": "read auth file"},
             parent_task_id="task-1",
@@ -115,12 +126,12 @@ class TestSkillExecution:
         """Skill with prompt_content should include it in system prompt."""
         mock = MockLLMClient()
         mock.enqueue_text("Search complete.")
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill(
             prompt_content="Focus on Python files only.",
         )
 
-        await executor.execute(
+        await runtime.execute_skill(
             skill=skill,
             arguments={"query": "test"},
             parent_task_id="task-1",
@@ -136,12 +147,12 @@ class TestSkillExecution:
         """$ARGUMENTS placeholders should be substituted in prompt_content."""
         mock = MockLLMClient()
         mock.enqueue_text("Done.")
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill(
             prompt_content="Search for $ARGUMENTS[0] in the codebase.",
         )
 
-        await executor.execute(
+        await runtime.execute_skill(
             skill=skill,
             arguments={"query": "authentication"},
             parent_task_id="task-1",
@@ -156,10 +167,10 @@ class TestSkillExecution:
         """Results longer than 4K chars should be truncated."""
         mock = MockLLMClient()
         mock.enqueue_text("x" * 8000)
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill()
 
-        result = await executor.execute(
+        result = await runtime.execute_skill(
             skill=skill,
             arguments={"query": "generate long output"},
             parent_task_id="task-1",
@@ -172,10 +183,10 @@ class TestSkillExecution:
         """Skill should handle errors gracefully."""
         mock = MockLLMClient()
         mock.enqueue(RuntimeError("LLM gateway timeout"))
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill()
 
-        result = await executor.execute(
+        result = await runtime.execute_skill(
             skill=skill,
             arguments={"query": "fail"},
             parent_task_id="task-1",
@@ -189,11 +200,10 @@ class TestSkillExecution:
     async def test_max_steps_enforcement(self) -> None:
         """Skill should respect its max_steps limit."""
         mock = MockLLMClient()
-        # Queue more tool calls than max_steps allows
         for i in range(20):
             mock.enqueue_tool_call("ReadFile", {"path": f"/{i}"}, tool_call_id=f"tc-{i}")
 
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
 
         async def mock_execute(calls, task_id, **kwargs):
             return [
@@ -205,11 +215,10 @@ class TestSkillExecution:
                 )
             ]
 
-        executor._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        runtime._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
-        # Skill with max_steps=5
         skill = _make_skill(max_steps=5)
-        result = await executor.execute(
+        result = await runtime.execute_skill(
             skill=skill,
             arguments={"query": "many steps"},
             parent_task_id="task-1",
@@ -222,46 +231,20 @@ class TestSkillExecution:
         """Task ID should include parent task ID and skill name."""
         mock = MockLLMClient()
         mock.enqueue_text("Done.")
-        executor = _make_skill_executor(mock)
+        runtime = _make_loop_runtime(mock)
         skill = _make_skill(name="search_codebase")
 
-        await executor.execute(
+        await runtime.execute_skill(
             skill=skill,
             arguments={"query": "test"},
             parent_task_id="parent-123",
         )
 
-        # The AgentLoop receives the task_id — verify via LLM call log
-        # The task_id is passed to loop.run(), which passes it to stream_chat
         call = mock.call_log[0]
         assert call["task_id"] == "parent-123-skill-search_codebase"
 
 
-class TestSkillArgumentFormatting:
-    def test_format_single_argument(self) -> None:
-        """Should format a single argument."""
-        skill = _make_skill()
-        result = SkillExecutor._format_arguments(skill, {"query": "find auth"})
-        assert "query: find auth" in result
-        assert "test_skill" in result
-
-    def test_format_multiple_arguments(self) -> None:
-        """Should format multiple arguments."""
-        skill = _make_skill()
-        result = SkillExecutor._format_arguments(
-            skill, {"query": "search", "file_path": "/src/main.py"}
-        )
-        assert "query: search" in result
-        assert "file_path: /src/main.py" in result
-
-    def test_format_empty_arguments(self) -> None:
-        """Should handle empty arguments."""
-        skill = _make_skill()
-        result = SkillExecutor._format_arguments(skill, {})
-        assert "test_skill" in result
-
-
-class TestSkillExecutorTokenBudget:
+class TestSkillExecutionTokenBudget:
     async def test_shared_token_budget(self) -> None:
         """Skill should use the shared token budget."""
         mock = MockLLMClient()
@@ -269,22 +252,11 @@ class TestSkillExecutorTokenBudget:
             LLMResponse(text="Done", stop_reason="stop", input_tokens=100, output_tokens=50)
         )
 
-        bundle = make_policy_bundle()
-        enforcer = PolicyEnforcer(bundle)
-        budget = TokenBudget(max_session_tokens=100_000)
-
-        tool_executor = MagicMock()
-        tool_executor.get_tool_definitions.return_value = []
-
-        executor = SkillExecutor(
-            llm_client=mock,  # type: ignore[arg-type]
-            tool_executor=tool_executor,
-            policy_enforcer=enforcer,
-            token_budget=budget,
-        )
+        runtime = _make_loop_runtime(mock)
+        budget = runtime.token_budget
 
         skill = _make_skill()
-        await executor.execute(
+        await runtime.execute_skill(
             skill=skill,
             arguments={"query": "test"},
             parent_task_id="task-1",

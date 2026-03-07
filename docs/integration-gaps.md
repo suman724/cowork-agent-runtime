@@ -94,9 +94,9 @@ Modules exist (`WorkingMemory`, `TaskTracker`, `Plan`) but working memory is nev
 
 ### Sub-Agents Not Callable (Wave 6)
 
-`SubAgentManager` exists but `SpawnAgent` is not in `AgentToolHandler.AGENT_TOOL_NAMES`. The loop doesn't instantiate a `SubAgentManager`.
+`SubAgentManager` existed but `SpawnAgent` was not in `AgentToolHandler.AGENT_TOOL_NAMES`. The loop didn't instantiate a `SubAgentManager`.
 
-**Fix:** Register `SpawnAgent` in `AgentToolHandler`. Pass `SubAgentManager` to `AgentToolHandler` and `AgentLoop`. Wire `SessionManager.start_task()` to create `SubAgentManager`.
+**Fix:** `SubAgentManager` was absorbed into `LoopRuntime.spawn_sub_agent()` as part of the Loop Strategy refactor. `SpawnAgent` is registered in `AgentToolHandler` and delegates to `LoopRuntime`.
 
 **Status:** DONE
 
@@ -104,8 +104,18 @@ Modules exist (`WorkingMemory`, `TaskTracker`, `Plan`) but working memory is nev
 
 ### Skills Not Loaded or Callable (Wave 7)
 
-`SkillLoader` and `SkillExecutor` exist but `SessionManager` doesn't load skills during `create_session()`. Skills are not registered as available tools.
+`SkillLoader` and `SkillExecutor` existed but `SessionManager` didn't load skills during `create_session()`. Skills were not registered as available tools.
 
-**Fix:** Load skills in `SessionManager.create_session()`. Register skill tool definitions in `AgentLoop` alongside agent-internal tools.
+**Fix:** `SkillExecutor` was absorbed into `LoopRuntime.execute_skill()` as part of the Loop Strategy refactor. Skills are loaded in `SessionManager.create_session()` and registered as agent-internal tools in `AgentToolHandler`, which delegates to `LoopRuntime`.
+
+**Status:** DONE
+
+---
+
+### Loop Strategy Refactor (Architecture)
+
+Monolithic `AgentLoop` mixed orchestration, context assembly, and infrastructure. Made it impossible to experiment with alternative strategies.
+
+**Fix:** Decomposed into three layers: `LoopRuntime` (infrastructure primitives), `LoopStrategy` protocol (orchestration), `ReactLoop` (default strategy). `AgentLoop` is now a thin alias for `ReactLoop`. `SubAgentManager` and `SkillExecutor` absorbed into `LoopRuntime`. See `cowork-infra/docs/components/loop-strategy.md`.
 
 **Status:** DONE

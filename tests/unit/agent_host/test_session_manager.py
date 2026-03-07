@@ -77,7 +77,7 @@ class TestRunAgentExceptionHandling:
         sm = _make_session_manager()
 
         # Make AgentLoop.run raise PolicyExpiredError
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = PolicyExpiredError("Policy has expired")
             mock_loop_cls.return_value = mock_loop
@@ -92,7 +92,7 @@ class TestRunAgentExceptionHandling:
         """CheckpointError triggers emit_session_failed (session-level)."""
         sm = _make_session_manager()
 
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = CheckpointError("Checkpoint corrupt")
             mock_loop_cls.return_value = mock_loop
@@ -110,7 +110,7 @@ class TestRunAgentExceptionHandling:
         class FakeRateLimitError(Exception):
             status_code = 429
 
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = FakeRateLimitError("rate limited")
             mock_loop_cls.return_value = mock_loop
@@ -133,7 +133,7 @@ class TestRunAgentExceptionHandling:
         class FakeOverloadedError(Exception):
             status_code = 529
 
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = FakeOverloadedError("overloaded")
             mock_loop_cls.return_value = mock_loop
@@ -150,7 +150,7 @@ class TestRunAgentExceptionHandling:
         """A non-transient error (e.g. ValueError) emits task_failed without LLM enrichment."""
         sm = _make_session_manager()
 
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = ValueError("bad value")
             mock_loop_cls.return_value = mock_loop
@@ -170,7 +170,7 @@ class TestRunAgentExceptionHandling:
         """asyncio.CancelledError should not emit any failure events."""
         sm = _make_session_manager()
 
-        with patch("agent_host.session.session_manager.AgentLoop") as mock_loop_cls:
+        with patch("agent_host.session.session_manager.ReactLoop") as mock_loop_cls:
             mock_loop = AsyncMock()
             mock_loop.run.side_effect = asyncio.CancelledError()
             mock_loop_cls.return_value = mock_loop

@@ -30,8 +30,9 @@ from agent_host.exceptions import (
     SessionNotFoundError,
 )
 from agent_host.llm.client import LLMClient
-from agent_host.loop.agent_loop import AgentLoop
-from agent_host.loop.sub_agent import SubAgentManager
+from agent_host.loop.agent_tools import AgentToolHandler
+from agent_host.loop.loop_runtime import LoopRuntime
+from agent_host.loop.react_loop import ReactLoop
 from agent_host.loop.system_prompt import SystemPromptBuilder
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
 from agent_host.memory.memory_manager import MemoryManager
@@ -41,7 +42,6 @@ from agent_host.policy.policy_enforcer import PolicyEnforcer
 from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
-from agent_host.skills.skill_executor import SkillExecutor
 from agent_host.skills.skill_loader import SkillLoader
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
@@ -513,26 +513,15 @@ class SessionManager:
             if not self._working_memory:
                 self._working_memory = WorkingMemory()
 
-            # Sub-agent manager (for SpawnAgent tool)
-            sub_agent_manager = SubAgentManager(
-                llm_client=self._llm_client,
-                tool_executor=tool_executor,
-                policy_enforcer=self._policy_enforcer,
-                token_budget=self._token_budget,
-                max_context_tokens=self._max_context_tokens,
+            # Agent-internal tool handler (TaskTracker, CreatePlan, SpawnAgent, memory, skills)
+            agent_tool_handler = AgentToolHandler(
+                self._working_memory,
+                skills=self._skills,
+                memory_manager=self._memory_manager,
             )
 
-            # Skill executor (for skill tools)
-            skill_executor = SkillExecutor(
-                llm_client=self._llm_client,
-                tool_executor=tool_executor,
-                policy_enforcer=self._policy_enforcer,
-                token_budget=self._token_budget,
-                max_context_tokens=self._max_context_tokens,
-            )
-
-            # Build and run agent loop
-            loop = AgentLoop(
+            # Build LoopRuntime + ReactLoop
+            loop_runtime = LoopRuntime(
                 llm_client=self._llm_client,
                 tool_executor=tool_executor,
                 thread=self._thread,
@@ -541,17 +530,16 @@ class SessionManager:
                 token_budget=self._token_budget,
                 event_emitter=self._event_emitter,
                 cancellation_event=self._cancel_event,
-                max_steps=max_steps,
                 max_context_tokens=self._max_context_tokens,
                 working_memory=self._working_memory,
-                sub_agent_manager=sub_agent_manager,
-                skill_executor=skill_executor,
-                skills=self._skills,
-                on_step_complete=self._on_step_complete,
                 memory_manager=self._memory_manager,
+                agent_tool_handler=agent_tool_handler,
+                on_step_complete=self._on_step_complete,
+                skills=self._skills,
             )
 
-            result = await loop.run(task_id)
+            strategy = ReactLoop(loop_runtime, max_steps=max_steps)
+            result = await strategy.run(task_id)
 
             # Track step count for get_session_state
             self._current_step_count = result.step_count
@@ -699,7 +687,7 @@ class SessionManager:
         self._checkpoint_manager.save(checkpoint)
 
     async def _on_step_complete(self, task_id: str, step: int) -> None:
-        """Callback invoked by AgentLoop after each completed step.
+        """Callback invoked by the loop strategy after each completed step.
 
         1. Write local checkpoint with active task state (always)
         2. Every N steps, sync history to workspace (best-effort)
