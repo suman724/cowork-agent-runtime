@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import platform
 from dataclasses import dataclass, field
@@ -61,6 +62,7 @@ class AgentHostConfig:
     workspace_sync_interval: int = 5  # Sync to workspace every N steps (0 = disabled)
     memory_max_file_size: int = 102_400  # 100 KB per memory file
     memory_max_file_count: int = 50  # Max memory files per workspace
+    llm_gateway_headers: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -105,4 +107,22 @@ class AgentHostConfig:
             workspace_sync_interval=int(os.environ.get("WORKSPACE_SYNC_INTERVAL", "5")),
             memory_max_file_size=int(os.environ.get("MEMORY_MAX_FILE_SIZE", "102400")),
             memory_max_file_count=int(os.environ.get("MEMORY_MAX_FILE_COUNT", "50")),
+            llm_gateway_headers=_parse_headers(os.environ.get("LLM_GATEWAY_HEADERS", "")),
         )
+
+
+def _parse_headers(raw: str) -> dict[str, str]:
+    """Parse LLM_GATEWAY_HEADERS env var (JSON object, e.g. '{"X-Custom": "value"}')."""
+    if not raw.strip():
+        return {}
+    try:
+        parsed: dict[str, str] = json.loads(raw)
+    except (json.JSONDecodeError, TypeError) as exc:
+        msg = f"LLM_GATEWAY_HEADERS must be valid JSON: {exc}"
+        raise ValueError(msg) from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
+    ):
+        msg = "LLM_GATEWAY_HEADERS must be a JSON object with string keys and values"
+        raise ValueError(msg)
+    return parsed

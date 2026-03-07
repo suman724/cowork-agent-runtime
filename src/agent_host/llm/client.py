@@ -45,12 +45,14 @@ class LLMClient:
         retry_max_delay: float = 30.0,
         timeout: float = 120.0,
         event_emitter: EventEmitter | None = None,
+        default_headers: dict[str, str] | None = None,
     ) -> None:
         self._client = AsyncOpenAI(
             base_url=endpoint,
             api_key=auth_token,
             timeout=timeout,
             max_retries=0,  # We handle retries ourselves
+            default_headers=default_headers or {},
         )
         # Strip LiteLLM-style provider prefix (e.g. "openai/gpt-4o" → "gpt-4o")
         self._model = model.split("/", 1)[-1] if "/" in model else model
