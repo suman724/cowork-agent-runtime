@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from pathlib import Path
@@ -51,6 +52,31 @@ _FILE_MOVE_TOOLS = {"MoveFile"}
 # Maximum length for tool output stored in history messages
 _MAX_TOOL_OUTPUT_LENGTH = 4000
 
+# Tools safe to run in parallel (read-only, no side effects)
+_PARALLELIZABLE_TOOLS = {
+    "ReadFile",
+    "ListDirectory",
+    "FindFiles",
+    "GrepFiles",
+    "ViewImage",
+    "FetchUrl",
+    "WebSearch",
+}
+
+# File.Write tools that are parallelizable if targeting different paths
+_PARALLEL_IF_DIFFERENT_PATH = {"WriteFile", "EditFile", "MultiEdit"}
+
+# Tools allowed in plan mode (read-only exploration)
+PLAN_MODE_ALLOWED_TOOLS = {
+    "ReadFile",
+    "ListDirectory",
+    "FindFiles",
+    "GrepFiles",
+    "ViewImage",
+    "FetchUrl",
+    "WebSearch",
+}
+
 
 class ToolExecutor:
     """Executes tool calls with policy enforcement, approval, file tracking, and artifacts.
@@ -70,6 +96,8 @@ class ToolExecutor:
         session_id: str = "",
         workspace_id: str = "",
         approval_timeout: float = 300.0,
+        plan_mode: bool = False,
+        plan_mode_locked: bool = False,
     ) -> None:
         self._tool_router = tool_router
         self._policy_enforcer = policy_enforcer
@@ -81,6 +109,23 @@ class ToolExecutor:
         self._session_id = session_id
         self._workspace_id = workspace_id
         self._approval_timeout = approval_timeout
+        self._plan_mode = plan_mode
+        self._plan_mode_locked = plan_mode_locked
+
+    @property
+    def plan_mode(self) -> bool:
+        """Whether plan mode is currently active."""
+        return self._plan_mode
+
+    @plan_mode.setter
+    def plan_mode(self, value: bool) -> None:
+        if not self._plan_mode_locked:
+            self._plan_mode = value
+
+    @property
+    def plan_mode_locked(self) -> bool:
+        """Whether plan mode is hard-locked (planOnly=true)."""
+        return self._plan_mode_locked
 
     async def execute_tool_calls(
         self,
@@ -88,7 +133,10 @@ class ToolExecutor:
         task_id: str,
         step_id: str = "",
     ) -> list[ToolCallResult]:
-        """Execute tool calls sequentially.
+        """Execute tool calls with parallel grouping.
+
+        Safe-to-parallelize tools (reads, fetches) run concurrently within groups.
+        Non-parallelizable tools (writes, shell, deletes) serialize as barriers.
 
         Per call:
         1. Policy check (reuses PolicyEnforcer.check_tool_call)
@@ -99,11 +147,53 @@ class ToolExecutor:
         6. Artifact upload (fire-and-forget, reuses WorkspaceClient)
         7. Emit tool_completed event
         """
+        groups = self._partition_parallel_groups(calls)
         results: list[ToolCallResult] = []
-        for call in calls:
-            result = await self._execute_single(call, task_id, step_id=step_id)
-            results.append(result)
+
+        for group in groups:
+            if len(group) == 1:
+                results.append(await self._execute_single(group[0], task_id, step_id=step_id))
+            else:
+                group_results = await asyncio.gather(
+                    *(self._execute_single(c, task_id, step_id=step_id) for c in group)
+                )
+                results.extend(group_results)
+
         return results
+
+    def _partition_parallel_groups(
+        self, calls: list[ToolCallMessage]
+    ) -> list[list[ToolCallMessage]]:
+        """Partition tool calls into ordered groups for parallel/serial execution."""
+        groups: list[list[ToolCallMessage]] = []
+        current_batch: list[ToolCallMessage] = []
+        current_batch_paths: set[str] = set()
+
+        for call in calls:
+            if call.name in _PARALLELIZABLE_TOOLS:
+                current_batch.append(call)
+            elif call.name in _PARALLEL_IF_DIFFERENT_PATH:
+                path = call.arguments.get("path", "")
+                if path and path not in current_batch_paths:
+                    current_batch.append(call)
+                    current_batch_paths.add(path)
+                else:
+                    if current_batch:
+                        groups.append(current_batch)
+                        current_batch = []
+                        current_batch_paths = set()
+                    groups.append([call])
+            else:
+                if current_batch:
+                    groups.append(current_batch)
+                    current_batch = []
+                    current_batch_paths = set()
+                groups.append([call])
+
+        if current_batch:
+            groups.append(current_batch)
+
+        return groups
 
     async def _execute_single(
         self,
@@ -115,6 +205,39 @@ class ToolExecutor:
         tool_name = call.name
         arguments = call.arguments
         capability_name = TOOL_CAPABILITY_MAP.get(tool_name, "")
+
+        # Plan mode enforcement — block write/exec tools
+        if self._plan_mode and tool_name not in PLAN_MODE_ALLOWED_TOOLS:
+            logger.info("tool_blocked_plan_mode", tool_name=tool_name)
+            if self._event_emitter:
+                self._event_emitter.emit_tool_requested(
+                    tool_name, capability_name, arguments, tool_call_id=call.id
+                )
+                self._event_emitter.emit_tool_completed(
+                    tool_name,
+                    "denied",
+                    tool_call_id=call.id,
+                    error="Blocked in plan mode",
+                )
+            denial_msg = json.dumps(
+                {
+                    "status": "denied",
+                    "error": {
+                        "code": "PLAN_MODE_RESTRICTED",
+                        "message": (
+                            f"{tool_name} is not available in plan mode. "
+                            "Call ExitPlanMode first to enable write operations."
+                        ),
+                    },
+                }
+            )
+            return ToolCallResult(
+                tool_call_id=call.id,
+                tool_name=tool_name,
+                status="denied",
+                result_text=denial_msg,
+                arguments=arguments,
+            )
 
         # 1. Policy check
         if capability_name:
@@ -406,10 +529,13 @@ class ToolExecutor:
                 )
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Return OpenAI-format tool definitions for LLM request."""
+        """Return OpenAI-format tool definitions, filtered for plan mode if active."""
         tool_defs: list[dict[str, Any]] = []
         for tool_def in self._tool_router.get_available_tools():
-            # Build OpenAI function tool format
+            # Filter out write/exec tools in plan mode
+            if self._plan_mode and tool_def.toolName not in PLAN_MODE_ALLOWED_TOOLS:
+                continue
+
             fn_def: dict[str, Any] = {
                 "type": "function",
                 "function": {

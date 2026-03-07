@@ -119,3 +119,21 @@ class MemoryManager:
         """Handle ListMemories tool call."""
         files = await asyncio.to_thread(self._persistent_memory.list_files)
         return {"status": "success", "files": files}
+
+    def get_verification_instructions(self) -> str:
+        """Extract verification instructions from COWORK.md if present.
+
+        Looks for a ``## Verification`` section in the project instructions.
+        """
+        if not self._project_instructions:
+            return ""
+        marker = "## Verification"
+        idx = self._project_instructions.find(marker)
+        if idx < 0:
+            return ""
+        # Extract everything from the marker to the next ## heading or EOF
+        section = self._project_instructions[idx + len(marker) :]
+        next_heading = section.find("\n## ")
+        if next_heading >= 0:
+            section = section[:next_heading]
+        return section.strip()

@@ -14,6 +14,7 @@ from agent_host.thread.token_counter import estimate_message_tokens
 if TYPE_CHECKING:
     from agent_host.llm.models import ToolCallMessage
     from agent_host.loop.loop_runtime import LoopRuntime
+    from agent_host.loop.verification import VerificationConfig
 
 logger = structlog.get_logger()
 
@@ -22,20 +23,28 @@ class ReactLoop:
     """Linear ReAct loop: LLM -> tools -> repeat until done.
 
     Context assembly:
-    - Persistent memory (MEMORY.md) injected after system prompt every turn
-    - Working memory (task tracker + plan + notes) injected after persistent memory
-    - Context compaction at 90% of max_context_tokens minus injection overhead
+    - System prompt (stable prefix, set at session start)
+    - Persistent memory (MEMORY.md) injected after system prompt (semi-stable)
+    - Conversation history (grows, prefix is stable for caching)
+    - Working memory (task tracker + plan + notes) appended at end (volatile)
     - Error recovery prompts appended when loop detection or reflection triggers fire
     """
 
-    def __init__(self, harness: LoopRuntime, max_steps: int = 50) -> None:
+    def __init__(
+        self,
+        harness: LoopRuntime,
+        max_steps: int = 50,
+        verification: VerificationConfig | None = None,
+    ) -> None:
         self._h = harness
         self._max_steps = max_steps
+        self._verification = verification
 
     async def run(self, task_id: str) -> LoopResult:
         """Run the agent loop for a single task."""
         step = 0
         last_text = ""
+        verification_injected = False
 
         while step < self._max_steps:
             step_id = self._h.new_step_id()
@@ -78,6 +87,27 @@ class ReactLoop:
             if step == warning_threshold:
                 self._h.emit_step_limit_approaching(task_id, step, self._max_steps)
 
+            # 6. Natural termination (checked BEFORE hard limit so verification
+            #    can extend the step budget)
+            if not response.tool_calls and response.stop_reason == "stop":
+                # Verification phase: inject verification prompt on first completion
+                if self._verification and self._verification.enabled and not verification_injected:
+                    verification_injected = True
+                    self._max_steps += self._verification.max_verify_steps
+                    prompt = self._verification.build_prompt()
+                    self._h.thread.add_system_injection(prompt)
+                    self._h.emit_verification_started(task_id)
+                    continue  # Re-enter loop so LLM can verify
+
+                # Agent confirmed completion (post-verification or no verification)
+                if verification_injected:
+                    self._h.emit_verification_completed(task_id, passed=True)
+                return LoopResult(
+                    reason="completed",
+                    text=last_text,
+                    step_count=step,
+                )
+
             # Hard limit
             if step >= self._max_steps:
                 self._h.emit_task_failed(task_id, f"Step limit reached ({step}/{self._max_steps})")
@@ -93,14 +123,6 @@ class ReactLoop:
                     step_count=step,
                 )
 
-            # 6. Natural termination
-            if not response.tool_calls and response.stop_reason == "stop":
-                return LoopResult(
-                    reason="completed",
-                    text=last_text,
-                    step_count=step,
-                )
-
             # 7. Execute tool calls
             await self._execute_tools(response.tool_calls, task_id, step_id)
 
@@ -110,22 +132,31 @@ class ReactLoop:
         return LoopResult(reason="max_steps_exceeded", text=last_text, step_count=step)
 
     def _build_messages(self, task_id: str, step: int, step_id: str) -> list[dict[str, object]]:
-        """Assemble LLM context: memory + working memory + compaction + error recovery."""
-        injection_overhead = 0
-        injections: list[str] = []
+        """Assemble LLM context optimized for prompt caching.
 
-        # Persistent memory (MEMORY.md)
+        Ordering (stable prefix first, volatile last):
+        1. System prompt (stable — never changes mid-task)
+        2. Persistent memory (semi-stable — changes only on SaveMemory)
+        3. Conversation history (grows but prefix is stable)
+        4. Working memory (volatile — changes every turn, at the END)
+        5. Error recovery prompts (conditional — at the very end)
+        """
+        injection_overhead = 0
+        persistent_memory_text: str | None = None
+        working_memory_text: str | None = None
+
+        # Persistent memory (MEMORY.md) — semi-stable
         if self._h.memory_manager:
             mem = self._h.memory_manager.render_memory_context()
             if mem:
-                injections.append(mem)
+                persistent_memory_text = mem
                 injection_overhead += estimate_message_tokens({"role": "system", "content": mem})
 
-        # Working memory (task tracker + plan + notes)
+        # Working memory (task tracker + plan + notes) — volatile
         if self._h.working_memory:
             wm = self._h.working_memory.render()
             if wm:
-                injections.append(wm)
+                working_memory_text = wm
                 injection_overhead += estimate_message_tokens({"role": "system", "content": wm})
 
         # Compact conversation history
@@ -134,12 +165,9 @@ class ReactLoop:
         messages = self._h.thread.build_llm_payload(compaction_budget, self._h.compactor)
         post_count = len(messages)
 
-        # Insert injections after system prompt
-        inject_offset = 1
-        for text in injections:
-            if len(messages) > 0:
-                messages.insert(inject_offset, {"role": "system", "content": text})
-                inject_offset += 1
+        # Insert persistent memory right after system prompt (stable prefix)
+        if persistent_memory_text and len(messages) > 0:
+            messages.insert(1, {"role": "system", "content": persistent_memory_text})
 
         # Detect compaction
         compacted = any(
@@ -151,7 +179,11 @@ class ReactLoop:
             dropped = max(0, pre_count - post_count + 1)
             self._h.emit_context_compacted(task_id, dropped, pre_count, post_count, step_id)
 
-        # Error recovery prompt injection
+        # Append working memory at the end (volatile — doesn't break cache prefix)
+        if working_memory_text:
+            messages.append({"role": "system", "content": working_memory_text})
+
+        # Error recovery prompt injection (at the very end)
         er = self._h.error_recovery
         if er.detect_loop():
             prompt = er.build_loop_break_prompt()

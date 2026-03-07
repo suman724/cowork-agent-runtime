@@ -35,6 +35,7 @@ from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.react_loop import ReactLoop
 from agent_host.loop.system_prompt import SystemPromptBuilder
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
+from agent_host.loop.verification import VerificationConfig
 from agent_host.memory.memory_manager import MemoryManager
 from agent_host.memory.working_memory import WorkingMemory
 from agent_host.models import SessionContext
@@ -43,7 +44,7 @@ from agent_host.session.checkpoint_manager import CheckpointManager, SessionChec
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
 from agent_host.skills.skill_loader import SkillLoader
-from agent_host.thread.compactor import DropOldestCompactor
+from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
 from agent_host.thread.message_thread import MessageThread
 
 if TYPE_CHECKING:
@@ -475,13 +476,19 @@ class SessionManager:
             self._event_emitter.emit_task_started(task_id, prompt)
 
         # Spawn the agent loop as a background asyncio task
-        task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps))
+        task = asyncio.create_task(self._run_agent(prompt, task_id, max_steps, task_options))
         self._current_task = task
         self._current_task_id = task_id
 
         return {"taskId": task_id, "status": "running"}
 
-    async def _run_agent(self, prompt: str, task_id: str, max_steps: int = 50) -> None:
+    async def _run_agent(
+        self,
+        prompt: str,
+        task_id: str,
+        max_steps: int = 50,
+        task_options: dict[str, Any] | None = None,
+    ) -> None:
         """Run the agent loop for a single task."""
         if (
             not self._llm_client
@@ -492,9 +499,12 @@ class SessionManager:
         ):
             return
 
+        task_options = task_options or {}
+        plan_only = bool(task_options.get("planOnly", False))
+
         assistant_text = ""
         try:
-            # Build tool executor
+            # Build tool executor (with plan mode support)
             tool_executor = ToolExecutor(
                 tool_router=self._tool_router,
                 policy_enforcer=self._policy_enforcer,
@@ -505,20 +515,44 @@ class SessionManager:
                 session_id=self._session_context.session_id,
                 workspace_id=self._session_context.workspace_id,
                 approval_timeout=float(self._config.approval_timeout_seconds),
+                plan_mode=plan_only,
+                plan_mode_locked=plan_only,
             )
 
-            # Build compactor
-            compactor = DropOldestCompactor(recency_window=self._config.recency_window)
+            # Build compactor (hybrid or drop-oldest based on config)
+            compactor: ContextCompactor
+            if self._config.compaction_strategy == "hybrid":
+                compactor = HybridCompactor(
+                    recency_window=self._config.recency_window,
+                    mask_only=not self._config.compaction_llm_summary,
+                )
+            else:
+                compactor = DropOldestCompactor(
+                    recency_window=self._config.recency_window,
+                )
 
             # Working memory (task tracker, plan, notes — injected per-turn)
             if not self._working_memory:
                 self._working_memory = WorkingMemory()
+
+            # Plan mode change callback
+            def _on_plan_mode_changed(plan_mode: bool, source: str) -> None:
+                tool_executor.plan_mode = plan_mode
+                if self._event_emitter:
+                    self._event_emitter.emit_plan_mode_changed(task_id, plan_mode, source)
+
+            # Emit initial plan mode event for planOnly tasks
+            if plan_only and self._event_emitter:
+                self._event_emitter.emit_plan_mode_changed(task_id, True, "user")
 
             # Agent-internal tool handler (TaskTracker, CreatePlan, SpawnAgent, memory, skills)
             agent_tool_handler = AgentToolHandler(
                 self._working_memory,
                 skills=self._skills,
                 memory_manager=self._memory_manager,
+                on_plan_mode_changed=_on_plan_mode_changed,
+                plan_mode=plan_only,
+                plan_mode_locked=plan_only,
             )
 
             # Build LoopRuntime + ReactLoop
@@ -539,7 +573,21 @@ class SessionManager:
                 skills=self._skills,
             )
 
-            strategy = ReactLoop(loop_runtime, max_steps=max_steps)
+            # Build verification config
+            skip_verification = bool(task_options.get("skipVerification", False))
+            verification: VerificationConfig | None = None
+            if self._config.verification_enabled and not skip_verification:
+                custom_instructions = task_options.get("verifyInstructions", "")
+                # Also check COWORK.md for verification instructions
+                if not custom_instructions and self._memory_manager:
+                    custom_instructions = self._memory_manager.get_verification_instructions()
+                verification = VerificationConfig(
+                    enabled=True,
+                    max_verify_steps=self._config.verification_max_steps,
+                    custom_instructions=custom_instructions,
+                )
+
+            strategy = ReactLoop(loop_runtime, max_steps=max_steps, verification=verification)
             result = await strategy.run(task_id)
 
             # Track step count for get_session_state
