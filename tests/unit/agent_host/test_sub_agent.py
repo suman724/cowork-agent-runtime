@@ -1,4 +1,4 @@
-"""Tests for SubAgentManager — spawn, concurrency, token budget sharing."""
+"""Tests for sub-agent spawning via LoopRuntime.spawn_sub_agent()."""
 
 from __future__ import annotations
 
@@ -7,21 +7,28 @@ from unittest.mock import AsyncMock, MagicMock
 
 from agent_host.budget.token_budget import TokenBudget
 from agent_host.llm.models import LLMResponse
+from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.models import ToolCallResult
-from agent_host.loop.sub_agent import MAX_CONCURRENT, SubAgentManager
 from agent_host.policy.policy_enforcer import PolicyEnforcer
 from tests.fixtures.mock_llm import MockLLMClient
 from tests.fixtures.policy_bundles import make_policy_bundle
 
+# Re-export constant for concurrency test
+MAX_CONCURRENT = 5
 
-def _make_sub_agent_manager(
+
+def _make_loop_runtime(
     mock_llm: MockLLMClient | None = None,
     max_context_tokens: int = 100_000,
-) -> SubAgentManager:
-    """Build a SubAgentManager with test components."""
+    max_concurrent_sub_agents: int = MAX_CONCURRENT,
+) -> LoopRuntime:
+    """Build a LoopRuntime for testing sub-agent spawning."""
     if mock_llm is None:
         mock_llm = MockLLMClient()
         mock_llm.enqueue_text("Sub-agent done!")
+
+    from agent_host.thread.compactor import DropOldestCompactor
+    from agent_host.thread.message_thread import MessageThread
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)
@@ -31,12 +38,20 @@ def _make_sub_agent_manager(
     tool_executor.get_tool_definitions.return_value = []
     tool_executor.execute_tool_calls = AsyncMock(return_value=[])
 
-    return SubAgentManager(
+    thread = MessageThread(system_prompt="test")
+    compactor = DropOldestCompactor(recency_window=10)
+
+    return LoopRuntime(
         llm_client=mock_llm,  # type: ignore[arg-type]
         tool_executor=tool_executor,
+        thread=thread,
+        compactor=compactor,
         policy_enforcer=enforcer,
         token_budget=budget,
+        event_emitter=None,
+        cancellation_event=asyncio.Event(),
         max_context_tokens=max_context_tokens,
+        max_concurrent_sub_agents=max_concurrent_sub_agents,
     )
 
 
@@ -45,9 +60,9 @@ class TestSubAgentSpawn:
         """Sub-agent should complete a simple text task."""
         mock = MockLLMClient()
         mock.enqueue_text("The answer is 42.")
-        mgr = _make_sub_agent_manager(mock)
+        runtime = _make_loop_runtime(mock)
 
-        result = await mgr.spawn(
+        result = await runtime.spawn_sub_agent(
             task="What is the answer?",
             context="We're computing the answer to everything.",
             parent_task_id="task-1",
@@ -63,9 +78,8 @@ class TestSubAgentSpawn:
         mock.enqueue_tool_call("ReadFile", {"path": "/test"})
         mock.enqueue_text("File content found!")
 
-        mgr = _make_sub_agent_manager(mock)
+        runtime = _make_loop_runtime(mock)
 
-        # Make tool_executor return a result
         tool_result = ToolCallResult(
             tool_call_id="tc-1",
             tool_name="ReadFile",
@@ -76,9 +90,9 @@ class TestSubAgentSpawn:
         async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
-        mgr._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        runtime._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
-        result = await mgr.spawn(
+        result = await runtime.spawn_sub_agent(
             task="Read the test file",
             context="",
             parent_task_id="task-1",
@@ -91,9 +105,11 @@ class TestSubAgentSpawn:
         """Results longer than 2K chars should be truncated."""
         mock = MockLLMClient()
         mock.enqueue_text("x" * 5000)
-        mgr = _make_sub_agent_manager(mock)
+        runtime = _make_loop_runtime(mock)
 
-        result = await mgr.spawn(task="Generate long text", context="", parent_task_id="task-1")
+        result = await runtime.spawn_sub_agent(
+            task="Generate long text", context="", parent_task_id="task-1"
+        )
         assert len(result["result"]) <= 2100  # 2000 + "[truncated]" overhead
         assert result["result"].endswith("... [truncated]")
 
@@ -101,20 +117,21 @@ class TestSubAgentSpawn:
         """Sub-agent should handle errors gracefully."""
         mock = MockLLMClient()
         mock.enqueue(RuntimeError("LLM exploded"))
-        mgr = _make_sub_agent_manager(mock)
+        runtime = _make_loop_runtime(mock)
 
-        result = await mgr.spawn(task="Do something", context="", parent_task_id="task-1")
+        result = await runtime.spawn_sub_agent(
+            task="Do something", context="", parent_task_id="task-1"
+        )
         assert result["status"] == "error"
         assert "LLM exploded" in result["result"]
 
     async def test_max_steps_enforcement(self) -> None:
         """Sub-agent should respect its max_steps limit."""
         mock = MockLLMClient()
-        # Queue more tool calls than max_steps allows
         for i in range(15):
             mock.enqueue_tool_call("ReadFile", {"path": f"/{i}"}, tool_call_id=f"tc-{i}")
 
-        mgr = _make_sub_agent_manager(mock)
+        runtime = _make_loop_runtime(mock)
 
         async def mock_execute(calls, task_id, **kwargs):
             return [
@@ -126,22 +143,24 @@ class TestSubAgentSpawn:
                 )
             ]
 
-        mgr._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        runtime._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
-        result = await mgr.spawn(task="Do many things", context="", parent_task_id="task-1")
+        result = await runtime.spawn_sub_agent(
+            task="Do many things", context="", parent_task_id="task-1"
+        )
         assert result["status"] == "max_steps_exceeded"
         assert result["steps"] == 10  # _SUB_AGENT_MAX_STEPS
 
 
 class TestSubAgentConcurrency:
     async def test_concurrency_limit(self) -> None:
-        """Should enforce MAX_CONCURRENT sub-agents."""
+        """Should enforce MAX_CONCURRENT sub-agents via semaphore."""
         active_count = 0
         max_active = 0
 
-        original_run = SubAgentManager._run_sub_agent
+        original_run = LoopRuntime._run_sub_agent
 
-        async def tracking_run(self, task, context, parent_task_id, allowed_tools):
+        async def tracking_run(self, task, context, parent_task_id, max_steps, strategy_factory):
             nonlocal active_count, max_active
             active_count += 1
             max_active = max(max_active, active_count)
@@ -149,21 +168,20 @@ class TestSubAgentConcurrency:
             active_count -= 1
             return {"status": "completed", "result": "done", "steps": 1}
 
-        SubAgentManager._run_sub_agent = tracking_run  # type: ignore[assignment]
+        LoopRuntime._run_sub_agent = tracking_run  # type: ignore[assignment]
         try:
             mock = MockLLMClient()
-            mgr = _make_sub_agent_manager(mock)
+            runtime = _make_loop_runtime(mock)
 
-            # Spawn more than MAX_CONCURRENT at once
             tasks = [
-                mgr.spawn(task=f"Task {i}", context="", parent_task_id="t-1")
+                runtime.spawn_sub_agent(task=f"Task {i}", context="", parent_task_id="t-1")
                 for i in range(MAX_CONCURRENT + 3)
             ]
             await asyncio.gather(*tasks)
 
             assert max_active <= MAX_CONCURRENT
         finally:
-            SubAgentManager._run_sub_agent = original_run  # type: ignore[assignment]
+            LoopRuntime._run_sub_agent = original_run  # type: ignore[assignment]
 
 
 class TestSubAgentTokenBudget:
@@ -174,20 +192,9 @@ class TestSubAgentTokenBudget:
             LLMResponse(text="Done", stop_reason="stop", input_tokens=50, output_tokens=25)
         )
 
-        bundle = make_policy_bundle()
-        enforcer = PolicyEnforcer(bundle)
-        budget = TokenBudget(max_session_tokens=100_000)
+        runtime = _make_loop_runtime(mock)
+        budget = runtime.token_budget
 
-        tool_executor = MagicMock()
-        tool_executor.get_tool_definitions.return_value = []
-
-        mgr = SubAgentManager(
-            llm_client=mock,  # type: ignore[arg-type]
-            tool_executor=tool_executor,
-            policy_enforcer=enforcer,
-            token_budget=budget,
-        )
-
-        await mgr.spawn(task="Quick task", context="", parent_task_id="task-1")
+        await runtime.spawn_sub_agent(task="Quick task", context="", parent_task_id="task-1")
         assert budget.input_tokens_used == 50
         assert budget.output_tokens_used == 25

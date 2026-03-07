@@ -14,11 +14,11 @@ Two top-level packages with a **strict boundary** — no cross-imports allowed:
 agent_host/     ← Local Agent Host (custom agent loop)
   server/       — JSON-RPC 2.0 server over stdio (parse, serialize, dispatch, handlers)
   session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
-  loop/         — Core agent loop, tool executor, agent-internal tools, error recovery, sub-agents
+  loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
   thread/       — Message thread management, context compaction, token counting
   memory/       — Working memory: task tracker, plan, notes (injected per-turn)
-  skills/       — Skill definitions, loader (built-in/markdown/policy), executor
+  skills/       — Skill definitions, loader (built-in/markdown/policy); execution via LoopRuntime
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
@@ -46,15 +46,19 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 
 ## Key Patterns
 
-- **Custom agent loop** (`loop/agent_loop.py`) — single-threaded `while tool_call: execute → feed back` loop. Sophistication is in the harness: compaction, working memory, error recovery, sub-agents, skills.
+- **Three-layer agent loop architecture** — `SessionManager` (session lifecycle) → `LoopRuntime` (per-task infrastructure) → `LoopStrategy` (orchestration + context assembly). See `cowork-infra/docs/components/loop-strategy.md`.
+  - `LoopRuntime` (`loop/loop_runtime.py`) — infrastructure primitives facade. Provides `call_llm()`, `execute_external_tools()`, `execute_agent_tool()`, `spawn_sub_agent()`, `execute_skill()`, event emission, checkpoint callbacks, token budget. Owns all backend service coupling.
+  - `LoopStrategy` protocol (`loop/strategy.py`) — single method `async def run(task_id) -> LoopResult`. Strategies compose LoopRuntime primitives.
+  - `ReactLoop` (`loop/react_loop.py`) — default strategy (linear ReAct). Owns context assembly (memory injection, working memory, compaction, error recovery) and tool routing (agent-internal vs external).
+  - `AgentLoop` (`loop/agent_loop.py`) — thin alias for `ReactLoop` (backward compat).
 - **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
-- **Agent loop harness layers:**
+- **Infrastructure layers inside LoopRuntime:**
   - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload
-  - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, SpawnAgent) without going through PolicyEnforcer
+  - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, SpawnAgent, memory, skills) without going through PolicyEnforcer. Uses callbacks to LoopRuntime for sub-agent/skill execution.
   - `ErrorRecovery` — consecutive failure tracking, loop detection (same tool+args 3+ times), reflection/loop-break prompt injection
-  - `WorkingMemory` — task tracker + plan + notes, injected as system message every turn
-  - `SubAgentManager` — spawns focused sub-agents with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
-  - `SkillExecutor` — executes formalized multi-step workflows as focused sub-conversations
+  - `WorkingMemory` — task tracker + plan + notes, injected as system message every turn (by ReactLoop)
+  - Sub-agent spawning — `LoopRuntime.spawn_sub_agent()` creates child LoopRuntime + ReactLoop with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
+  - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
 - **Context compaction** (`thread/compactor.py`) — drop-oldest with recency window, triggered at 90% of max_context_tokens.
 - **Custom JSON-RPC 2.0 server** (~200 lines). Newline-delimited JSON with write lock.
 - **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.

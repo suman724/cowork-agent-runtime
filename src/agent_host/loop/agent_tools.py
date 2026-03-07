@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agent_host.loop.sub_agent import SubAgentManager
+    from collections.abc import Awaitable, Callable
+
     from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.skills.models import SkillDefinition
-    from agent_host.skills.skill_executor import SkillExecutor
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
 AGENT_TOOL_NAMES = {
@@ -33,17 +33,17 @@ class AgentToolHandler:
     def __init__(
         self,
         working_memory: WorkingMemory,
-        sub_agent_manager: SubAgentManager | None = None,
-        skill_executor: SkillExecutor | None = None,
         skills: list[SkillDefinition] | None = None,
         memory_manager: MemoryManager | None = None,
+        spawn_sub_agent: Callable[..., Awaitable[dict[str, Any]]] | None = None,
+        execute_skill: Callable[..., Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._working_memory = working_memory
-        self._sub_agent_manager = sub_agent_manager
-        self._skill_executor = skill_executor
         self._skills = {s.name: s for s in (skills or [])}
         self._skill_tool_names = {f"Skill_{s.name}" for s in (skills or [])}
         self._memory_manager = memory_manager
+        self._spawn_sub_agent = spawn_sub_agent
+        self._execute_skill = execute_skill
 
     def is_agent_tool(self, name: str) -> bool:
         """Check if a tool name is an agent-internal tool or a skill."""
@@ -226,8 +226,8 @@ class AgentToolHandler:
                 ]
             )
 
-        # Add SpawnAgent if sub_agent_manager is configured
-        if self._sub_agent_manager:
+        # Add SpawnAgent if sub-agent spawning is available
+        if self._spawn_sub_agent:
             defs.append(
                 {
                     "type": "function",
@@ -327,18 +327,17 @@ class AgentToolHandler:
 
     async def _handle_spawn_agent(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle SpawnAgent tool calls."""
-        if not self._sub_agent_manager:
+        if not self._spawn_sub_agent:
             return {"status": "error", "message": "Sub-agent spawning is not available"}
 
         task = arguments.get("task", "")
         if not task:
             return {"status": "error", "message": "task is required"}
-
         context = arguments.get("context", "")
-        return await self._sub_agent_manager.spawn(
+        return await self._spawn_sub_agent(
             task=task,
             context=context,
-            parent_task_id="",  # Will be set by the caller if needed
+            parent_task_id="",
         )
 
     async def _handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -368,17 +367,16 @@ class AgentToolHandler:
     async def _handle_skill(
         self, tool_name: str, arguments: dict[str, Any], task_id: str
     ) -> dict[str, Any]:
-        """Handle skill tool calls by delegating to SkillExecutor."""
-        if not self._skill_executor:
-            return {"status": "error", "message": "Skill execution is not available"}
-
-        # Strip "Skill_" prefix to get the skill name
+        """Handle skill tool calls by delegating to LoopRuntime."""
         skill_name = tool_name.removeprefix("Skill_")
         skill = self._skills.get(skill_name)
         if not skill:
             return {"status": "error", "message": f"Unknown skill: {skill_name}"}
 
-        return await self._skill_executor.execute(
+        if not self._execute_skill:
+            return {"status": "error", "message": "Skill execution is not available"}
+
+        return await self._execute_skill(
             skill=skill,
             arguments=arguments,
             parent_task_id=task_id,

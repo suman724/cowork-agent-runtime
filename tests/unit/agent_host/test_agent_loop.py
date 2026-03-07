@@ -1,4 +1,4 @@
-"""Tests for AgentLoop — full loop with MockLLMClient."""
+"""Tests for ReactLoop (agent loop) via LoopRuntime + ReactLoop."""
 
 from __future__ import annotations
 
@@ -7,8 +7,9 @@ from unittest.mock import MagicMock
 
 from agent_host.budget.token_budget import TokenBudget
 from agent_host.llm.models import LLMResponse
-from agent_host.loop.agent_loop import AgentLoop
+from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.models import ToolCallResult
+from agent_host.loop.react_loop import ReactLoop
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 from tests.fixtures.mock_llm import MockLLMClient
@@ -24,8 +25,8 @@ def _make_loop(
     cancel_event: asyncio.Event | None = None,
     memory_manager: MagicMock | None = None,
     working_memory: MagicMock | None = None,
-) -> AgentLoop:
-    """Helper to build an AgentLoop with test components."""
+) -> ReactLoop:
+    """Helper to build a LoopRuntime + ReactLoop with test components."""
     from agent_host.policy.policy_enforcer import PolicyEnforcer
 
     bundle = make_policy_bundle()
@@ -40,7 +41,7 @@ def _make_loop(
     tool_executor.get_tool_definitions.return_value = []
     tool_executor.execute_tool_calls = MagicMock(return_value=[])
 
-    return AgentLoop(
+    harness = LoopRuntime(
         llm_client=mock_llm,  # type: ignore[arg-type]
         tool_executor=tool_executor,
         thread=thread,
@@ -49,11 +50,12 @@ def _make_loop(
         token_budget=budget,
         event_emitter=event_emitter,
         cancellation_event=cancel_event or asyncio.Event(),
-        max_steps=max_steps,
         max_context_tokens=max_context_tokens,
         memory_manager=memory_manager,
         working_memory=working_memory,  # type: ignore[arg-type]
     )
+
+    return ReactLoop(harness, max_steps=max_steps)
 
 
 class TestAgentLoopCompletion:
@@ -74,7 +76,6 @@ class TestAgentLoopCompletion:
         mock.enqueue_text("Done!")
 
         loop = _make_loop(mock)
-        # Make tool_executor return a result
         tool_result = ToolCallResult(
             tool_call_id="tc-1",
             tool_name="ReadFile",
@@ -85,7 +86,7 @@ class TestAgentLoopCompletion:
         async def mock_execute(calls, task_id, **kwargs):
             return [tool_result]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "completed"
@@ -110,7 +111,7 @@ class TestAgentLoopCompletion:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "completed"
@@ -121,7 +122,6 @@ class TestAgentLoopStepLimit:
     async def test_max_steps_exceeded(self) -> None:
         """Loop should stop when max_steps is reached."""
         mock = MockLLMClient()
-        # Queue up tool calls that never terminate naturally
         for i in range(5):
             mock.enqueue_tool_call("ReadFile", {"path": f"/{i}"}, tool_call_id=f"tc-{i}")
 
@@ -137,7 +137,7 @@ class TestAgentLoopStepLimit:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "max_steps_exceeded"
@@ -163,7 +163,7 @@ class TestAgentLoopStepLimit:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         await loop.run("task-1")
         # 80% of 5 = 4.0, floor = 4
@@ -188,9 +188,7 @@ class TestAgentLoopCancellation:
         mock = MockLLMClient()
         cancel = asyncio.Event()
 
-        # First response is a tool call
         mock.enqueue_tool_call("ReadFile", tool_call_id="tc-1")
-        # Next would be another tool call, but we'll cancel before
         mock.enqueue_text("should not reach")
 
         loop = _make_loop(mock, cancel_event=cancel)
@@ -210,7 +208,7 @@ class TestAgentLoopCancellation:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "cancelled"
@@ -225,8 +223,8 @@ class TestAgentLoopBudget:
 
         loop = _make_loop(mock)
         await loop.run("task-1")
-        assert loop._token_budget.input_tokens_used == 100
-        assert loop._token_budget.output_tokens_used == 50
+        assert loop._h.token_budget.input_tokens_used == 100
+        assert loop._h.token_budget.output_tokens_used == 50
 
 
 class TestAgentLoopStepCallback:
@@ -243,7 +241,7 @@ class TestAgentLoopStepCallback:
             callback_calls.append((task_id, step))
 
         loop = _make_loop(mock)
-        loop._on_step_complete = on_step
+        loop._h._on_step_complete = on_step
 
         async def mock_execute(calls, task_id, **kwargs):
             return [
@@ -255,7 +253,7 @@ class TestAgentLoopStepCallback:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "completed"
@@ -272,7 +270,7 @@ class TestAgentLoopStepCallback:
             raise RuntimeError("checkpoint write failed")
 
         loop = _make_loop(mock)
-        loop._on_step_complete = failing_callback
+        loop._h._on_step_complete = failing_callback
 
         async def mock_execute(calls, task_id, **kwargs):
             return [
@@ -284,7 +282,7 @@ class TestAgentLoopStepCallback:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         result = await loop.run("task-1")
         assert result.reason == "completed"
@@ -295,7 +293,7 @@ class TestAgentLoopStepCallback:
         mock = MockLLMClient()
         mock.enqueue_text("Hello!")
         loop = _make_loop(mock)
-        assert loop._on_step_complete is None
+        assert loop._h._on_step_complete is None
         result = await loop.run("task-1")
         assert result.reason == "completed"
 
@@ -306,19 +304,17 @@ class TestAgentLoopCompaction:
         mock = MockLLMClient()
         mock.enqueue_text("Done")
 
-        # Use a very small max_context_tokens so the thread is over 90%
         loop = _make_loop(mock, max_context_tokens=10)
 
         # Stuff the thread with messages to force compaction
         for i in range(10):
-            loop._thread.add_user_message(f"Message {i} " + "x" * 100)
-            loop._thread.add_assistant_message(f"Response {i} " + "y" * 100)
+            loop._h.thread.add_user_message(f"Message {i} " + "x" * 100)
+            loop._h.thread.add_assistant_message(f"Response {i} " + "y" * 100)
 
         emitter = MagicMock()
-        loop._event_emitter = emitter
+        loop._h._event_emitter = emitter
 
         await loop.run("task-1")
-        # With max_context_tokens=10 and 90% budget=9, compaction must have happened
         emitter.emit_context_compacted.assert_called()
 
 
@@ -334,10 +330,8 @@ class TestAgentLoopMemoryInjection:
         loop = _make_loop(mock, memory_manager=mm)
         await loop.run("task-1")
 
-        # Inspect messages sent to LLM
         call_args = mock.last_messages
         assert call_args is not None
-        # messages[0] is system prompt, messages[1] should be memory
         memory_msgs = [
             m
             for m in call_args
@@ -364,7 +358,6 @@ class TestAgentLoopMemoryInjection:
         call_args = mock.last_messages
         assert call_args is not None
 
-        # Find indices of memory and working memory injections
         mem_idx = next(
             i
             for i, m in enumerate(call_args)
@@ -390,7 +383,6 @@ class TestAgentLoopMemoryInjection:
 
         call_args = mock.last_messages
         assert call_args is not None
-        # Only system prompt + user message should be system messages
         system_msgs = [m for m in call_args if m.get("role") == "system"]
         assert len(system_msgs) == 1  # just the system prompt
 
@@ -415,9 +407,7 @@ class TestAgentLoopMemoryInjection:
                 )
             ]
 
-        loop._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
+        loop._h._tool_executor.execute_tool_calls = mock_execute  # type: ignore[assignment]
 
         await loop.run("task-1")
-
-        # Should be called once per step (2 steps in this test)
         assert mm.render_memory_context.call_count == 2

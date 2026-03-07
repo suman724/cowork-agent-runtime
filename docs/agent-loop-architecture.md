@@ -1,6 +1,6 @@
 # Cowork Agent Runtime — Architecture Deep Dive
 
-This document provides a detailed walkthrough of the `cowork-agent-runtime` implementation: the agent loop, sub-agents, skills, tool execution, policy enforcement, and all supporting systems.
+This document provides a detailed walkthrough of the `cowork-agent-runtime` implementation: the three-layer agent loop architecture (SessionManager → LoopRuntime → LoopStrategy), sub-agents, skills, tool execution, policy enforcement, and all supporting systems.
 
 ---
 
@@ -38,7 +38,7 @@ cowork-agent-runtime/src/
 ├── agent_host/          # Agent loop, session management, LLM client, policy, events
 │   ├── server/          # JSON-RPC 2.0 server (stdio transport)
 │   ├── session/         # Session/workspace HTTP clients, checkpoint manager
-│   ├── loop/            # Core agent loop, tool executor, agent tools, error recovery
+│   ├── loop/            # LoopRuntime, LoopStrategy, ReactLoop, tool executor, agent tools, error recovery
 │   ├── llm/             # LLM Gateway streaming client (OpenAI SDK)
 │   ├── thread/          # Message thread, context compaction, token counting
 │   ├── memory/          # Working memory + persistent memory (project instructions, auto-memory)
@@ -71,11 +71,10 @@ graph TB
         subgraph agent_host
             Server[JSON-RPC Server<br/>stdio transport]
             SM[Session Manager]
-            AL[Agent Loop]
+            LR[LoopRuntime<br/>per-task infrastructure]
+            RL[ReactLoop<br/>default LoopStrategy]
             TE[Tool Executor]
             ATH[Agent Tool Handler]
-            SE[Skill Executor]
-            SAM[SubAgent Manager]
             PE[Policy Enforcer]
             AG[Approval Gate]
             TB[Token Budget]
@@ -106,12 +105,12 @@ graph TB
 
     UI -->|JSON-RPC 2.0 over stdio| Server
     Server --> SM
-    SM --> AL
-    AL --> LLM
-    AL --> TE
-    AL --> ATH
-    ATH --> SE
-    ATH --> SAM
+    SM --> LR
+    LR --> RL
+    RL --> LR
+    LR --> LLM
+    LR --> TE
+    LR --> ATH
     TE --> PE
     TE --> AG
     TE -->|ToolRouter interface| TR
@@ -221,9 +220,9 @@ stateDiagram-v2
 2. Add user prompt to `MessageThread`
 3. Build `ToolExecutor` with all dependencies
 4. Initialize or reuse `WorkingMemory` (task tracker, plan, notes)
-5. Create `SubAgentManager` (for `SpawnAgent` tool)
-6. Create `SkillExecutor` (for `Skill_*` tools)
-7. Build `AgentLoop` with all components (including working memory, sub-agent manager, skill executor, loaded skills)
+5. Build `AgentToolHandler` with working memory, loaded skills, and memory manager
+6. Build `LoopRuntime` with all infrastructure (LLM client, tool executor, agent tool handler, token budget, event emitter, checkpoint callback, skills, etc.). LoopRuntime wires its `spawn_sub_agent` and `execute_skill` callbacks into AgentToolHandler post-construction.
+7. Build `ReactLoop` (the default `LoopStrategy`) with LoopRuntime and context-assembly components (message thread, working memory, error recovery, compactor, memory manager)
 8. Spawn as background `asyncio.Task` — returns immediately with `{taskId, status: "running"}`
 9. On completion: persist checkpoint (including working memory), upload history, emit events
 
@@ -231,9 +230,55 @@ stateDiagram-v2
 
 ## 4. The Agent Loop
 
-**File:** `agent_host/loop/agent_loop.py`
+The agent loop has been decomposed into a **three-layer architecture**:
 
-The core of the system. A `while` loop that alternates between LLM calls and tool execution until the task is done, cancelled, or hits limits.
+```
+SessionManager (session lifecycle)
+  → LoopRuntime (per-task infrastructure primitives)
+    → LoopStrategy (orchestration + context assembly)
+```
+
+### LoopRuntime — Infrastructure Primitives
+
+**File:** `agent_host/loop/loop_runtime.py`
+
+`LoopRuntime` is a **per-task infrastructure facade**. It owns all backend service coupling and exposes primitives that strategies compose:
+
+| Primitive | Description |
+|-----------|-------------|
+| `call_llm()` | Policy pre-check + budget pre-check + LLM streaming + token recording |
+| `execute_external_tools()` | Dispatch tool calls through `ToolExecutor` (policy, approval, ToolRouter) |
+| `execute_agent_tool()` | Dispatch agent-internal tool calls through `AgentToolHandler` |
+| `spawn_sub_agent()` | Create child `LoopRuntime` + `ReactLoop` with isolated MessageThread, shared TokenBudget, `Semaphore(5)` concurrency |
+| `execute_skill()` | Run a skill as a focused sub-conversation with child `LoopRuntime` + `ReactLoop` |
+| `emit_event()` | Fire event through `EventEmitter` |
+| `on_step_complete()` | Invoke checkpoint callback |
+
+LoopRuntime wires its `spawn_sub_agent` and `execute_skill` methods as callback functions into `AgentToolHandler` post-construction, avoiding circular dependencies between the handler and the runtime.
+
+### LoopStrategy Protocol
+
+**File:** `agent_host/loop/strategy.py`
+
+A single-method protocol that all loop strategies implement:
+
+```python
+class LoopStrategy(Protocol):
+    async def run(self, task_id: str) -> LoopResult: ...
+```
+
+Strategies compose `LoopRuntime` primitives to implement different orchestration patterns. The runtime provides infrastructure; the strategy decides *what to do* and *in what order*.
+
+### ReactLoop — Default Strategy
+
+**File:** `agent_host/loop/react_loop.py`
+
+The default strategy, extracted from the original monolithic `AgentLoop`. Implements a linear ReAct loop that alternates between LLM calls and tool execution.
+
+**ReactLoop owns:**
+- Context assembly (memory injection, working memory injection, compaction, error recovery prompts)
+- Tool routing (classifying tool calls as agent-internal vs external)
+- Step counting, cancellation checks, step-limit warnings
 
 ```mermaid
 flowchart TD
@@ -245,19 +290,17 @@ flowchart TD
     InjectWM --> InjectER{Error recovery<br/>needed?}
     InjectER -->|Loop detected| InjectLoop[Inject loop-break prompt]
     InjectER -->|Failures >= 3| InjectReflect[Inject reflection prompt]
-    InjectER -->|No| EmitStep[Emit step_started]
+    InjectER -->|No| EmitStep[Emit step_started<br/>via LoopRuntime]
 
     InjectLoop --> EmitStep
     InjectReflect --> EmitStep
 
-    EmitStep --> PolicyCheck[Policy pre-check<br/>+ Budget pre-check]
-    PolicyCheck --> StreamLLM[Stream LLM call<br/>with text chunk callback]
+    EmitStep --> CallLLM[LoopRuntime.call_llm<br/>policy + budget + stream]
 
-    StreamLLM --> RecordTokens[Record token usage]
-    RecordTokens --> AddAssistant[Add assistant message<br/>to thread]
+    CallLLM --> AddAssistant[Add assistant message<br/>to thread]
 
     AddAssistant --> IncrStep[step++]
-    IncrStep --> EmitCompleted[Emit step_completed]
+    IncrStep --> EmitCompleted[Emit step_completed<br/>+ checkpoint callback]
 
     EmitCompleted --> CheckLimit{step >= 80%?}
     CheckLimit -->|Yes, at 80%| EmitWarning[Emit step_limit_approaching]
@@ -272,8 +315,8 @@ flowchart TD
     CheckDone -->|No| RouteCalls
 
     RouteCalls[Route tool calls:<br/>agent vs external]
-    RouteCalls --> ExecAgent[Execute agent-internal tools<br/>TaskTracker, CreatePlan,<br/>SpawnAgent, Skill_*]
-    RouteCalls --> ExecExternal[Execute external tools<br/>via ToolExecutor]
+    RouteCalls --> ExecAgent[LoopRuntime.execute_agent_tool<br/>TaskTracker, CreatePlan,<br/>SpawnAgent, Skill_*]
+    RouteCalls --> ExecExternal[LoopRuntime.execute_external_tools<br/>via ToolExecutor]
 
     ExecAgent --> AddResults[Add tool results to thread]
     ExecExternal --> AddResults
@@ -282,13 +325,24 @@ flowchart TD
     TrackErrors --> CheckCancel
 ```
 
+### AgentLoop — Backward-Compatible Alias
+
+**File:** `agent_host/loop/agent_loop.py`
+
+`AgentLoop` is now a thin alias for backward compatibility:
+
+```python
+from agent_host.loop.react_loop import ReactLoop as AgentLoop
+```
+
 ### Key Design Decisions
 
 - **Step = 1 LLM call + 0..N tool calls.** Each iteration of the while loop is one step.
 - **Natural termination:** When the LLM returns no tool calls and `stop_reason == "stop"`, the loop ends.
-- **Tool call routing:** Tool calls are classified as agent-internal — `TaskTracker`, `CreatePlan`, `SpawnAgent`, and `Skill_*` (bypass policy/ToolRouter) — or external (full lifecycle).
+- **Tool call routing:** Tool calls are classified as agent-internal — `TaskTracker`, `CreatePlan`, `SpawnAgent`, and `Skill_*` (bypass policy/ToolRouter) — or external (full lifecycle). This classification happens in `ReactLoop`.
 - **80% warning:** At 80% of max_steps, an event warns the Desktop App.
 - **Compaction at 90%:** Context is compacted when it reaches 90% of `max_context_tokens`.
+- **Strategy is swappable:** Different `LoopStrategy` implementations can be plugged in without changing `LoopRuntime` or `SessionManager`.
 
 ### LoopResult
 
@@ -382,7 +436,8 @@ class ExecutionContext:
 
 ```mermaid
 sequenceDiagram
-    participant AL as Agent Loop
+    participant RL as ReactLoop
+    participant LR as LoopRuntime
     participant TE as ToolExecutor
     participant PE as PolicyEnforcer
     participant AG as ApprovalGate
@@ -391,7 +446,8 @@ sequenceDiagram
     participant TR as ToolRouter
     participant WC as WorkspaceClient
 
-    AL->>TE: execute_tool_calls(calls, task_id)
+    RL->>LR: execute_external_tools(calls, task_id)
+    LR->>TE: execute_tool_calls(calls, task_id)
 
     loop For each tool call
         TE->>EE: emit_tool_requested(name, capability, args, tool_call_id)
@@ -423,8 +479,9 @@ sequenceDiagram
         end
 
         TE->>EE: emit_tool_completed(name, status)
-        TE-->>AL: ToolCallResult
+        TE-->>LR: ToolCallResult
     end
+    LR-->>RL: list[ToolCallResult]
 ```
 
 ---
@@ -605,18 +662,20 @@ graph LR
 
     ATH --> TT[TaskTracker<br/>create / update / list]
     ATH --> CP[CreatePlan<br/>goal + steps]
-    ATH --> SA[SpawnAgent<br/>delegate to sub-agent]
-    ATH --> SK[Skill_*<br/>delegate to SkillExecutor]
+    ATH --> SA[SpawnAgent<br/>delegate via callback<br/>to LoopRuntime.spawn_sub_agent]
+    ATH --> SK[Skill_*<br/>delegate via callback<br/>to LoopRuntime.execute_skill]
     ATH --> SM2[SaveMemory<br/>write to memory files]
     ATH --> RM[RecallMemory<br/>read memory files]
     ATH --> LM[ListMemories<br/>list memory files]
 ```
 
-The `AgentToolHandler` is initialized with `WorkingMemory`, `SubAgentManager`, `SkillExecutor`, the loaded `SkillDefinition` list, and optionally a `MemoryManager`. It builds tool definitions for all agent-internal tools plus one `Skill_{name}` tool per loaded skill. Memory tools (`SaveMemory`, `RecallMemory`, `ListMemories`) are only included when a `MemoryManager` is provided.
+The `AgentToolHandler` is initialized with `WorkingMemory`, the loaded `SkillDefinition` list, and optionally a `MemoryManager`. It builds tool definitions for all agent-internal tools plus one `Skill_{name}` tool per loaded skill. Memory tools (`SaveMemory`, `RecallMemory`, `ListMemories`) are only included when a `MemoryManager` is provided.
+
+**Callback-based wiring:** `AgentToolHandler` does not directly depend on `LoopRuntime`. Instead, it uses callback functions (`spawn_sub_agent` and `execute_skill`) that are wired by `LoopRuntime` post-construction. This avoids circular dependencies — `LoopRuntime` owns `AgentToolHandler`, and `AgentToolHandler` calls back into `LoopRuntime` for sub-agent/skill execution via these callbacks.
 
 The `is_agent_tool()` method checks both the static `AGENT_TOOL_NAMES` set (`TaskTracker`, `CreatePlan`, `SpawnAgent`, `SaveMemory`, `RecallMemory`, `ListMemories`) and the dynamic `_skill_tool_names` set (e.g., `Skill_search_codebase`).
 
-The `execute()` method takes `tool_name`, `arguments`, and `task_id` — the `task_id` is passed through to the `SkillExecutor` for tracking.
+The `execute()` method takes `tool_name`, `arguments`, and `task_id` — the `task_id` is passed through to the skill/sub-agent callbacks for tracking.
 
 ### TaskTracker Tool
 
@@ -642,7 +701,7 @@ Creates or replaces the current plan in working memory.
 | `task` | string | Task description for the sub-agent |
 | `context` | string? | Relevant context from current work |
 
-Only available when `SubAgentManager` is configured. Delegates to the sub-agent system (see next section).
+Delegates to `LoopRuntime.spawn_sub_agent()` via the callback wired into `AgentToolHandler` (see next section).
 
 ### SaveMemory Tool
 
@@ -671,7 +730,7 @@ Each loaded skill is exposed as an agent-internal tool named `Skill_{skill.name}
 
 1. The `Skill_` prefix is stripped to resolve the skill name
 2. The matching `SkillDefinition` is looked up
-3. `SkillExecutor.execute()` runs the skill as a focused sub-conversation
+3. `LoopRuntime.execute_skill()` runs the skill as a focused sub-conversation
 4. Result is returned to the agent loop
 
 This means skills are first-class tools that the LLM can invoke alongside `TaskTracker`, `CreatePlan`, and `SpawnAgent`.
@@ -680,17 +739,17 @@ This means skills are first-class tools that the LLM can invoke alongside `TaskT
 
 ## 10. Sub-Agents
 
-**File:** `agent_host/loop/sub_agent.py`
+**File:** `agent_host/loop/sub_agent.py` (constants only), `agent_host/loop/loop_runtime.py` (`spawn_sub_agent()`)
 
-Sub-agents are focused, isolated agent loops that the parent agent can spawn for parallel or delegated work.
+Sub-agents are focused, isolated agent loops that the parent agent can spawn for parallel or delegated work. The spawning logic lives in `LoopRuntime.spawn_sub_agent()`; the file `loop/sub_agent.py` retains only constants (e.g., `SUB_AGENT_MAX_STEPS`, `SUB_AGENT_MAX_RESULT_LENGTH`, `SUB_AGENT_SEMAPHORE_LIMIT`).
 
 ```mermaid
 flowchart TB
-    Parent[Parent Agent Loop<br/>max_steps=50] -->|SpawnAgent tool call| SAM[SubAgentManager<br/>Semaphore 5]
+    Parent[Parent ReactLoop<br/>max_steps=50] -->|SpawnAgent tool call| LR[LoopRuntime.spawn_sub_agent<br/>Semaphore 5]
 
-    SAM --> Sub1[Sub-Agent 1<br/>max_steps=10]
-    SAM --> Sub2[Sub-Agent 2<br/>max_steps=10]
-    SAM --> SubN[Sub-Agent N<br/>max_steps=10]
+    LR --> Sub1[Child LoopRuntime + ReactLoop<br/>max_steps=10]
+    LR --> Sub2[Child LoopRuntime + ReactLoop<br/>max_steps=10]
+    LR --> SubN[Child LoopRuntime + ReactLoop<br/>max_steps=10]
 
     Sub1 --> Result1[Result<br/>≤ 2000 chars]
     Sub2 --> Result2[Result<br/>≤ 2000 chars]
@@ -709,6 +768,8 @@ flowchart TB
 
 | Property | Parent Agent | Sub-Agent |
 |----------|-------------|-----------|
+| LoopRuntime | Parent instance | **Child instance** (created by parent) |
+| LoopStrategy | ReactLoop | **ReactLoop** (same strategy) |
 | MessageThread | Shared (cumulative) | Fresh (isolated) |
 | TokenBudget | Shared | **Shared** (safe: asyncio is single-threaded) |
 | max_steps | 50 (configurable) | **10** (fixed) |
@@ -721,21 +782,23 @@ flowchart TB
 ### Execution Flow
 
 1. Parent calls `SpawnAgent` tool with task + context
-2. `AgentToolHandler` delegates to `SubAgentManager.spawn()`
-3. Semaphore limits concurrency to 5 concurrent sub-agents
-4. Sub-agent gets:
+2. `AgentToolHandler` invokes its `spawn_sub_agent` callback (wired to `LoopRuntime.spawn_sub_agent()`)
+3. `LoopRuntime.spawn_sub_agent()` acquires the semaphore (limit 5 concurrent)
+4. A child `LoopRuntime` is created with:
    - Fresh `MessageThread` with focused system prompt
    - Task as user message
    - `DropOldestCompactor` with recency_window=10
    - Shared `ToolExecutor` and `PolicyEnforcer`
-5. Sub-agent runs its own `AgentLoop.run()` with max_steps=10
+   - Shared `TokenBudget`
+   - No event emission, no checkpoint callback
+5. A `ReactLoop` is created with the child `LoopRuntime` and runs with max_steps=10
 6. Result text is truncated to 2000 chars and returned to parent
 
 ---
 
 ## 11. Skills
 
-**Files:** `agent_host/skills/models.py`, `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py`
+**Files:** `agent_host/skills/models.py`, `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py` (constants only), `agent_host/loop/loop_runtime.py` (`execute_skill()`)
 
 Skills are **formalized multi-step workflows** — reusable sub-conversations with custom system prompts and optional tool restrictions. Skills use **directory-based Markdown format** with progressive disclosure.
 
@@ -757,12 +820,12 @@ graph TD
         Skills -->|on invocation| Stage2
     end
 
-    subgraph SkillExecutor
+    subgraph "LoopRuntime.execute_skill()"
         Exec[execute skill]
         Stage2 --> Exec
         Exec -->|$ARGUMENTS substitution| Prompt[Build system prompt]
         Prompt --> Thread[Fresh MessageThread]
-        Thread --> Loop[AgentLoop<br/>skill-specific max_steps]
+        Thread --> Loop[Child LoopRuntime + ReactLoop<br/>skill-specific max_steps]
         Loop --> Result[Result ≤ 4000 chars]
     end
 ```
@@ -853,20 +916,21 @@ Skills are registered as agent-internal tools by `AgentToolHandler` with a `Skil
 
 Skills with `disable_model_invocation=True` are excluded from `get_tool_definitions()` — the LLM cannot see or auto-trigger them. They can still be invoked explicitly (e.g., by user command).
 
-When invoked, `AgentToolHandler._handle_skill()` strips the `Skill_` prefix, resolves the `SkillDefinition`, and delegates to `SkillExecutor.execute()`.
+When invoked, `AgentToolHandler._handle_skill()` strips the `Skill_` prefix, resolves the `SkillDefinition`, and delegates to the `execute_skill` callback (wired to `LoopRuntime.execute_skill()`).
 
 ### Skill Execution
 
-Skills run as focused sub-conversations, similar to sub-agents but with more structure:
+Skills run as focused sub-conversations via `LoopRuntime.execute_skill()`, similar to sub-agents but with more structure. The execution logic formerly in `SkillExecutor` has moved into `LoopRuntime`; the file `skills/skill_executor.py` now only holds constants (e.g., `SKILL_MAX_RESULT_LENGTH`).
 
 - Stage 2 loading: `SkillLoader.load_skill_content()` lazily loads full content
 - `$ARGUMENTS` substitution applied to `prompt_content`
 - Custom system prompt: base prompt + substituted `prompt_content`
 - User message: formatted from skill arguments
+- Child `LoopRuntime` + `ReactLoop` (isolated)
 - Dedicated `MessageThread` (isolated)
 - `DropOldestCompactor` with recency_window=10
 - Shared `TokenBudget`
-- No event emission
+- No event emission, no checkpoint callback
 - Result truncated to 4000 chars (vs 2000 for sub-agents)
 
 ---
@@ -879,12 +943,12 @@ The `LLMClient` wraps the OpenAI SDK to stream chat completions from an OpenAI-c
 
 ```mermaid
 sequenceDiagram
-    participant AL as Agent Loop
+    participant LR as LoopRuntime
     participant LLM as LLMClient
     participant SDK as AsyncOpenAI
     participant GW as LLM Gateway
 
-    AL->>LLM: stream_chat(messages, tools, on_text_chunk)
+    LR->>LLM: stream_chat(messages, tools, on_text_chunk)
 
     loop Retry (max 3 attempts)
         LLM->>SDK: chat.completions.create(stream=True)
@@ -895,14 +959,14 @@ sequenceDiagram
                 GW-->>SDK: SSE chunk
                 SDK-->>LLM: chunk
                 alt Text delta
-                    LLM->>AL: on_text_chunk(delta)
+                    LLM->>LR: on_text_chunk(delta)
                 else Tool call delta
                     LLM->>LLM: Accumulate tool call parts
                 else Usage chunk
                     LLM->>LLM: Record input/output tokens
                 end
             end
-            LLM-->>AL: LLMResponse(text, tool_calls, tokens)
+            LLM-->>LR: LLMResponse(text, tool_calls, tokens)
         else Transient error
             LLM->>LLM: Classify error
             LLM->>LLM: sleep(backoff + jitter)
@@ -1165,13 +1229,14 @@ graph LR
 
 ## 17. Crash Recovery (Checkpoints)
 
-**Files:** `agent_host/session/checkpoint_manager.py`, `agent_host/loop/agent_loop.py`, `agent_host/session/session_manager.py`
+**Files:** `agent_host/session/checkpoint_manager.py`, `agent_host/loop/loop_runtime.py`, `agent_host/session/session_manager.py`
 
 Atomic JSON file checkpoints enable crash recovery. Checkpoints are written **after each completed step** (not just at task end), and periodic workspace syncs provide machine-level durability.
 
 ```mermaid
 sequenceDiagram
-    participant AL as Agent Loop
+    participant RL as ReactLoop
+    participant LR as LoopRuntime
     participant SM as SessionManager
     participant CM as CheckpointManager
     participant WS as Workspace Service
@@ -1180,7 +1245,8 @@ sequenceDiagram
     Note over CM: Checkpoint = JSON file per session<br/>in platform app data dir
 
     loop Each completed step
-        AL->>SM: on_step_complete(task_id, step)
+        RL->>LR: on_step_complete(task_id, step)
+        LR->>SM: checkpoint callback(task_id, step)
         SM->>CM: save(checkpoint with active task state)
         CM->>FS: Write to tempfile
         CM->>FS: os.replace → atomic swap
@@ -1192,7 +1258,7 @@ sequenceDiagram
         end
     end
 
-    AL->>SM: Task completes (finally block)
+    RL->>SM: Task completes (finally block)
     SM->>CM: save(checkpoint with active_task_id=None)
 
     Note over SM: On next session creation...
@@ -1241,7 +1307,7 @@ class SessionCheckpoint:
 
 ### on_step_complete Callback
 
-`AgentLoop` accepts an optional `on_step_complete: Callable[[str, int], Awaitable[None]]` callback. It is invoked after `emit_step_completed` and before the 80% step warning check:
+`LoopRuntime` accepts an optional `on_step_complete: Callable[[str, int], Awaitable[None]]` callback, exposed via `LoopRuntime.on_step_complete()`. `ReactLoop` invokes it after `emit_step_completed` and before the 80% step warning check:
 
 - **Awaited** (synchronous relative to the loop) — checkpoint must flush before the next step
 - **Exception-safe** — failures are caught and logged; checkpoint failure never aborts the loop
@@ -1598,8 +1664,11 @@ graph TD
 
 | Component | File | Responsibility |
 |-----------|------|---------------|
-| **AgentLoop** | `loop/agent_loop.py` | Core LLM ↔ tool loop |
-| **SessionManager** | `session/session_manager.py` | Lifecycle coordinator |
+| **LoopRuntime** | `loop/loop_runtime.py` | Per-task infrastructure primitives facade |
+| **LoopStrategy** | `loop/strategy.py` | Protocol: `async def run(task_id) -> LoopResult` |
+| **ReactLoop** | `loop/react_loop.py` | Default strategy: linear ReAct loop + context assembly |
+| **AgentLoop** | `loop/agent_loop.py` | Thin alias for `ReactLoop` (backward compat) |
+| **SessionManager** | `session/session_manager.py` | Lifecycle coordinator, builds LoopRuntime + ReactLoop |
 | **LLMClient** | `llm/client.py` | OpenAI SDK streaming + retry |
 | **ToolRouter** | `tool_runtime/router/tool_router.py` | Tool registry + dispatch |
 | **ToolExecutor** | `loop/tool_executor.py` | Policy + approval + artifacts |
@@ -1609,10 +1678,10 @@ graph TD
 | **MessageThread** | `thread/message_thread.py` | Conversation history |
 | **DropOldestCompactor** | `thread/compactor.py` | Context window management |
 | **WorkingMemory** | `memory/working_memory.py` | Task tracker + plan + notes |
-| **AgentToolHandler** | `loop/agent_tools.py` | Internal tools + skill tools (no policy) |
-| **SubAgentManager** | `loop/sub_agent.py` | Spawn isolated sub-agents |
+| **AgentToolHandler** | `loop/agent_tools.py` | Internal tools + skill tools (no policy); uses callbacks for sub-agent/skill |
+| **SubAgentManager constants** | `loop/sub_agent.py` | Constants only (spawning logic in LoopRuntime) |
 | **SkillLoader** | `skills/skill_loader.py` | Load skills from 3 sources |
-| **SkillExecutor** | `skills/skill_executor.py` | Execute skills as sub-conversations |
+| **SkillExecutor constants** | `skills/skill_executor.py` | Constants only (execution logic in LoopRuntime) |
 | **ErrorRecovery** | `loop/error_recovery.py` | Loop detection + reflection |
 | **EventEmitter** | `events/event_emitter.py` | JSON-RPC notifications + logs |
 | **CheckpointManager** | `session/checkpoint_manager.py` | Crash recovery persistence |
