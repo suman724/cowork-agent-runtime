@@ -31,7 +31,8 @@ class TestMessageThread:
         thread.add_assistant_message("", tool_calls)
         msg = thread.messages[0]
         assert msg["role"] == "assistant"
-        assert "content" not in msg  # content omitted when empty (API requires content OR tool_calls)
+        # content omitted when empty (API requires content OR tool_calls)
+        assert "content" not in msg
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["id"] == "tc1"
         assert msg["tool_calls"][0]["function"]["name"] == "ReadFile"
