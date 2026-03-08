@@ -428,6 +428,10 @@ class SessionManager:
                 workspace_dir=self._workspace_dir,
                 event_emitter=self._event_emitter,
                 max_context_tokens=self._max_context_tokens,
+                workspace_client=self._workspace_client,
+                workspace_id=(
+                    self._session_context.workspace_id if self._session_context else None
+                ),
             )
 
     @staticmethod

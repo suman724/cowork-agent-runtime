@@ -74,3 +74,62 @@ class TestCancel:
         t._task = mock_task
         t.cancel()
         mock_task.cancel.assert_called_once()
+
+
+class TestHistorySync:
+    def test_workspace_params_stored(self) -> None:
+        mock_ws = MagicMock()
+        t = _make_teammate(workspace_client=mock_ws, workspace_id="ws-1", session_id="s-1")
+        assert t._workspace_client is mock_ws
+        assert t._workspace_id == "ws-1"
+        assert t._session_id == "s-1"
+
+    def test_default_session_id(self) -> None:
+        t = _make_teammate(name="analyst")
+        assert t._session_id == "teammate-analyst"
+
+    def test_sync_interval_default(self) -> None:
+        t = _make_teammate()
+        assert t._sync_interval == 5
+
+    async def test_on_step_complete_syncs_at_interval(self) -> None:
+        mock_ws = MagicMock()
+        mock_ws.upload_session_history = AsyncMock()
+        t = _make_teammate(
+            workspace_client=mock_ws,
+            workspace_id="ws-1",
+            sync_interval=3,
+        )
+
+        # Steps 1 and 2 should not trigger sync (interval=3)
+        await t._on_step_complete("task-1", 1)
+        await t._on_step_complete("task-1", 2)
+        mock_ws.upload_session_history.assert_not_called()
+
+        # Step 3 should trigger sync (3 - 0 >= 3)
+        await t._on_step_complete("task-1", 3)
+        mock_ws.upload_session_history.assert_called_once()
+        assert t._last_sync_step == 3
+
+    async def test_on_step_complete_noop_without_workspace(self) -> None:
+        t = _make_teammate()  # no workspace_client
+        await t._on_step_complete("task-1", 5)  # should not raise
+
+    async def test_on_step_complete_noop_with_zero_interval(self) -> None:
+        mock_ws = MagicMock()
+        mock_ws.upload_session_history = AsyncMock()
+        t = _make_teammate(
+            workspace_client=mock_ws,
+            workspace_id="ws-1",
+            sync_interval=0,
+        )
+        await t._on_step_complete("task-1", 5)
+        mock_ws.upload_session_history.assert_not_called()
+
+    async def test_sync_history_failure_is_best_effort(self) -> None:
+        mock_ws = MagicMock()
+        mock_ws.upload_session_history = AsyncMock(side_effect=RuntimeError("network"))
+        t = _make_teammate(workspace_client=mock_ws, workspace_id="ws-1")
+        # Add a message so there's something to sync
+        t._thread.add_user_message("hello")
+        await t._sync_history("task-1")  # should not raise

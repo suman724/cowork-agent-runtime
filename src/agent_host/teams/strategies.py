@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agent_host.llm.client import LLMClient
     from agent_host.loop.models import LoopResult
     from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_host.session.workspace_client import WorkspaceClient
     from agent_host.teams.teammate_session import TeammateSessionManager
     from tool_runtime import ToolRouter
 
@@ -53,6 +54,8 @@ class TeamCoordinator:
         self._workspace_dir: str | None = None
         self._event_emitter: EventEmitter | None = None
         self._max_context_tokens: int = 100_000
+        self._workspace_client: WorkspaceClient | None = None
+        self._workspace_id: str | None = None
 
         # Running teammate sessions and their asyncio tasks
         self._teammate_sessions: dict[str, TeammateSessionManager] = {}
@@ -73,6 +76,8 @@ class TeamCoordinator:
         workspace_dir: str | None = None,
         event_emitter: EventEmitter | None = None,
         max_context_tokens: int = 100_000,
+        workspace_client: WorkspaceClient | None = None,
+        workspace_id: str | None = None,
     ) -> None:
         """Provide shared resources from the lead's SessionManager."""
         self._llm_client = llm_client
@@ -81,6 +86,8 @@ class TeamCoordinator:
         self._workspace_dir = workspace_dir
         self._event_emitter = event_emitter
         self._max_context_tokens = max_context_tokens
+        self._workspace_client = workspace_client
+        self._workspace_id = workspace_id
 
     @property
     def manager(self) -> TeamManager | None:
@@ -96,6 +103,7 @@ class TeamCoordinator:
     async def on_session_shutdown(self) -> None:
         if self._manager is not None:
             await self._shutdown_all_teammates()
+            await self._upload_team_summary()
             self._manager = None
 
     def create_team(self, name: str, description: str = "") -> TeamManager:
@@ -138,6 +146,8 @@ class TeamCoordinator:
                 budget=budget or 100_000,
                 max_context_tokens=self._max_context_tokens,
                 event_emitter=self._event_emitter,
+                workspace_client=self._workspace_client,
+                workspace_id=self._workspace_id,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
@@ -169,6 +179,54 @@ class TeamCoordinator:
             for m in self._manager.get_active_agents()
         ]
 
+    async def resume_teammates(self) -> None:
+        """Re-spawn teammate loops after crash recovery.
+
+        Called after ``TeamCheckpointProvider.restore()`` has rebuilt the
+        TeamManager with member metadata and task list.  Only members whose
+        status was ``"running"`` are resumed.
+        """
+        if self._manager is None:
+            return
+        if not (self._llm_client and self._policy_enforcer and self._tool_router):
+            logger.warning("resume_teammates_skipped", reason="shared_resources_not_set")
+            return
+
+        from agent_host.teams.teammate_session import TeammateSessionManager
+
+        for name, info in list(self._manager.members.items()):
+            if info.status != "running":
+                continue
+
+            # Build a resume prompt — teammate will see task list via context injection
+            resume_prompt = (
+                "You are resuming after a restart. Check the team task list "
+                "for your assigned tasks and continue working."
+            )
+            teammate = TeammateSessionManager(
+                name=name,
+                role=info.role,
+                team_name=self._manager.config.name,
+                llm_client=self._llm_client,
+                policy_enforcer=self._policy_enforcer,
+                tool_router=self._tool_router,
+                workspace_dir=self._workspace_dir,
+                tool_provider=self._tool_provider or TeamToolProvider(self),
+                context_injector=self._context_injector or TeamContextInjector(self),
+                budget=info.budget or 100_000,
+                max_context_tokens=self._max_context_tokens,
+                event_emitter=self._event_emitter,
+                workspace_client=self._workspace_client,
+                workspace_id=self._workspace_id,
+            )
+            self._teammate_sessions[name] = teammate
+            task = asyncio.create_task(teammate.run(resume_prompt), name=f"teammate-{name}")
+            task.add_done_callback(
+                lambda _t: self._on_teammate_done(_t.get_name().removeprefix("teammate-"))
+            )
+            self._teammate_tasks[name] = task
+            logger.info("teammate_resumed", name=name, role=info.role)
+
     def wake(self) -> None:
         """Signal the lead to wake from WaitForTeam."""
         self._wake_event.set()
@@ -186,6 +244,49 @@ class TeamCoordinator:
         """Called when a teammate's asyncio task finishes."""
         logger.info("teammate_task_done", name=name)
         self._wake_event.set()
+
+    async def _upload_team_summary(self) -> None:
+        """Upload a JSON summary of the team run to Workspace Service (best-effort)."""
+        if not self._workspace_client or not self._workspace_id or not self._manager:
+            return
+        try:
+            import json
+
+            tasks = await self._manager.task_list.list_tasks()
+            summary = {
+                "team_id": self._manager.team_id,
+                "team_name": self._manager.config.name,
+                "lead_session_id": self._lead_session_id,
+                "teammates": [
+                    {
+                        "name": s.name,
+                        "role": s.role,
+                        "session_id": s._session_id,
+                    }
+                    for s in self._teammate_sessions.values()
+                ],
+                "tasks": [
+                    {
+                        "task_id": t.task_id,
+                        "title": t.title,
+                        "status": t.status,
+                        "assignee": t.assignee,
+                        "result": t.result,
+                    }
+                    for t in tasks
+                ],
+            }
+            await self._workspace_client.upload_artifact(
+                workspace_id=self._workspace_id,
+                session_id=self._lead_session_id,
+                artifact_data=json.dumps(summary, indent=2).encode(),
+                artifact_type="team_summary",
+                artifact_name=f"team-summary-{self._manager.team_id}",
+                content_type="application/json",
+            )
+            logger.info("team_summary_uploaded", team_id=self._manager.team_id)
+        except Exception:
+            logger.warning("team_summary_upload_failed", exc_info=True)
 
     async def _shutdown_teammate(self, name: str) -> None:
         """Cancel a teammate's loop and clean up."""
@@ -552,3 +653,6 @@ class TeamCheckpointProvider:
                 result=t.get("result"),
             )
             manager.task_list._tasks[task.task_id] = task
+
+        # Re-spawn teammate loops for members that were running
+        await self._coordinator.resume_teammates()

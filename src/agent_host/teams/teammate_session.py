@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from agent_host.llm.client import LLMClient
     from agent_host.loop.models import LoopResult
     from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_host.session.workspace_client import WorkspaceClient
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -76,6 +77,10 @@ class TeammateSessionManager:
         max_steps: int = 50,
         max_context_tokens: int = 100_000,
         event_emitter: EventEmitter | None = None,
+        workspace_client: WorkspaceClient | None = None,
+        workspace_id: str | None = None,
+        session_id: str | None = None,
+        sync_interval: int = 5,
     ) -> None:
         self.name = name
         self.role = role
@@ -89,6 +94,11 @@ class TeammateSessionManager:
         self._max_steps = max_steps
         self._max_context_tokens = max_context_tokens
         self._event_emitter = event_emitter
+        self._workspace_client = workspace_client
+        self._workspace_id = workspace_id
+        self._session_id = session_id or f"teammate-{name}"
+        self._sync_interval = sync_interval
+        self._last_sync_step = 0
 
         # Fresh per-teammate resources
         self._token_budget = TokenBudget(max_session_tokens=budget)
@@ -155,10 +165,14 @@ class TeammateSessionManager:
                 agent_tool_handler=agent_tool_handler,
                 workspace_dir=self._workspace_dir,
                 context_injector=self._context_injector,
+                on_step_complete=self._on_step_complete,
             )
 
             strategy = ReactLoop(loop_runtime, max_steps=self._max_steps)
             result = await strategy.run(task_id)
+
+            # Final history sync on completion
+            await self._sync_history(task_id)
 
             logger.info(
                 "teammate_loop_completed",
@@ -174,6 +188,40 @@ class TeammateSessionManager:
         except Exception:
             logger.exception("teammate_loop_error", name=self.name)
             return None
+
+    async def _on_step_complete(self, task_id: str, step: int) -> None:
+        """Periodic history sync to Workspace Service (best-effort)."""
+        if (
+            self._workspace_client
+            and self._workspace_id
+            and self._sync_interval > 0
+            and step - self._last_sync_step >= self._sync_interval
+        ):
+            await self._sync_history(task_id)
+            self._last_sync_step = step
+
+    async def _sync_history(self, task_id: str) -> None:
+        """Upload conversation thread as session history artifact."""
+        if not self._workspace_client or not self._workspace_id:
+            return
+        try:
+            from cowork_platform.conversation_message import ConversationMessage
+
+            messages = [ConversationMessage.model_validate(m) for m in self._thread.messages]
+            await self._workspace_client.upload_session_history(
+                workspace_id=self._workspace_id,
+                session_id=self._session_id,
+                messages=messages,
+                task_id=task_id,
+            )
+            logger.info(
+                "teammate_history_synced",
+                name=self.name,
+                task_id=task_id,
+                message_count=len(messages),
+            )
+        except Exception:
+            logger.warning("teammate_history_sync_failed", name=self.name, exc_info=True)
 
     def cancel(self) -> None:
         """Signal the teammate to stop."""

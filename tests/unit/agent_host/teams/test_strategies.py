@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import unittest.mock
+from unittest.mock import AsyncMock
+
 import pytest
 
 from agent_host.coordination.protocols import (
@@ -456,3 +459,158 @@ class TestWaitForTeam:
         coord = TeamCoordinator()
         reason = await coord.wait_for_wake(timeout=0.05)
         assert reason == "timeout"
+
+
+# ── Resume Teammates (Crash Recovery) ────────────────────────────
+
+
+class TestResumeTeammates:
+    async def test_resume_skips_non_running_members(self) -> None:
+        """Only members with status='running' should be re-spawned."""
+        from unittest.mock import MagicMock
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+
+        # Set shared resources so teammates can be spawned
+        coord.set_shared_resources(
+            llm_client=MagicMock(),
+            policy_enforcer=MagicMock(),
+            tool_router=MagicMock(),
+        )
+
+        await coord.spawn_agent("w1", "coder", "code", 5000)
+        await coord.spawn_agent("w2", "tester", "test", 5000)
+
+        assert coord.manager is not None
+        # Simulate w2 being stopped
+        coord.manager.members["w2"].status = "stopped"
+
+        # Cancel existing tasks and clear sessions to simulate crash state
+        for task in coord._teammate_tasks.values():
+            task.cancel()
+        coord._teammate_sessions.clear()
+        coord._teammate_tasks.clear()
+
+        # Patch at the import source so the local import inside resume_teammates picks it up
+        mock_session = MagicMock()
+        mock_session.run = AsyncMock(return_value=None)
+        mock_session.cancel = MagicMock()
+
+        with unittest.mock.patch(
+            "agent_host.teams.teammate_session.TeammateSessionManager",
+            return_value=mock_session,
+        ) as mock_cls:
+            await coord.resume_teammates()
+            # Only w1 (running) should be resumed, not w2 (stopped)
+            assert mock_cls.call_count == 1
+            call_kwargs = mock_cls.call_args[1]
+            assert call_kwargs["name"] == "w1"
+
+        # Clean up
+        for task in coord._teammate_tasks.values():
+            task.cancel()
+
+    async def test_resume_noop_without_team(self) -> None:
+        """resume_teammates is a no-op when no team exists."""
+        coord = TeamCoordinator()
+        await coord.resume_teammates()  # should not raise
+
+    async def test_resume_noop_without_shared_resources(self) -> None:
+        """resume_teammates warns and skips when shared resources are missing."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 5000)
+        # No set_shared_resources called
+        await coord.resume_teammates()  # should not raise
+
+
+# ── Team Summary Upload ──────────────────────────────────────────
+
+
+class TestTeamSummaryUpload:
+    async def test_upload_team_summary_on_shutdown(self) -> None:
+        """on_session_shutdown should upload a team summary artifact."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_ws_client = MagicMock()
+        mock_ws_client.upload_artifact = AsyncMock()
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.set_shared_resources(
+            llm_client=MagicMock(),
+            policy_enforcer=MagicMock(),
+            tool_router=MagicMock(),
+            workspace_client=mock_ws_client,
+            workspace_id="ws-1",
+        )
+        coord.create_team("research")
+        assert coord.manager is not None
+        await coord.manager.task_list.create_task("Task A", "desc", created_by="lead")
+
+        await coord.on_session_shutdown()
+
+        mock_ws_client.upload_artifact.assert_called_once()
+        call_kwargs = mock_ws_client.upload_artifact.call_args[1]
+        assert call_kwargs["workspace_id"] == "ws-1"
+        assert call_kwargs["session_id"] == "sess-1"
+        assert call_kwargs["artifact_type"] == "team_summary"
+        assert call_kwargs["content_type"] == "application/json"
+
+        import json
+
+        summary = json.loads(call_kwargs["artifact_data"])
+        assert summary["team_name"] == "research"
+        assert len(summary["tasks"]) == 1
+        assert summary["tasks"][0]["title"] == "Task A"
+
+    async def test_upload_summary_skipped_without_workspace(self) -> None:
+        """No upload when workspace_client or workspace_id is missing."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        # No workspace_client set
+        await coord.on_session_shutdown()  # should not raise
+
+    async def test_upload_summary_failure_is_best_effort(self) -> None:
+        """Upload failure should not propagate."""
+        from unittest.mock import AsyncMock, MagicMock
+
+        mock_ws_client = MagicMock()
+        mock_ws_client.upload_artifact = AsyncMock(side_effect=RuntimeError("network"))
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.set_shared_resources(
+            llm_client=MagicMock(),
+            policy_enforcer=MagicMock(),
+            tool_router=MagicMock(),
+            workspace_client=mock_ws_client,
+            workspace_id="ws-1",
+        )
+        coord.create_team("t1")
+        await coord.on_session_shutdown()  # should not raise
+
+
+# ── Checkpoint Restore with Resume ────────────────────────────────
+
+
+class TestCheckpointRestoreResume:
+    async def test_restore_calls_resume_teammates(self) -> None:
+        """restore() should call resume_teammates to re-spawn running loops."""
+        import unittest.mock
+
+        # Build state from a coordinator with a running member
+        coord1 = TeamCoordinator(lead_session_id="sess-1")
+        coord1.create_team("research")
+        await coord1.spawn_agent("worker", "coder", "code", 5000)
+        assert coord1.manager is not None
+        cp1 = TeamCheckpointProvider(coord1)
+        state = cp1.capture()
+
+        # Restore into a fresh coordinator
+        coord2 = TeamCoordinator(lead_session_id="sess-1")
+        cp2 = TeamCheckpointProvider(coord2)
+
+        patch = unittest.mock.patch.object(coord2, "resume_teammates", new_callable=AsyncMock)
+        with patch as mock_resume:
+            await cp2.restore(state)
+            mock_resume.assert_called_once()
