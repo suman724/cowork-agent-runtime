@@ -48,6 +48,9 @@ class AgentHostConfig:
     session_service_url: str
     workspace_service_url: str
 
+    # Optional service URLs
+    approval_service_url: str = ""
+
     # Optional with defaults
     checkpoint_dir: str = field(default_factory=_default_checkpoint_dir)
     log_dir: str = field(default_factory=_default_log_dir)
@@ -98,6 +101,7 @@ class AgentHostConfig:
             llm_gateway_auth_token=_require("LLM_GATEWAY_AUTH_TOKEN"),
             session_service_url=_require("SESSION_SERVICE_URL"),
             workspace_service_url=_require("WORKSPACE_SERVICE_URL"),
+            approval_service_url=os.environ.get("APPROVAL_SERVICE_URL", ""),
             checkpoint_dir=os.environ.get("CHECKPOINT_DIR", _default_checkpoint_dir()),
             log_dir=os.environ.get("LOG_DIR", _default_log_dir()),
             approval_timeout_seconds=int(os.environ.get("APPROVAL_TIMEOUT_SECONDS", "300")),

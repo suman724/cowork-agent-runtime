@@ -21,6 +21,7 @@ from cowork_platform.session_create_response import SessionCreateResponse  # noq
 from cowork_platform_sdk import CapabilityName
 
 from agent_host.agent.file_change_tracker import FileChangeTracker
+from agent_host.approval.approval_client import ApprovalClient
 from agent_host.approval.approval_gate import ApprovalGate
 from agent_host.budget.token_budget import TokenBudget
 from agent_host.exceptions import (
@@ -97,6 +98,7 @@ class SessionManager:
         self._policy_enforcer: PolicyEnforcer | None = None
         self._token_budget: TokenBudget | None = None
         self._approval_gate: ApprovalGate | None = None
+        self._approval_client: ApprovalClient | None = None
         self._file_change_tracker: FileChangeTracker | None = None
 
         # Message thread (replaces ADK session)
@@ -335,8 +337,10 @@ class SessionManager:
         # Token budget
         self._token_budget = TokenBudget(max_session_tokens=max_tokens)
 
-        # Approval gate and file change tracker
+        # Approval gate, client, and file change tracker
         self._approval_gate = ApprovalGate()
+        if self._config.approval_service_url:
+            self._approval_client = ApprovalClient(self._config.approval_service_url)
         self._file_change_tracker = FileChangeTracker()
 
         # LLM client
@@ -536,11 +540,14 @@ class SessionManager:
                 policy_enforcer=self._policy_enforcer,
                 event_emitter=self._event_emitter,
                 approval_gate=self._approval_gate,
+                approval_client=self._approval_client,
                 file_change_tracker=self._file_change_tracker,
                 workspace_client=self._workspace_client,
                 execution_context=exec_context,
                 session_id=self._session_context.session_id,
                 workspace_id=self._session_context.workspace_id,
+                tenant_id=self._session_context.tenant_id,
+                user_id=self._session_context.user_id,
                 approval_timeout=float(self._config.approval_timeout_seconds),
                 plan_mode=plan_only,
                 plan_mode_locked=plan_only,
@@ -1220,11 +1227,14 @@ class SessionManager:
         # Close HTTP clients
         await self._session_client.close()
         await self._workspace_client.close()
+        if self._approval_client:
+            await self._approval_client.close()
 
         self._session_context = None
         self._llm_client = None
         self._current_task = None
         self._approval_gate = None
+        self._approval_client = None
         self._file_change_tracker = None
         self._thread = None
         self._working_memory = None
