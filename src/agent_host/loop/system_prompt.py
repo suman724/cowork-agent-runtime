@@ -32,8 +32,11 @@ Guidelines:
   read-only tools to explore the codebase, then call CreatePlan with a clear goal
   and concrete steps. This is essential — without calling CreatePlan, the user
   will not see your plan in the UI.
-- When following a plan, call UpdatePlanStep to mark each step as
-  in_progress when you start it and completed when you finish it."""
+- When following a plan, you MUST call UpdatePlanStep for EVERY step transition:
+  1. Call UpdatePlanStep(stepIndex, 'in_progress') when you START a step.
+  2. Call UpdatePlanStep(stepIndex, 'completed') when you FINISH a step.
+  Never move to the next step without marking the current one completed first.
+  The user sees step progress in real time — incomplete steps show as spinning."""
 
 
 class SystemPromptBuilder:

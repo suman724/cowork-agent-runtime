@@ -28,11 +28,21 @@ class Plan:
         lines = [f"## Current Plan\nGoal: {self.goal}"]
         for i, step in enumerate(self.steps, 1):
             lines.append(f"{i}. [{step.status}] {step.description}")
+        in_progress = [
+            (i, s) for i, s in enumerate(self.steps) if s.status == "in_progress"
+        ]
         has_pending = any(s.status == "pending" for s in self.steps)
-        if has_pending:
+        if in_progress:
+            indices = ", ".join(str(i) for i, _ in in_progress)
             lines.append(
-                "\nCall UpdatePlanStep(stepIndex, status) to mark steps "
-                "as in_progress/completed as you work through them."
+                f"\nIMPORTANT: Step(s) {indices} are still marked in_progress. "
+                "When you finish a step, you MUST call "
+                "UpdatePlanStep(stepIndex, 'completed') before moving to the next step."
+            )
+        elif has_pending:
+            lines.append(
+                "\nCall UpdatePlanStep(stepIndex, 'in_progress') when you start a step, "
+                "then UpdatePlanStep(stepIndex, 'completed') when you finish it."
             )
         return "\n".join(lines)
 
