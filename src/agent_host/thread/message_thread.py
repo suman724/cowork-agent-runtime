@@ -68,7 +68,7 @@ class MessageThread:
         if has_text:
             msg["content"] = text
 
-        if has_tool_calls:
+        if tool_calls:
             msg["tool_calls"] = [
                 {
                     "id": tc.id,
