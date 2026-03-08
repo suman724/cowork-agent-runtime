@@ -31,10 +31,18 @@ class TestMessageThread:
         thread.add_assistant_message("", tool_calls)
         msg = thread.messages[0]
         assert msg["role"] == "assistant"
-        assert msg["content"] is None
+        assert "content" not in msg  # content omitted when empty (API requires content OR tool_calls)
         assert len(msg["tool_calls"]) == 1
         assert msg["tool_calls"][0]["id"] == "tc1"
         assert msg["tool_calls"][0]["function"]["name"] == "ReadFile"
+
+    def test_add_assistant_message_empty_skipped(self) -> None:
+        """Empty assistant messages (no text, no tool_calls) are silently dropped."""
+        thread = MessageThread(system_prompt="test")
+        thread.add_assistant_message("", None)
+        assert thread.message_count == 0
+        thread.add_assistant_message("", [])
+        assert thread.message_count == 0
 
     def test_add_tool_result(self) -> None:
         thread = MessageThread(system_prompt="test")
