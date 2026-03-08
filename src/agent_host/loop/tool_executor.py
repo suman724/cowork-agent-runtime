@@ -14,6 +14,7 @@ from agent_host.loop.models import ToolCallResult
 
 if TYPE_CHECKING:
     from agent_host.agent.file_change_tracker import FileChangeTracker
+    from agent_host.approval.approval_client import ApprovalClient
     from agent_host.approval.approval_gate import ApprovalGate
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.models import ToolCallMessage
@@ -90,11 +91,14 @@ class ToolExecutor:
         policy_enforcer: PolicyEnforcer,
         event_emitter: EventEmitter | None = None,
         approval_gate: ApprovalGate | None = None,
+        approval_client: ApprovalClient | None = None,
         file_change_tracker: FileChangeTracker | None = None,
         workspace_client: WorkspaceClient | None = None,
         execution_context: ExecutionContext | None = None,
         session_id: str = "",
         workspace_id: str = "",
+        tenant_id: str = "",
+        user_id: str = "",
         approval_timeout: float = 300.0,
         plan_mode: bool = False,
         plan_mode_locked: bool = False,
@@ -103,11 +107,14 @@ class ToolExecutor:
         self._policy_enforcer = policy_enforcer
         self._event_emitter = event_emitter
         self._approval_gate = approval_gate
+        self._approval_client = approval_client
         self._file_change_tracker = file_change_tracker
         self._workspace_client = workspace_client
         self._execution_context = execution_context
         self._session_id = session_id
         self._workspace_id = workspace_id
+        self._tenant_id = tenant_id
+        self._user_id = user_id
         self._approval_timeout = approval_timeout
         self._plan_mode = plan_mode
         self._plan_mode_locked = plan_mode_locked
@@ -385,11 +392,14 @@ class ToolExecutor:
             return None
 
         approval_id = str(uuid.uuid4())
+        action_summary = f"{call.name} ({capability_name})"
+        risk_level = "medium"
+
         self._event_emitter.emit_approval_requested(
             approval_id=approval_id,
-            risk_level="medium",
+            risk_level=risk_level,
             tool_name=call.name,
-            action_summary=f"{call.name} ({capability_name})",
+            action_summary=action_summary,
             session_id=self._session_id,
             task_id=task_id,
             title=f"Approve {call.name}",
@@ -398,6 +408,17 @@ class ToolExecutor:
         decision = await self._approval_gate.request_approval(
             approval_id, timeout=self._approval_timeout
         )
+
+        # Persist decision to Approval Service (fire-and-forget)
+        self._persist_approval_decision(
+            approval_id=approval_id,
+            session_id=self._session_id,
+            task_id=task_id,
+            decision=decision,
+            action_summary=action_summary,
+            risk_level=risk_level,
+        )
+
         if decision != "approved":
             logger.info(
                 "tool_call_denied_by_approval",
@@ -430,6 +451,35 @@ class ToolExecutor:
             )
 
         return None  # Approved — continue with execution
+
+    def _persist_approval_decision(
+        self,
+        *,
+        approval_id: str,
+        session_id: str,
+        task_id: str,
+        decision: str,
+        action_summary: str,
+        risk_level: str,
+    ) -> None:
+        """Fire-and-forget: persist the approval decision to the Approval Service."""
+        if not self._approval_client:
+            return
+
+        from datetime import UTC, datetime
+
+        self._approval_client.persist_decision_background(
+            approval_id=approval_id,
+            session_id=session_id,
+            task_id=task_id,
+            user_id=self._user_id,
+            tenant_id=self._tenant_id,
+            workspace_id=self._workspace_id,
+            decision=decision,
+            action_summary=action_summary,
+            risk_level=risk_level,
+            client_timestamp=datetime.now(UTC),
+        )
 
     def _capture_pre_state(
         self, tool_name: str, arguments: dict[str, Any]
