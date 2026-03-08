@@ -455,6 +455,14 @@ class SessionManager:
             if self._workspace_dir:
                 llm_prompt = f"[Workspace: {self._workspace_dir}]\n\n{prompt}"
 
+            # In plan-only mode, inject explicit instruction to call CreatePlan
+            if task_options.get("planOnly"):
+                llm_prompt += (
+                    "\n\n[IMPORTANT: You are in plan-only mode. You MUST call the CreatePlan "
+                    "tool with a goal and steps before finishing. Use read-only tools to "
+                    "explore first, then call CreatePlan. Do NOT skip calling CreatePlan.]"
+                )
+
             # Add user message to thread (with workspace prefix for LLM)
             if self._thread:
                 self._thread.add_user_message(llm_prompt)
