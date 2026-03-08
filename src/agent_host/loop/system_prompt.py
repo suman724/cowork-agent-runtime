@@ -27,6 +27,11 @@ Guidelines:
 - For complex multi-step tasks, consider entering plan mode first (EnterPlanMode)
   to explore and create a structured plan before making changes.
   Exit plan mode (ExitPlanMode) when ready to execute your plan.
+- When in plan mode (either via EnterPlanMode or when the task was started with
+  planOnly=true), you MUST call CreatePlan to produce a structured plan. Use
+  read-only tools to explore the codebase, then call CreatePlan with a clear goal
+  and concrete steps. This is essential — without calling CreatePlan, the user
+  will not see your plan in the UI.
 - When following a plan, call UpdatePlanStep to mark each step as
   in_progress when you start it and completed when you finish it."""
 
