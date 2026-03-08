@@ -68,6 +68,12 @@ class SystemPromptBuilder:
         # Workspace context
         if self._workspace_context:
             parts.append(f"\nWorkspace:\n{self._workspace_context}")
+            parts.append(
+                f"All file operations (read, write, create) MUST use paths within "
+                f"the workspace directory ({self._workspace_dir}) unless the user "
+                f"explicitly specifies a different location. Never default to "
+                f"~/Documents or other directories outside the workspace."
+            )
 
         # Capability-dependent guidance
         if policy_enforcer is not None:
