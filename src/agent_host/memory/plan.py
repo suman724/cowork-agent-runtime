@@ -28,9 +28,7 @@ class Plan:
         lines = [f"## Current Plan\nGoal: {self.goal}"]
         for i, step in enumerate(self.steps, 1):
             lines.append(f"{i}. [{step.status}] {step.description}")
-        in_progress = [
-            (i, s) for i, s in enumerate(self.steps) if s.status == "in_progress"
-        ]
+        in_progress = [(i, s) for i, s in enumerate(self.steps) if s.status == "in_progress"]
         has_pending = any(s.status == "pending" for s in self.steps)
         if in_progress:
             indices = ", ".join(str(i) for i, _ in in_progress)
