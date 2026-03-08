@@ -66,6 +66,7 @@ def _make_session_manager() -> SessionManager:
 
     # Mock checkpoint manager
     sm._checkpoint_manager = MagicMock()
+    sm._checkpoint_manager.restore_strategies = AsyncMock()
 
     return sm
 

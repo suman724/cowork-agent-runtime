@@ -166,6 +166,7 @@ class TeammateSessionManager:
                 workspace_dir=self._workspace_dir,
                 context_injector=self._context_injector,
                 on_step_complete=self._on_step_complete,
+                agent_name=self.name,
             )
 
             strategy = ReactLoop(loop_runtime, max_steps=self._max_steps)

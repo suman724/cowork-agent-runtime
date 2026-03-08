@@ -72,6 +72,7 @@ class LoopRuntime:
         max_concurrent_sub_agents: int = 5,
         workspace_dir: str | None = None,
         context_injector: ContextInjectionStrategy | None = None,
+        agent_name: str = "lead",
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -92,6 +93,7 @@ class LoopRuntime:
         self._sub_agent_semaphore = asyncio.Semaphore(max_concurrent_sub_agents)
         self._workspace_dir = workspace_dir
         self._context_injector = context_injector
+        self._agent_name = agent_name
 
         # Wire sub-agent/skill callbacks into the agent tool handler
         if self._agent_tool_handler:
@@ -110,15 +112,19 @@ class LoopRuntime:
 
     # ── Context Injection ────────────────────────────────────────
 
-    async def get_context_injections(self, agent_name: str) -> list[str]:
+    async def get_context_injections(self, _agent_name: str = "") -> list[str]:
         """Get extra context strings from the injection strategy.
 
         Called by LoopStrategy during context assembly. Returns empty list
         if no injector is configured (solo mode).
+
+        Uses the ``agent_name`` set at construction (``"lead"`` for the lead,
+        teammate name for teammates) rather than the positional argument, which
+        historically received ``task_id`` by mistake.
         """
         if self._context_injector is None:
             return []
-        return await self._context_injector.get_injections(agent_name)
+        return await self._context_injector.get_injections(self._agent_name)
 
     def get_injection_overhead_tokens(self) -> int:
         """Estimated token cost of context injections for compaction budget."""

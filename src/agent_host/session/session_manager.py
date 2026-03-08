@@ -24,12 +24,6 @@ from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.approval.approval_client import ApprovalClient
 from agent_host.approval.approval_gate import ApprovalGate
 from agent_host.budget.token_budget import TokenBudget
-from agent_host.coordination.solo import (
-    SoloCheckpointProvider,
-    SoloContextInjector,
-    SoloCoordinator,
-    SoloToolProvider,
-)
 from agent_host.exceptions import (
     CheckpointError,
     NoActiveTaskError,
@@ -51,7 +45,12 @@ from agent_host.session.checkpoint_manager import CheckpointManager, SessionChec
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
 from agent_host.skills.skill_loader import SkillLoader
-from agent_host.teams.strategies import TeamCoordinator
+from agent_host.teams.strategies import (
+    TeamCheckpointProvider,
+    TeamContextInjector,
+    TeamCoordinator,
+    TeamToolProvider,
+)
 from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
 from agent_host.thread.message_thread import MessageThread
 from tool_runtime.models import ExecutionContext
@@ -97,9 +96,6 @@ class SessionManager:
         # Service clients
         self._session_client = SessionClient(config.session_service_url)
         self._workspace_client = WorkspaceClient(config.workspace_service_url)
-
-        # Checkpoint manager (replaces ADK CheckpointSessionService)
-        self._checkpoint_manager = CheckpointManager(config.checkpoint_dir)
 
         # LLM client (initialized on create_session)
         self._llm_client: LLMClient | None = None
@@ -155,11 +151,25 @@ class SessionManager:
         # Incomplete task from crash recovery (set by _restore_from_checkpoint)
         self._incomplete_task: dict[str, Any] | None = None
 
-        # Strategy interfaces (default to Solo no-ops)
-        self._coordination: CoordinationStrategy = SoloCoordinator()
-        self._tool_provider: ToolProviderStrategy = SoloToolProvider()
-        self._context_injector: ContextInjectionStrategy = SoloContextInjector()
-        self._checkpoint_strategy: CheckpointStrategy = SoloCheckpointProvider()
+        # Strategy interfaces — Team strategies for lead sessions.
+        # TeamToolProvider only exposes CreateTeam before a team is active,
+        # so these are safe to use for solo sessions too.
+        coordinator = TeamCoordinator()
+        tool_provider = TeamToolProvider(coordinator)
+        context_injector = TeamContextInjector(coordinator)
+        # Store back-references so teammates reuse the same strategy instances
+        coordinator._tool_provider = tool_provider
+        coordinator._context_injector = context_injector
+        self._coordination: CoordinationStrategy = coordinator
+        self._tool_provider: ToolProviderStrategy = tool_provider
+        self._context_injector: ContextInjectionStrategy = context_injector
+        self._checkpoint_strategy: CheckpointStrategy = TeamCheckpointProvider(coordinator)
+
+        # Checkpoint manager — wired with team checkpoint strategy
+        self._checkpoint_manager = CheckpointManager(
+            config.checkpoint_dir,
+            extra_strategies=[self._checkpoint_strategy],
+        )
 
     @property
     def session_context(self) -> SessionContext | None:
@@ -976,6 +986,9 @@ class SessionManager:
                 task_id=checkpoint.active_task_id,
                 last_step=checkpoint.active_task_step,
             )
+
+        # Restore coordination strategy state (e.g. team members + task list)
+        await self._checkpoint_manager.restore_strategies()
 
         if self._event_emitter:
             self._event_emitter.emit_checkpoint_restored(source="local")
