@@ -28,6 +28,12 @@ class Plan:
         lines = [f"## Current Plan\nGoal: {self.goal}"]
         for i, step in enumerate(self.steps, 1):
             lines.append(f"{i}. [{step.status}] {step.description}")
+        has_pending = any(s.status == "pending" for s in self.steps)
+        if has_pending:
+            lines.append(
+                "\nCall UpdatePlanStep(stepIndex, status) to mark steps "
+                "as in_progress/completed as you work through them."
+            )
         return "\n".join(lines)
 
     def to_checkpoint(self) -> dict[str, Any]:
