@@ -6,7 +6,11 @@ and expose them through the strategy interfaces defined in coordination.protocol
 
 from __future__ import annotations
 
-from typing import Any
+import asyncio
+import contextlib
+from typing import TYPE_CHECKING, Any
+
+import structlog
 
 from agent_host.teams.models import TeamConfig
 from agent_host.teams.team_manager import TeamManager
@@ -16,14 +20,64 @@ from agent_host.teams.tools import (
     SHARED_TOOLS,
 )
 
+if TYPE_CHECKING:
+    from agent_host.events.event_emitter import EventEmitter
+    from agent_host.llm.client import LLMClient
+    from agent_host.loop.models import LoopResult
+    from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_host.teams.teammate_session import TeammateSessionManager
+    from tool_runtime import ToolRouter
+
+logger = structlog.get_logger()
+
+# Teammate shutdown timeout (seconds)
+_SHUTDOWN_TIMEOUT = 60
+
 
 class TeamCoordinator:
-    """Implements CoordinationStrategy by wrapping TeamManager."""
+    """Implements CoordinationStrategy by wrapping TeamManager.
+
+    Call ``set_shared_resources()`` after session creation to provide
+    the resources teammates need (LLMClient, PolicyEnforcer, etc.).
+    """
 
     def __init__(self, lead_session_id: str = "", config: TeamConfig | None = None) -> None:
         self._lead_session_id = lead_session_id
         self._config = config or TeamConfig()
         self._manager: TeamManager | None = None
+
+        # Shared resources (set by SessionManager after session creation)
+        self._llm_client: LLMClient | None = None
+        self._policy_enforcer: PolicyEnforcer | None = None
+        self._tool_router: ToolRouter | None = None
+        self._workspace_dir: str | None = None
+        self._event_emitter: EventEmitter | None = None
+        self._max_context_tokens: int = 100_000
+
+        # Running teammate sessions and their asyncio tasks
+        self._teammate_sessions: dict[str, TeammateSessionManager] = {}
+        self._teammate_tasks: dict[str, asyncio.Task[LoopResult | None]] = {}
+
+        # Back-references to strategy siblings (set by TeamToolProvider/TeamContextInjector)
+        self._tool_provider: TeamToolProvider | None = None
+        self._context_injector: TeamContextInjector | None = None
+
+    def set_shared_resources(
+        self,
+        llm_client: LLMClient,
+        policy_enforcer: PolicyEnforcer,
+        tool_router: ToolRouter,
+        workspace_dir: str | None = None,
+        event_emitter: EventEmitter | None = None,
+        max_context_tokens: int = 100_000,
+    ) -> None:
+        """Provide shared resources from the lead's SessionManager."""
+        self._llm_client = llm_client
+        self._policy_enforcer = policy_enforcer
+        self._tool_router = tool_router
+        self._workspace_dir = workspace_dir
+        self._event_emitter = event_emitter
+        self._max_context_tokens = max_context_tokens
 
     @property
     def manager(self) -> TeamManager | None:
@@ -38,7 +92,7 @@ class TeamCoordinator:
 
     async def on_session_shutdown(self) -> None:
         if self._manager is not None:
-            await self._manager.shutdown_all()
+            await self._shutdown_all_teammates()
             self._manager = None
 
     def create_team(self, name: str, description: str = "") -> TeamManager:
@@ -63,20 +117,43 @@ class TeamCoordinator:
             msg = "No active team — call CreateTeam first"
             raise RuntimeError(msg)
         info = await self._manager.create_teammate(name, role, budget)
+
+        # If shared resources are available, create and launch the teammate loop
+        if self._llm_client and self._policy_enforcer and self._tool_router:
+            from agent_host.teams.teammate_session import TeammateSessionManager
+
+            teammate = TeammateSessionManager(
+                name=name,
+                role=role,
+                team_name=self._manager.config.name,
+                llm_client=self._llm_client,
+                policy_enforcer=self._policy_enforcer,
+                tool_router=self._tool_router,
+                workspace_dir=self._workspace_dir,
+                tool_provider=self._tool_provider or TeamToolProvider(self),
+                context_injector=self._context_injector or TeamContextInjector(self),
+                budget=budget or 100_000,
+                max_context_tokens=self._max_context_tokens,
+                event_emitter=self._event_emitter,
+            )
+            self._teammate_sessions[name] = teammate
+            task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
+            self._teammate_tasks[name] = task
+            info.status = "running"
+
         return {
             "name": info.name,
             "role": info.role,
-            "status": info.status,
             "initial_prompt": initial_prompt,
         }
 
     async def shutdown_agent(self, name: str) -> None:
         if self._manager is not None:
-            await self._manager.shutdown_teammate(name)
+            await self._shutdown_teammate(name)
 
     async def shutdown_all(self) -> None:
         if self._manager is not None:
-            await self._manager.shutdown_all()
+            await self._shutdown_all_teammates()
 
     def get_active_agents(self) -> list[dict[str, Any]]:
         if self._manager is None:
@@ -85,6 +162,43 @@ class TeamCoordinator:
             {"name": m.name, "role": m.role, "status": m.status, "budget": m.budget}
             for m in self._manager.get_active_agents()
         ]
+
+    async def _shutdown_teammate(self, name: str) -> None:
+        """Cancel a teammate's loop and clean up."""
+        session = self._teammate_sessions.pop(name, None)
+        task = self._teammate_tasks.pop(name, None)
+
+        if session is not None:
+            session.cancel()
+
+        if task is not None and not task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=_SHUTDOWN_TIMEOUT)
+            except TimeoutError:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            except asyncio.CancelledError:
+                pass
+
+        if self._manager is not None:
+            with contextlib.suppress(KeyError):
+                await self._manager.shutdown_teammate(name)
+
+    async def _shutdown_all_teammates(self) -> None:
+        """Shut down all teammate loops concurrently."""
+        names = list(self._teammate_sessions.keys())
+        if names:
+            await asyncio.gather(
+                *(self._shutdown_teammate(n) for n in names),
+                return_exceptions=True,
+            )
+        # Clean up any remaining members in manager
+        if self._manager is not None:
+            remaining = list(self._manager.members.keys())
+            for name in remaining:
+                with contextlib.suppress(KeyError):
+                    await self._manager.shutdown_teammate(name)
 
 
 class TeamToolProvider:

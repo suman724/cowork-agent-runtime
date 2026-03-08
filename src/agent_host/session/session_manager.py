@@ -51,6 +51,7 @@ from agent_host.session.checkpoint_manager import CheckpointManager, SessionChec
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
 from agent_host.skills.skill_loader import SkillLoader
+from agent_host.teams.strategies import TeamCoordinator
 from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
 from agent_host.thread.message_thread import MessageThread
 from tool_runtime.models import ExecutionContext
@@ -414,6 +415,21 @@ class SessionManager:
         if self._skills:
             logger.info("skills_loaded", count=len(self._skills))
 
+        # Pass shared resources to team coordinator if active
+        self._configure_team_resources()
+
+    def _configure_team_resources(self) -> None:
+        """Pass shared resources to the TeamCoordinator so it can spawn teammates."""
+        if isinstance(self._coordination, TeamCoordinator) and self._llm_client:
+            self._coordination.set_shared_resources(
+                llm_client=self._llm_client,
+                policy_enforcer=self._policy_enforcer,  # type: ignore[arg-type]
+                tool_router=self._tool_router,
+                workspace_dir=self._workspace_dir,
+                event_emitter=self._event_emitter,
+                max_context_tokens=self._max_context_tokens,
+            )
+
     @staticmethod
     def _inject_workspace_path(policy_bundle: PolicyBundle, workspace_dir: str) -> None:
         """Add the workspace directory to allowedPaths for path-based capabilities.
@@ -624,6 +640,8 @@ class SessionManager:
                 plan_mode=plan_only,
                 plan_mode_locked=plan_only,
                 workspace_dir=self._workspace_dir,
+                tool_provider=self._tool_provider,
+                agent_role="lead",
             )
 
             # Build LoopRuntime + ReactLoop
@@ -643,6 +661,7 @@ class SessionManager:
                 on_step_complete=self._on_step_complete,
                 skills=self._skills,
                 workspace_dir=self._workspace_dir,
+                context_injector=self._context_injector,
             )
 
             # Build verification config

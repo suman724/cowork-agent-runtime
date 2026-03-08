@@ -23,7 +23,7 @@ agent_host/     ← Local Agent Host (custom agent loop)
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
   coordination/ — Strategy interfaces (protocols) + Solo (no-op) implementations for extensibility (teams, MCP, etc.)
-  teams/        — Team primitives: SharedTaskList (dependency resolution), MailboxRouter (per-agent queues), TeamManager (lifecycle)
+  teams/        — Team primitives (SharedTaskList, MailboxRouter, TeamManager), strategy implementations, TeammateSessionManager
   events/       — Event emitter: SessionEvent notifications + structured logging
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
