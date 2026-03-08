@@ -454,6 +454,9 @@ class TeamToolProvider:
             )
         except KeyError as e:
             return {"status": "error", "message": str(e)}
+        # Wake the lead when a teammate creates a task
+        if agent_name != "lead":
+            self._coordinator.wake()
         return {"status": "success", "task_id": task.task_id, "title": task.title}
 
     async def _handle_task_update(self, arguments: dict[str, Any]) -> dict[str, Any]:

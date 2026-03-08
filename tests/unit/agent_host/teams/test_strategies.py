@@ -727,6 +727,43 @@ class TestAgentNameDispatch:
 # ── Wake Race Condition Fix ──────────────────────────────────────
 
 
+class TestWakeOnTaskCreate:
+    async def test_teammate_task_create_wakes_lead(self) -> None:
+        """Task creation by a teammate should wake the lead."""
+        import asyncio
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        tp = TeamToolProvider(coord)
+
+        async def create_task_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            await tp.handle_tool_call(
+                "TeamTaskCreate",
+                {"title": "New task", "description": "desc"},
+                "researcher",  # teammate name, not "lead"
+            )
+
+        bg = asyncio.create_task(create_task_after_delay())
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 5}, "lead")
+        await bg
+        assert result["wake_reason"] == "event"
+
+    async def test_lead_task_create_does_not_wake(self) -> None:
+        """Task creation by the lead should NOT trigger a self-wake."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        tp = TeamToolProvider(coord)
+
+        await tp.handle_tool_call(
+            "TeamTaskCreate",
+            {"title": "Lead task", "description": "desc"},
+            "lead",
+        )
+        # Event should NOT be set
+        assert not coord._wake_event.is_set()
+
+
 class TestWakeRaceFix:
     async def test_wake_before_wait_returns_immediately(self) -> None:
         """If wake() fires before wait_for_wake(), should return 'event' immediately."""
