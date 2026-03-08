@@ -51,15 +51,24 @@ class MessageThread:
     def add_assistant_message(
         self, text: str, tool_calls: list[ToolCallMessage] | None = None
     ) -> None:
-        """Append an assistant message, optionally with tool calls."""
+        """Append an assistant message, optionally with tool calls.
+
+        Skips empty messages (no text AND no tool_calls) to avoid producing
+        invalid API payloads — the OpenAI chat completion format requires
+        assistant messages to have at least one of content or tool_calls.
+        """
+        has_text = bool(text)
+        has_tool_calls = bool(tool_calls)
+
+        if not has_text and not has_tool_calls:
+            return  # Skip empty assistant messages
+
         msg: dict[str, Any] = {"role": "assistant"}
 
-        if text:
+        if has_text:
             msg["content"] = text
-        else:
-            msg["content"] = None
 
-        if tool_calls:
+        if has_tool_calls:
             msg["tool_calls"] = [
                 {
                     "id": tc.id,

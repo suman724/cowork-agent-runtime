@@ -46,6 +46,13 @@ class ReactLoop:
         last_text = ""
         verification_injected = False
 
+        logger.info(
+            "react_loop_start",
+            task_id=task_id,
+            plan_mode_locked=self._h.plan_mode_locked,
+            max_steps=self._max_steps,
+        )
+
         while step < self._max_steps:
             step_id = self._h.new_step_id()
 

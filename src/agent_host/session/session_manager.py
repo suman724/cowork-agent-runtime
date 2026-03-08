@@ -121,7 +121,7 @@ class SessionManager:
         # Workspace directory (set from workspace hint in create_session)
         self._workspace_dir: str | None = None
 
-        # Cumulative session history (across tasks)
+        # Session history (rebuilt from thread on each upload)
         self._session_messages: list[ConversationMessage] = []
 
         # LLM limits (overridden by policy bundle in _init_components)
@@ -423,6 +423,12 @@ class SessionManager:
 
         # Parse taskOptions - extract maxSteps (clamped 1-200)
         task_options = params.get("taskOptions") or {}
+        logger.info(
+            "start_task_options",
+            task_id=task_id,
+            plan_only=task_options.get("planOnly"),
+            task_options_keys=list(task_options.keys()),
+        )
         raw_max_steps = task_options.get("maxSteps", self._config.default_max_steps)
         try:
             max_steps = int(raw_max_steps)
@@ -510,6 +516,12 @@ class SessionManager:
 
         task_options = task_options or {}
         plan_only = bool(task_options.get("planOnly", False))
+        logger.info(
+            "run_task_plan_mode",
+            task_id=task_id,
+            plan_only=plan_only,
+            task_options_keys=list(task_options.keys()),
+        )
 
         assistant_text = ""
         try:
@@ -674,7 +686,7 @@ class SessionManager:
 
             # Always upload history and persist checkpoint, even on error/cancel.
             # This ensures the user can see their conversation when they come back.
-            await self._upload_history(prompt, assistant_text, task_id)
+            await self._upload_history(prompt, task_id)
             self._persist_checkpoint()
 
     async def _update_session_name(self, name: str) -> None:
@@ -906,11 +918,118 @@ class SessionManager:
         if self._event_emitter:
             self._event_emitter.emit_checkpoint_restored(source="local")
 
-    async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
-        """Upload cumulative session history to workspace service (best-effort).
+    def _build_history_from_thread(
+        self,
+        session_id: str,
+        task_id: str,
+        timestamp: Any,
+        current_prompt: str,
+    ) -> list[ConversationMessage]:
+        """Convert the full thread into a list of ConversationMessages for history.
 
-        Appends this task's messages to _session_messages, then uploads the full list.
-        Caps at 500 messages (drops oldest, keeps first system message).
+        User messages in the thread contain workspace prefixes and plan-mode injections.
+        We strip those for the *current* task's user message by substituting the raw prompt.
+        For older tasks' user messages, we store them as-is (they were already cleaned
+        and uploaded in prior calls, but since we rebuild from scratch, we accept the
+        workspace prefix for older tasks — it's useful context in history).
+        """
+        if not self._thread:
+            return []
+
+        messages: list[ConversationMessage] = []
+        assistant_index = 0
+        tool_msg_index = 0
+        last_user_index = -1
+
+        # Find the index of the last user message (= current task's prompt)
+        all_msgs = self._thread.messages
+        for i, msg in enumerate(all_msgs):
+            if msg.get("role") == "user":
+                last_user_index = i
+
+        for i, msg in enumerate(all_msgs):
+            role = msg.get("role", "")
+
+            if role == "user":
+                # Use clean prompt for the current task's user message
+                content = current_prompt if i == last_user_index else (msg.get("content") or "")
+                messages.append(
+                    ConversationMessage(
+                        messageId=f"{task_id}-user-{len(messages)}",
+                        sessionId=session_id,
+                        taskId=task_id,
+                        role="user",
+                        content=content,
+                        timestamp=timestamp,
+                    )
+                )
+
+            elif role == "assistant":
+                text = msg.get("content") or ""
+                if text:
+                    messages.append(
+                        ConversationMessage(
+                            messageId=f"{task_id}-assistant-{assistant_index}",
+                            sessionId=session_id,
+                            taskId=task_id,
+                            role="assistant",
+                            content=text,
+                            timestamp=timestamp,
+                        )
+                    )
+                    assistant_index += 1
+
+                if msg.get("tool_calls"):
+                    for tc in msg["tool_calls"]:
+                        fn = tc.get("function", {})
+                        tool_call_data = {
+                            "type": "tool_call",
+                            "toolName": fn.get("name", ""),
+                            "arguments": fn.get("arguments", "{}"),
+                        }
+                        messages.append(
+                            ConversationMessage(
+                                messageId=f"{task_id}-tool-{tool_msg_index}",
+                                sessionId=session_id,
+                                taskId=task_id,
+                                role="tool",
+                                content=json.dumps(tool_call_data, default=str),
+                                timestamp=timestamp,
+                            )
+                        )
+                        tool_msg_index += 1
+
+            elif role == "tool":
+                tool_output = msg.get("content", "")
+                if isinstance(tool_output, str) and len(tool_output) > _MAX_TOOL_OUTPUT_LENGTH:
+                    tool_output = tool_output[:_MAX_TOOL_OUTPUT_LENGTH] + "... [truncated]"
+                tool_msg_data = {
+                    "type": "tool_result",
+                    "toolName": msg.get("name", ""),
+                    "output": tool_output if isinstance(tool_output, str) else str(tool_output),
+                }
+                messages.append(
+                    ConversationMessage(
+                        messageId=f"{task_id}-tool-{tool_msg_index}",
+                        sessionId=session_id,
+                        taskId=task_id,
+                        role="tool",
+                        content=json.dumps(tool_msg_data, default=str),
+                        timestamp=timestamp,
+                    )
+                )
+                tool_msg_index += 1
+            # Skip system messages (injections, not user-facing)
+
+        return messages
+
+    async def _upload_history(self, prompt: str, task_id: str) -> None:
+        """Upload full session history to workspace service (best-effort).
+
+        Rebuilds the complete message list from the thread each time.
+        The workspace service stores this as a full snapshot (write-then-delete),
+        so we don't need incremental tracking.
+        Caps at 500 messages (drops oldest, keeps first).
         """
         if not self._session_context:
             return
@@ -919,74 +1038,14 @@ class SessionManager:
             from datetime import UTC, datetime
 
             now = datetime.now(tz=UTC)
-            task_messages: list[ConversationMessage] = [
-                ConversationMessage(
-                    messageId=f"{task_id}-user",
-                    sessionId=self._session_context.session_id,
-                    taskId=task_id,
-                    role="user",
-                    content=prompt,
-                    timestamp=now,
-                ),
-            ]
+            session_id = self._session_context.session_id
 
-            # Build tool messages from the thread (current task's messages)
-            if self._thread:
-                tool_msg_index = 0
-                for msg in self._thread.messages:
-                    if msg.get("role") == "tool":
-                        tool_output = msg.get("content", "")
-                        if len(tool_output) > _MAX_TOOL_OUTPUT_LENGTH:
-                            tool_output = tool_output[:_MAX_TOOL_OUTPUT_LENGTH] + "... [truncated]"
-                        tool_msg_data = {
-                            "type": "tool_result",
-                            "toolName": msg.get("name", ""),
-                            "output": tool_output,
-                        }
-                        task_messages.append(
-                            ConversationMessage(
-                                messageId=f"{task_id}-tool-{tool_msg_index}",
-                                sessionId=self._session_context.session_id,
-                                taskId=task_id,
-                                role="tool",
-                                content=json.dumps(tool_msg_data, default=str),
-                                timestamp=now,
-                            )
-                        )
-                        tool_msg_index += 1
-                    elif msg.get("role") == "assistant" and msg.get("tool_calls"):
-                        for tc in msg["tool_calls"]:
-                            fn = tc.get("function", {})
-                            tool_call_data = {
-                                "type": "tool_call",
-                                "toolName": fn.get("name", ""),
-                                "arguments": fn.get("arguments", "{}"),
-                            }
-                            task_messages.append(
-                                ConversationMessage(
-                                    messageId=f"{task_id}-tool-{tool_msg_index}",
-                                    sessionId=self._session_context.session_id,
-                                    taskId=task_id,
-                                    role="tool",
-                                    content=json.dumps(tool_call_data, default=str),
-                                    timestamp=now,
-                                )
-                            )
-                            tool_msg_index += 1
-
-            task_messages.append(
-                ConversationMessage(
-                    messageId=f"{task_id}-assistant",
-                    sessionId=self._session_context.session_id,
-                    taskId=task_id,
-                    role="assistant",
-                    content=assistant_text,
-                    timestamp=now,
-                ),
+            # Rebuild full history from the thread (session-scoped, cumulative).
+            # The thread contains: user, assistant (text and/or tool_calls), tool results,
+            # and system injections. We convert user/assistant/tool; skip system.
+            self._session_messages = self._build_history_from_thread(
+                session_id, task_id, now, prompt
             )
-
-            # Accumulate into session-level history
-            self._session_messages.extend(task_messages)
 
             # Cap at 500 messages (drop oldest, keep first)
             max_history = 500
