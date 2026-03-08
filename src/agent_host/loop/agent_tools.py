@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
+    from agent_host.coordination.protocols import ToolProviderStrategy
     from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.skills.models import SkillDefinition
@@ -45,6 +46,8 @@ class AgentToolHandler:
         plan_mode: bool = False,
         plan_mode_locked: bool = False,
         workspace_dir: str | None = None,
+        tool_provider: ToolProviderStrategy | None = None,
+        agent_role: str = "solo",
     ) -> None:
         self._working_memory = working_memory
         self._workspace_dir = workspace_dir
@@ -57,10 +60,14 @@ class AgentToolHandler:
         self._on_plan_updated = on_plan_updated
         self._plan_mode = plan_mode
         self._plan_mode_locked = plan_mode_locked
+        self._tool_provider = tool_provider
+        self._agent_role = agent_role
 
     def is_agent_tool(self, name: str) -> bool:
-        """Check if a tool name is an agent-internal tool or a skill."""
-        return name in AGENT_TOOL_NAMES or name in self._skill_tool_names
+        """Check if a tool name is an agent-internal tool, skill, or strategy-provided."""
+        if name in AGENT_TOOL_NAMES or name in self._skill_tool_names:
+            return True
+        return self._tool_provider is not None and self._tool_provider.owns_tool(name)
 
     async def execute(
         self, tool_name: str, arguments: dict[str, Any], task_id: str = ""
@@ -88,6 +95,12 @@ class AgentToolHandler:
             return await self._handle_delete_memory(arguments)
         if tool_name in self._skill_tool_names:
             return await self._handle_skill(tool_name, arguments, task_id)
+        if self._tool_provider is not None and self._tool_provider.owns_tool(tool_name):
+            return await self._tool_provider.handle_tool_call(
+                tool_name,
+                arguments,
+                self._agent_role,
+            )
         return {"status": "error", "message": f"Unknown agent tool: {tool_name}"}
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
@@ -347,6 +360,10 @@ class AgentToolHandler:
             else:
                 skill_def["function"]["parameters"] = {"type": "object", "properties": {}}
             defs.append(skill_def)
+
+        # Append strategy-provided tools
+        if self._tool_provider is not None:
+            defs.extend(self._tool_provider.get_tool_definitions(self._agent_role))
 
         return defs
 

@@ -22,6 +22,7 @@ agent_host/     ← Local Agent Host (custom agent loop)
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
+  coordination/ — Strategy interfaces (protocols) + Solo (no-op) implementations for extensibility (teams, MCP, etc.)
   events/       — Event emitter: SessionEvent notifications + structured logging
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
@@ -51,6 +52,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - `LoopStrategy` protocol (`loop/strategy.py`) — single method `async def run(task_id) -> LoopResult`. Strategies compose LoopRuntime primitives.
   - `ReactLoop` (`loop/react_loop.py`) — default strategy (linear ReAct). Owns context assembly (memory injection, working memory, compaction, error recovery) and tool routing (agent-internal vs external).
   - `AgentLoop` (`loop/agent_loop.py`) — thin alias for `ReactLoop` (backward compat).
+- **Coordination strategies** (`coordination/`) — 4 `@runtime_checkable` Protocol interfaces (`CoordinationStrategy`, `ToolProviderStrategy`, `ContextInjectionStrategy`, `CheckpointStrategy`) with Solo (no-op) defaults. Strategies are injected into `SessionManager`, `AgentToolHandler`, `LoopRuntime`, and `CheckpointManager`. Solo implementations preserve existing single-agent behavior; feature-specific implementations (e.g., Agent Teams) extend behavior without modifying core code. See `cowork-infra/docs/components/agent-teams.md`.
 - **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
 - **Infrastructure layers inside LoopRuntime:**
   - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload. Supports **parallel tool execution** via `asyncio.gather()` with intelligent grouping (read-only tools batched, writes serialized per path, shell commands always serial). Also enforces **plan mode** restrictions (filters tool definitions, denies blocked tools with `PLAN_MODE_RESTRICTED`).
@@ -149,6 +151,7 @@ cowork-agent-runtime/
       policy/                 # Policy enforcer, path/command/domain matchers, risk assessor
       budget/                 # Token budget tracking
       approval/               # Approval gate (asyncio Futures)
+      coordination/           # Strategy protocols + Solo implementations
       events/                 # Event emitter
     tool_runtime/
       __init__.py

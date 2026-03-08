@@ -24,6 +24,12 @@ from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.approval.approval_client import ApprovalClient
 from agent_host.approval.approval_gate import ApprovalGate
 from agent_host.budget.token_budget import TokenBudget
+from agent_host.coordination.solo import (
+    SoloCheckpointProvider,
+    SoloContextInjector,
+    SoloCoordinator,
+    SoloToolProvider,
+)
 from agent_host.exceptions import (
     CheckpointError,
     NoActiveTaskError,
@@ -51,6 +57,12 @@ from tool_runtime.models import ExecutionContext
 
 if TYPE_CHECKING:
     from agent_host.config import AgentHostConfig
+    from agent_host.coordination.protocols import (
+        CheckpointStrategy,
+        ContextInjectionStrategy,
+        CoordinationStrategy,
+        ToolProviderStrategy,
+    )
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.server.stdio_transport import StdioTransport
     from agent_host.skills.models import SkillDefinition
@@ -141,6 +153,12 @@ class SessionManager:
 
         # Incomplete task from crash recovery (set by _restore_from_checkpoint)
         self._incomplete_task: dict[str, Any] | None = None
+
+        # Strategy interfaces (default to Solo no-ops)
+        self._coordination: CoordinationStrategy = SoloCoordinator()
+        self._tool_provider: ToolProviderStrategy = SoloToolProvider()
+        self._context_injector: ContextInjectionStrategy = SoloContextInjector()
+        self._checkpoint_strategy: CheckpointStrategy = SoloCheckpointProvider()
 
     @property
     def session_context(self) -> SessionContext | None:
@@ -236,6 +254,12 @@ class SessionManager:
         if self._event_emitter:
             self._event_emitter.emit_session_created()
 
+        # Notify coordination strategy
+        await self._coordination.on_session_start(
+            response.sessionId,
+            params,
+        )
+
         logger.info(
             "session_created",
             session_id=response.sessionId,
@@ -299,6 +323,12 @@ class SessionManager:
 
         if self._event_emitter:
             self._event_emitter.emit_session_created()
+
+        # Notify coordination strategy
+        await self._coordination.on_session_start(
+            response.sessionId,
+            params,
+        )
 
         logger.info(
             "session_resumed",
@@ -1191,6 +1221,10 @@ class SessionManager:
         """Clean session teardown."""
         # Check for active task *before* cancelling it
         had_active_task = bool(self._current_task and not self._current_task.done())
+
+        # Shut down coordinated agents (teammates, etc.) before cancelling lead task
+        with contextlib.suppress(Exception):
+            await self._coordination.on_session_shutdown()
 
         # Cancel any running task
         if had_active_task and self._current_task:
