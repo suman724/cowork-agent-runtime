@@ -46,6 +46,7 @@ from agent_host.session.workspace_client import WorkspaceClient
 from agent_host.skills.skill_loader import SkillLoader
 from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
 from agent_host.thread.message_thread import MessageThread
+from tool_runtime.models import ExecutionContext
 
 if TYPE_CHECKING:
     from agent_host.config import AgentHostConfig
@@ -504,6 +505,11 @@ class SessionManager:
 
         assistant_text = ""
         try:
+            # Build execution context with workspace working directory
+            exec_context: ExecutionContext | None = None
+            if self._workspace_dir:
+                exec_context = ExecutionContext(working_directory=self._workspace_dir)
+
             # Build tool executor (with plan mode support)
             tool_executor = ToolExecutor(
                 tool_router=self._tool_router,
@@ -512,6 +518,7 @@ class SessionManager:
                 approval_gate=self._approval_gate,
                 file_change_tracker=self._file_change_tracker,
                 workspace_client=self._workspace_client,
+                execution_context=exec_context,
                 session_id=self._session_context.session_id,
                 workspace_id=self._session_context.workspace_id,
                 approval_timeout=float(self._config.approval_timeout_seconds),
