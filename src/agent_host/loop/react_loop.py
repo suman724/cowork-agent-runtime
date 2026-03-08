@@ -90,6 +90,24 @@ class ReactLoop:
             # 6. Natural termination (checked BEFORE hard limit so verification
             #    can extend the step budget)
             if not response.tool_calls and response.stop_reason == "stop":
+                # Plan-only enforcement: block termination if no plan created
+                has_plan = (
+                    self._h.working_memory is not None and self._h.working_memory.plan is not None
+                )
+                if self._h.plan_mode_locked and not has_plan:
+                    logger.info(
+                        "plan_mode_termination_blocked",
+                        task_id=task_id,
+                        step=step,
+                        reason="no_plan_created",
+                    )
+                    self._h.thread.add_system_injection(
+                        "You are in plan-only mode but have not created a plan yet. "
+                        "You MUST call the CreatePlan tool with a goal and steps "
+                        "before you can finish. Do it now."
+                    )
+                    continue  # Re-enter loop so LLM creates a plan
+
                 # Verification phase: inject verification prompt on first completion
                 if self._verification and self._verification.enabled and not verification_injected:
                     verification_injected = True

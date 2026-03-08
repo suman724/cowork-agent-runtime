@@ -37,6 +37,7 @@ def _make_loop_runtime(
     tool_executor = MagicMock()
     tool_executor.get_tool_definitions.return_value = []
     tool_executor.execute_tool_calls = AsyncMock(return_value=[])
+    tool_executor.plan_mode_locked = False
 
     thread = MessageThread(system_prompt="test")
     compactor = DropOldestCompactor(recency_window=10)

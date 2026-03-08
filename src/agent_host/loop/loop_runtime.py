@@ -513,6 +513,11 @@ class LoopRuntime:
         return self._memory_manager
 
     @property
+    def plan_mode_locked(self) -> bool:
+        """Whether plan mode is hard-locked (planOnly=true)."""
+        return self._tool_executor.plan_mode_locked
+
+    @property
     def error_recovery(self) -> ErrorRecovery:
         """Error recovery tracker."""
         return self._error_recovery
