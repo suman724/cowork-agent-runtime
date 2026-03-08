@@ -227,7 +227,6 @@ class SessionManager:
         # Reset cumulative history for the new session
         self._session_messages = []
 
-
         # Restore token budget and session messages from checkpoint (crash recovery)
         await self._restore_from_checkpoint()
 
@@ -281,7 +280,6 @@ class SessionManager:
 
         # Restore cumulative history from Workspace Service
         self._session_messages = []
-
         prior_messages = await self._workspace_client.get_session_history(
             workspace_id=response.workspaceId,
             session_id=response.sessionId,
@@ -688,7 +686,7 @@ class SessionManager:
 
             # Always upload history and persist checkpoint, even on error/cancel.
             # This ensures the user can see their conversation when they come back.
-            await self._upload_history(prompt, assistant_text, task_id)
+            await self._upload_history(prompt, task_id)
             self._persist_checkpoint()
 
     async def _update_session_name(self, name: str) -> None:
@@ -1025,7 +1023,7 @@ class SessionManager:
 
         return messages
 
-    async def _upload_history(self, prompt: str, assistant_text: str, task_id: str) -> None:
+    async def _upload_history(self, prompt: str, task_id: str) -> None:
         """Upload full session history to workspace service (best-effort).
 
         Rebuilds the complete message list from the thread each time.
