@@ -100,7 +100,7 @@ class FetchUrlTool(BaseTool):
                 await client.aclose()
 
         max_output = context.max_output_bytes
-        return maybe_extract_artifact(output_text, "fetched_content", "page.md", max_output)
+        return maybe_extract_artifact(output_text, "tool_output", "page.md", max_output)
 
 
 def _format_response(text: str, content_type: str, url: str) -> str:
