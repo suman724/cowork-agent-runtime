@@ -423,6 +423,12 @@ class SessionManager:
 
         # Parse taskOptions - extract maxSteps (clamped 1-200)
         task_options = params.get("taskOptions") or {}
+        logger.info(
+            "start_task_options",
+            task_id=task_id,
+            plan_only=task_options.get("planOnly"),
+            task_options_keys=list(task_options.keys()),
+        )
         raw_max_steps = task_options.get("maxSteps", self._config.default_max_steps)
         try:
             max_steps = int(raw_max_steps)
@@ -510,6 +516,12 @@ class SessionManager:
 
         task_options = task_options or {}
         plan_only = bool(task_options.get("planOnly", False))
+        logger.info(
+            "run_task_plan_mode",
+            task_id=task_id,
+            plan_only=plan_only,
+            task_options_keys=list(task_options.keys()),
+        )
 
         assistant_text = ""
         try:
