@@ -83,6 +83,26 @@ LEAD_TOOLS: list[dict[str, Any]] = [
             "parameters": {"type": "object", "properties": {}},
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "WaitForTeam",
+            "description": (
+                "Wait for teammates to make progress. Blocks until a task is "
+                "completed/failed, a message arrives for you, or a teammate finishes. "
+                "Returns current team status. Use this instead of polling in a loop."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "timeout": {
+                        "type": "number",
+                        "description": "Max seconds to wait (default: 120).",
+                    },
+                },
+            },
+        },
+    },
 ]
 
 # Tools available to all team members (lead + teammates)

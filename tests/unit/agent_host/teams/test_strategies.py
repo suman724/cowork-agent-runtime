@@ -122,7 +122,7 @@ class TestTeamToolProvider:
         assert "CreateTeammate" in names
         assert "TeamTaskCreate" in names
         assert "SendTeamMessage" in names
-        assert len(defs) == 8
+        assert len(defs) == 9
 
     def test_teammate_gets_shared_tools_only(self) -> None:
         coord = TeamCoordinator(lead_session_id="sess-1")
@@ -326,3 +326,133 @@ class TestTeamCheckpointProvider:
         cp = TeamCheckpointProvider(coord)
         await cp.restore({})
         assert not coord.is_team_active
+
+
+# ── WaitForTeam ──────────────────────────────────────────────────
+
+
+class TestWaitForTeam:
+    async def test_wake_on_task_completed(self) -> None:
+        """WaitForTeam should return when a task is marked completed."""
+        import asyncio
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        await coord.spawn_agent("worker", "coder", "code", 5000)
+        assert coord.manager is not None
+        task = await coord.manager.task_list.create_task("Do work", "desc", created_by="lead")
+
+        tp = TeamToolProvider(coord)
+
+        async def complete_task_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            await tp.handle_tool_call(
+                "TeamTaskUpdate",
+                {"task_id": task.task_id, "status": "completed", "result": "done"},
+                "worker",
+            )
+
+        bg = asyncio.create_task(complete_task_after_delay())
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 5}, "lead")
+        await bg
+        assert result["status"] == "success"
+        assert result["wake_reason"] == "event"
+        assert result["all_tasks_done"] is True
+
+    async def test_wake_on_message_to_lead(self) -> None:
+        """WaitForTeam should return when a message is sent to lead."""
+        import asyncio
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        await coord.spawn_agent("worker", "coder", "code", 5000)
+
+        tp = TeamToolProvider(coord)
+
+        async def send_msg_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            await tp.handle_tool_call(
+                "SendTeamMessage",
+                {"to": "lead", "content": "Need help"},
+                "worker",
+            )
+
+        bg = asyncio.create_task(send_msg_after_delay())
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 5}, "lead")
+        await bg
+        assert result["status"] == "success"
+        assert result["wake_reason"] == "event"
+
+    async def test_wake_on_broadcast(self) -> None:
+        """WaitForTeam should return on broadcast messages."""
+        import asyncio
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        await coord.spawn_agent("worker", "coder", "code", 5000)
+
+        tp = TeamToolProvider(coord)
+
+        async def broadcast_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            await tp.handle_tool_call(
+                "SendTeamMessage",
+                {"to": "all", "content": "Update"},
+                "worker",
+            )
+
+        bg = asyncio.create_task(broadcast_after_delay())
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 5}, "lead")
+        await bg
+        assert result["status"] == "success"
+        assert result["wake_reason"] == "event"
+
+    async def test_timeout_returns_status(self) -> None:
+        """WaitForTeam should return with timeout reason when nothing happens."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+
+        tp = TeamToolProvider(coord)
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 0.1}, "lead")
+        assert result["status"] == "success"
+        assert result["wake_reason"] == "timeout"
+
+    async def test_task_summary_in_result(self) -> None:
+        """WaitForTeam should include task summary."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("test-team")
+        assert coord.manager is not None
+        t1 = await coord.manager.task_list.create_task("Task 1", "desc", created_by="lead")
+        await coord.manager.task_list.create_task("Task 2", "desc", created_by="lead")
+        await coord.manager.task_list.update_status(t1.task_id, "completed", result="done")
+
+        # Pre-set wake so we don't block
+        coord.wake()
+
+        tp = TeamToolProvider(coord)
+        result = await tp.handle_tool_call("WaitForTeam", {"timeout": 1}, "lead")
+        assert result["task_summary"]["total"] == 2
+        assert result["task_summary"]["completed"] == 1
+        assert result["task_summary"]["pending"] == 1
+        assert result["all_tasks_done"] is False
+
+    async def test_wake_event_set_by_coordinator_wake(self) -> None:
+        """Direct wake() call should unblock wait_for_wake."""
+        import asyncio
+
+        coord = TeamCoordinator()
+
+        async def wake_after_delay() -> None:
+            await asyncio.sleep(0.05)
+            coord.wake()
+
+        bg = asyncio.create_task(wake_after_delay())
+        reason = await coord.wait_for_wake(timeout=5)
+        await bg
+        assert reason == "event"
+
+    async def test_wait_for_wake_timeout(self) -> None:
+        """wait_for_wake should return 'timeout' when no event fires."""
+        coord = TeamCoordinator()
+        reason = await coord.wait_for_wake(timeout=0.05)
+        assert reason == "timeout"

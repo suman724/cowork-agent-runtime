@@ -58,6 +58,9 @@ class TeamCoordinator:
         self._teammate_sessions: dict[str, TeammateSessionManager] = {}
         self._teammate_tasks: dict[str, asyncio.Task[LoopResult | None]] = {}
 
+        # Wake event — signals the lead agent to resume from WaitForTeam
+        self._wake_event = asyncio.Event()
+
         # Back-references to strategy siblings (set by TeamToolProvider/TeamContextInjector)
         self._tool_provider: TeamToolProvider | None = None
         self._context_injector: TeamContextInjector | None = None
@@ -138,6 +141,9 @@ class TeamCoordinator:
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
+            task.add_done_callback(
+                lambda _t: self._on_teammate_done(_t.get_name().removeprefix("teammate-"))
+            )
             self._teammate_tasks[name] = task
             info.status = "running"
 
@@ -162,6 +168,24 @@ class TeamCoordinator:
             {"name": m.name, "role": m.role, "status": m.status, "budget": m.budget}
             for m in self._manager.get_active_agents()
         ]
+
+    def wake(self) -> None:
+        """Signal the lead to wake from WaitForTeam."""
+        self._wake_event.set()
+
+    async def wait_for_wake(self, timeout: float = 120.0) -> str:
+        """Block until a wake condition fires or timeout. Returns reason."""
+        self._wake_event.clear()
+        try:
+            await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
+            return "event"
+        except TimeoutError:
+            return "timeout"
+
+    def _on_teammate_done(self, name: str) -> None:
+        """Called when a teammate's asyncio task finishes."""
+        logger.info("teammate_task_done", name=name)
+        self._wake_event.set()
 
     async def _shutdown_teammate(self, name: str) -> None:
         """Cancel a teammate's loop and clean up."""
@@ -241,6 +265,8 @@ class TeamToolProvider:
             return await self._handle_task_list(arguments)
         if tool_name == "SendTeamMessage":
             return await self._handle_send_message(arguments, agent_name)
+        if tool_name == "WaitForTeam":
+            return await self._handle_wait_for_team(arguments)
         msg = f"TeamToolProvider does not handle tool: {tool_name}"
         raise RuntimeError(msg)
 
@@ -335,6 +361,9 @@ class TeamToolProvider:
             task = await manager.task_list.update_status(task_id, status, result=result)
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
+        # Wake the lead when a task completes or fails
+        if status in ("completed", "failed"):
+            self._coordinator.wake()
         return {"status": "success", "task_id": task.task_id, "new_status": task.status}
 
     async def _handle_task_list(self, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -376,7 +405,38 @@ class TeamToolProvider:
                 await manager.send_message(agent_name, to, content)
         except KeyError as e:
             return {"status": "error", "message": str(e)}
+        # Wake the lead when a message is sent to them
+        if to == "lead" or to == "all":
+            self._coordinator.wake()
         return {"status": "success", "message": f"Message sent to {to}."}
+
+    async def _handle_wait_for_team(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        timeout = float(arguments.get("timeout", 120))
+        reason = await self._coordinator.wait_for_wake(timeout=timeout)
+
+        # Build a status snapshot for the lead
+        manager = self._coordinator.manager
+        result: dict[str, Any] = {"status": "success", "wake_reason": reason}
+        if manager is not None:
+            tasks = await manager.task_list.list_tasks()
+            completed = sum(1 for t in tasks if t.status == "completed")
+            failed = sum(1 for t in tasks if t.status == "failed")
+            in_progress = sum(1 for t in tasks if t.status == "in_progress")
+            pending = sum(1 for t in tasks if t.status in ("pending", "blocked"))
+            result["task_summary"] = {
+                "total": len(tasks),
+                "completed": completed,
+                "failed": failed,
+                "in_progress": in_progress,
+                "pending": pending,
+            }
+            result["all_tasks_done"] = (completed + failed) == len(tasks) and len(tasks) > 0
+
+            # Include teammate statuses
+            agents = self._coordinator.get_active_agents()
+            result["teammates"] = [{"name": a["name"], "status": a["status"]} for a in agents]
+
+        return result
 
 
 class TeamContextInjector:

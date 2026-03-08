@@ -10,13 +10,13 @@ from agent_host.teams.tools import (
     SHARED_TOOLS,
 )
 
-EXPECTED_LEAD = {"CreateTeam", "CreateTeammate", "ShutdownTeammate", "ShutdownTeam"}
+EXPECTED_LEAD = {"CreateTeam", "CreateTeammate", "ShutdownTeammate", "ShutdownTeam", "WaitForTeam"}
 EXPECTED_SHARED = {"TeamTaskCreate", "TeamTaskUpdate", "TeamTaskList", "SendTeamMessage"}
 
 
 class TestToolDefinitions:
     def test_lead_tools_count(self) -> None:
-        assert len(LEAD_TOOLS) == 4
+        assert len(LEAD_TOOLS) == 5
 
     def test_shared_tools_count(self) -> None:
         assert len(SHARED_TOOLS) == 4
