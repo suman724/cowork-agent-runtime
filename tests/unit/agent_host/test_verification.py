@@ -35,6 +35,7 @@ def _make_loop(
     tool_executor = MagicMock()
     tool_executor.get_tool_definitions.return_value = []
     tool_executor.execute_tool_calls = MagicMock(return_value=[])
+    tool_executor.plan_mode_locked = False
 
     harness = LoopRuntime(
         llm_client=mock_llm,  # type: ignore[arg-type]
