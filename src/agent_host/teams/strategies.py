@@ -232,7 +232,14 @@ class TeamCoordinator:
         self._wake_event.set()
 
     async def wait_for_wake(self, timeout: float = 120.0) -> str:
-        """Block until a wake condition fires or timeout. Returns reason."""
+        """Block until a wake condition fires or timeout. Returns reason.
+
+        If a wake signal arrived before this call, returns immediately
+        (avoids lost-wakeup race condition).
+        """
+        if self._wake_event.is_set():
+            self._wake_event.clear()
+            return "event"
         self._wake_event.clear()
         try:
             await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
@@ -638,21 +645,22 @@ class TeamCheckpointProvider:
             teammate.status = info.get("status", "created")
             teammate.session_id = info.get("session_id")
 
-        # Restore tasks
+        # Restore tasks (acquire lock for consistency even during startup)
         from agent_host.teams.models import TeamTask
 
-        for t in state.get("tasks", []):
-            task = TeamTask(
-                task_id=t["task_id"],
-                title=t.get("title", ""),
-                description=t.get("description", ""),
-                status=t.get("status", "pending"),
-                assignee=t.get("assignee"),
-                created_by=t.get("created_by", ""),
-                blocked_by=t.get("blocked_by", []),
-                result=t.get("result"),
-            )
-            manager.task_list._tasks[task.task_id] = task
+        async with manager.task_list._lock:
+            for t in state.get("tasks", []):
+                task = TeamTask(
+                    task_id=t["task_id"],
+                    title=t.get("title", ""),
+                    description=t.get("description", ""),
+                    status=t.get("status", "pending"),
+                    assignee=t.get("assignee"),
+                    created_by=t.get("created_by", ""),
+                    blocked_by=t.get("blocked_by", []),
+                    result=t.get("result"),
+                )
+                manager.task_list._tasks[task.task_id] = task
 
         # Re-spawn teammate loops for members that were running
         await self._coordinator.resume_teammates()

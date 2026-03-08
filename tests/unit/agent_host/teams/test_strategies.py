@@ -614,3 +614,133 @@ class TestCheckpointRestoreResume:
         with patch as mock_resume:
             await cp2.restore(state)
             mock_resume.assert_called_once()
+
+
+# ── Solo Path Safety ─────────────────────────────────────────────
+
+
+class TestSoloPathSafety:
+    """Verify Team strategies are safe no-ops when no team is created."""
+
+    def test_tool_defs_lead_no_team_only_create_team(self) -> None:
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        tp = TeamToolProvider(coord)
+        defs = tp.get_tool_definitions("lead")
+        names = [d["function"]["name"] for d in defs]
+        assert names == ["CreateTeam"]
+
+    def test_context_injection_empty_without_team(self) -> None:
+        import asyncio
+
+        coord = TeamCoordinator()
+        ci = TeamContextInjector(coord)
+        result = asyncio.get_event_loop().run_until_complete(ci.get_injections("lead"))
+        assert result == []
+
+    def test_overhead_tokens_zero_without_team(self) -> None:
+        coord = TeamCoordinator()
+        ci = TeamContextInjector(coord)
+        assert ci.estimate_overhead_tokens() == 0
+
+    def test_checkpoint_empty_without_team(self) -> None:
+        coord = TeamCoordinator()
+        cp = TeamCheckpointProvider(coord)
+        assert cp.capture() == {}
+
+    async def test_checkpoint_restore_empty_noop(self) -> None:
+        coord = TeamCoordinator()
+        cp = TeamCheckpointProvider(coord)
+        await cp.restore({})
+        assert not coord.is_team_active
+
+    async def test_shutdown_without_team_noop(self) -> None:
+        coord = TeamCoordinator()
+        await coord.on_session_shutdown()  # should not raise
+
+    async def test_session_start_stores_id(self) -> None:
+        coord = TeamCoordinator()
+        await coord.on_session_start("sess-42", {})
+        assert coord._lead_session_id == "sess-42"
+
+    def test_owns_tool_false_for_regular_tools(self) -> None:
+        coord = TeamCoordinator()
+        tp = TeamToolProvider(coord)
+        for name in ["ReadFile", "TaskTracker", "CreatePlan", "SpawnAgent", "RunCommand"]:
+            assert tp.owns_tool(name) is False
+
+
+# ── Agent Name in Tool Dispatch ──────────────────────────────────
+
+
+class TestAgentNameDispatch:
+    """Verify agent_name (not agent_role) is passed to tool handlers."""
+
+    async def test_task_create_uses_agent_name(self) -> None:
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        tp = TeamToolProvider(coord)
+        # Pass agent_name="researcher" (a teammate name, not role)
+        result = await tp.handle_tool_call(
+            "TeamTaskCreate",
+            {"title": "Research topic", "description": "Find papers"},
+            "researcher",
+        )
+        assert result["status"] == "success"
+        # Verify created_by stores the actual name, not "teammate"
+        assert coord.manager is not None
+        tasks = await coord.manager.task_list.list_tasks()
+        assert tasks[0].created_by == "researcher"
+
+    async def test_send_message_uses_agent_name(self) -> None:
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        await coord.spawn_agent("researcher", "research", "find data", 5000)
+        tp = TeamToolProvider(coord)
+        # Send message from "researcher" (name), not "teammate" (role)
+        result = await tp.handle_tool_call(
+            "SendTeamMessage",
+            {"to": "lead", "content": "Found papers"},
+            "researcher",
+        )
+        assert result["status"] == "success"
+        # Verify message came from "researcher"
+        assert coord.manager is not None
+        msgs = await coord.manager.mailbox.poll("lead")
+        assert len(msgs) == 1
+        assert msgs[0].from_agent == "researcher"
+
+    async def test_context_injection_uses_correct_name(self) -> None:
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        await coord.spawn_agent("researcher", "research", "find data", 5000)
+        assert coord.manager is not None
+        # Send message to researcher
+        await coord.manager.send_message("lead", "researcher", "Check this out")
+        ci = TeamContextInjector(coord)
+        # Inject for "researcher" (the actual agent name)
+        injections = await ci.get_injections("researcher")
+        msg_injections = [i for i in injections if "[Team Messages]" in i]
+        assert len(msg_injections) == 1
+        assert "@lead" in msg_injections[0]
+
+
+# ── Wake Race Condition Fix ──────────────────────────────────────
+
+
+class TestWakeRaceFix:
+    async def test_wake_before_wait_returns_immediately(self) -> None:
+        """If wake() fires before wait_for_wake(), should return 'event' immediately."""
+        coord = TeamCoordinator()
+        coord.wake()  # Signal arrives BEFORE wait
+        reason = await coord.wait_for_wake(timeout=0.05)
+        assert reason == "event"
+
+    async def test_wake_cleared_after_consumption(self) -> None:
+        """After consuming a pre-set wake, next wait should timeout."""
+        coord = TeamCoordinator()
+        coord.wake()
+        reason1 = await coord.wait_for_wake(timeout=0.05)
+        assert reason1 == "event"
+        # Second wait should timeout (event was consumed)
+        reason2 = await coord.wait_for_wake(timeout=0.05)
+        assert reason2 == "timeout"

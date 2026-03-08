@@ -48,6 +48,7 @@ class AgentToolHandler:
         workspace_dir: str | None = None,
         tool_provider: ToolProviderStrategy | None = None,
         agent_role: str = "solo",
+        agent_name: str = "lead",
     ) -> None:
         self._working_memory = working_memory
         self._workspace_dir = workspace_dir
@@ -62,6 +63,7 @@ class AgentToolHandler:
         self._plan_mode_locked = plan_mode_locked
         self._tool_provider = tool_provider
         self._agent_role = agent_role
+        self._agent_name = agent_name
 
     def is_agent_tool(self, name: str) -> bool:
         """Check if a tool name is an agent-internal tool, skill, or strategy-provided."""
@@ -99,7 +101,7 @@ class AgentToolHandler:
             return await self._tool_provider.handle_tool_call(
                 tool_name,
                 arguments,
-                self._agent_role,
+                self._agent_name,
             )
         return {"status": "error", "message": f"Unknown agent tool: {tool_name}"}
 

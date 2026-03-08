@@ -147,6 +147,7 @@ class TeammateSessionManager:
                 workspace_dir=self._workspace_dir,
                 tool_provider=self._tool_provider,
                 agent_role="teammate",
+                agent_name=self.name,
             )
 
             compactor = DropOldestCompactor(recency_window=10)
