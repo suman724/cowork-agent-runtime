@@ -604,6 +604,7 @@ class SessionManager:
                 agent_tool_handler=agent_tool_handler,
                 on_step_complete=self._on_step_complete,
                 skills=self._skills,
+                workspace_dir=self._workspace_dir,
             )
 
             # Build verification config
@@ -918,6 +919,27 @@ class SessionManager:
         if self._event_emitter:
             self._event_emitter.emit_checkpoint_restored(source="local")
 
+    @staticmethod
+    def _strip_prompt_injections(raw: str) -> str:
+        """Remove workspace prefix and plan-mode injection from a user message.
+
+        The thread stores user messages with ``[Workspace: …]\\n\\n`` prepended and
+        optionally a ``[IMPORTANT: You are in plan-only mode …]`` suffix.  These are
+        useful for the LLM but should not appear in stored session history.
+        """
+        import re
+
+        # Strip leading workspace prefix: [Workspace: /some/path]\n\n
+        text = re.sub(r"^\[Workspace: [^\]]+\]\n\n", "", raw)
+        # Strip trailing plan-only injection
+        text = re.sub(
+            r"\n\n\[IMPORTANT: You are in plan-only mode\..*?\]$",
+            "",
+            text,
+            flags=re.DOTALL,
+        )
+        return text
+
     def _build_history_from_thread(
         self,
         session_id: str,
@@ -927,11 +949,10 @@ class SessionManager:
     ) -> list[ConversationMessage]:
         """Convert the full thread into a list of ConversationMessages for history.
 
-        User messages in the thread contain workspace prefixes and plan-mode injections.
-        We strip those for the *current* task's user message by substituting the raw prompt.
-        For older tasks' user messages, we store them as-is (they were already cleaned
-        and uploaded in prior calls, but since we rebuild from scratch, we accept the
-        workspace prefix for older tasks — it's useful context in history).
+        User messages in the thread contain workspace prefixes and plan-mode injections
+        added for the LLM.  We strip those from ALL user messages so history shows
+        exactly what the user typed.  For the current task we use the original prompt
+        directly; for older tasks we regex-strip the injections.
         """
         if not self._thread:
             return []
@@ -951,8 +972,12 @@ class SessionManager:
             role = msg.get("role", "")
 
             if role == "user":
-                # Use clean prompt for the current task's user message
-                content = current_prompt if i == last_user_index else (msg.get("content") or "")
+                # Current task: use the original clean prompt.
+                # Older tasks: strip injected prefixes/suffixes.
+                if i == last_user_index:
+                    content = current_prompt
+                else:
+                    content = self._strip_prompt_injections(msg.get("content") or "")
                 messages.append(
                     ConversationMessage(
                         messageId=f"{task_id}-user-{len(messages)}",

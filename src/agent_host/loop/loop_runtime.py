@@ -69,6 +69,7 @@ class LoopRuntime:
         default_sub_agent_factory: Callable[[LoopRuntime], LoopStrategy] | None = None,
         skills: list[SkillDefinition] | None = None,
         max_concurrent_sub_agents: int = 5,
+        workspace_dir: str | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -87,6 +88,7 @@ class LoopRuntime:
         self._default_sub_agent_factory = default_sub_agent_factory
         self._skills = {s.name: s for s in (skills or [])}
         self._sub_agent_semaphore = asyncio.Semaphore(max_concurrent_sub_agents)
+        self._workspace_dir = workspace_dir
 
         # Wire sub-agent/skill callbacks into the agent tool handler
         if self._agent_tool_handler:
@@ -322,6 +324,9 @@ class LoopRuntime:
             "You are a focused sub-agent working on a specific task. "
             "Complete the task efficiently and report your findings.\n\n"
         )
+        if self._workspace_dir:
+            system_prompt += f"Workspace directory: {self._workspace_dir}\n"
+            system_prompt += "Use absolute paths for all file operations.\n\n"
         if context:
             system_prompt += f"Context from parent agent:\n{context}\n\n"
         system_prompt += "Focus on the assigned task. Do not deviate."
@@ -417,6 +422,9 @@ class LoopRuntime:
         system_prompt = (
             f"You are executing the '{skill.name}' skill.\n\nSkill: {skill.description}\n\n"
         )
+        if self._workspace_dir:
+            system_prompt += f"Workspace directory: {self._workspace_dir}\n"
+            system_prompt += "Use absolute paths for all file operations.\n\n"
         if prompt_content:
             system_prompt += f"{prompt_content}\n\n"
         system_prompt += "Complete the task and report your results clearly."
