@@ -44,8 +44,10 @@ class AgentToolHandler:
         on_plan_updated: Callable[[str, list[dict[str, Any]]], None] | None = None,
         plan_mode: bool = False,
         plan_mode_locked: bool = False,
+        workspace_dir: str | None = None,
     ) -> None:
         self._working_memory = working_memory
+        self._workspace_dir = workspace_dir
         self._skills = {s.name: s for s in (skills or [])}
         self._skill_tool_names = {f"Skill_{s.name}" for s in (skills or [])}
         self._memory_manager = memory_manager
@@ -132,7 +134,10 @@ class AgentToolHandler:
                 "function": {
                     "name": "CreatePlan",
                     "description": (
-                        "Create or replace the current plan with a goal and ordered steps."
+                        "Create or replace the current plan with a goal and ordered steps. "
+                        "Any file paths in step descriptions MUST use the workspace directory"
+                        + (f" ({self._workspace_dir})" if self._workspace_dir else "")
+                        + " — never ~/Documents or other default directories."
                     ),
                     "parameters": {
                         "type": "object",
@@ -393,11 +398,18 @@ class AgentToolHandler:
 
         self._notify_plan_updated()
 
-        return {
+        result: dict[str, Any] = {
             "status": "success",
             "message": f"Plan created with {len(steps)} steps",
             "goal": goal,
         }
+        if self._workspace_dir:
+            result["reminder"] = (
+                f"IMPORTANT: All file paths in this plan MUST use the workspace "
+                f"directory: {self._workspace_dir}. Do NOT use ~/Documents or any "
+                f"other directory unless the user explicitly requested it."
+            )
+        return result
 
     def _handle_update_plan_step(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle UpdatePlanStep tool calls."""
