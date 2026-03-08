@@ -586,6 +586,7 @@ class SessionManager:
                 on_plan_updated=_on_plan_updated,
                 plan_mode=plan_only,
                 plan_mode_locked=plan_only,
+                workspace_dir=self._workspace_dir,
             )
 
             # Build LoopRuntime + ReactLoop
