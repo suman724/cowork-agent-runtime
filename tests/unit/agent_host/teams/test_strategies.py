@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
@@ -977,3 +979,172 @@ class TestOnTeammateDone:
         coord._on_teammate_done("nonexistent")
         # Still wakes lead
         assert coord._wake_event.is_set()
+
+
+# ── Budget Reallocation ──────────────────────────────────────────
+
+
+class TestBudgetReallocation:
+    """Verify unused teammate tokens are reclaimed to the lead's budget."""
+
+    def test_add_budget_increases_max(self) -> None:
+        from agent_host.budget.token_budget import TokenBudget
+
+        budget = TokenBudget(max_session_tokens=10_000)
+        budget.add_budget(5_000)
+        assert budget.max_session_tokens == 15_000
+        assert budget.remaining == 15_000
+
+    def test_add_budget_negative_raises(self) -> None:
+        from agent_host.budget.token_budget import TokenBudget
+
+        budget = TokenBudget(max_session_tokens=10_000)
+        with pytest.raises(ValueError, match="negative"):
+            budget.add_budget(-100)
+
+    def test_add_budget_zero_is_noop(self) -> None:
+        from agent_host.budget.token_budget import TokenBudget
+
+        budget = TokenBudget(max_session_tokens=10_000)
+        budget.add_budget(0)
+        assert budget.max_session_tokens == 10_000
+
+    async def test_on_teammate_done_reclaims_budget(self) -> None:
+        """When a teammate finishes, unused tokens go back to the lead."""
+        from agent_host.budget.token_budget import TokenBudget
+        from agent_host.teams.teammate_session import TeammateSessionManager
+
+        lead_budget = TokenBudget(max_session_tokens=50_000)
+        coord, _emitter = _coord_with_emitter()
+        coord._lead_token_budget = lead_budget
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 10_000)
+
+        # Simulate a TeammateSessionManager with some tokens used
+        mock_session = MagicMock(spec=TeammateSessionManager)
+        mock_session._token_budget = TokenBudget(max_session_tokens=10_000)
+        mock_session._token_budget.record_usage(3_000, 2_000)  # 5k used, 5k remaining
+        coord._teammate_sessions["w1"] = mock_session
+
+        assert lead_budget.max_session_tokens == 50_000
+        coord._on_teammate_done("w1")
+        assert lead_budget.max_session_tokens == 55_000  # reclaimed 5k
+
+    async def test_on_teammate_done_no_lead_budget_is_safe(self) -> None:
+        """When no lead budget is set, reclaim is skipped silently."""
+        coord, _emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        # No lead_token_budget set
+        coord._on_teammate_done("w1")  # should not raise
+
+    async def test_on_teammate_done_fully_spent_budget_reclaims_zero(self) -> None:
+        """When teammate spent its entire budget, nothing is reclaimed."""
+        from agent_host.budget.token_budget import TokenBudget
+        from agent_host.teams.teammate_session import TeammateSessionManager
+
+        lead_budget = TokenBudget(max_session_tokens=50_000)
+        coord, _emitter = _coord_with_emitter()
+        coord._lead_token_budget = lead_budget
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 10_000)
+
+        mock_session = MagicMock(spec=TeammateSessionManager)
+        mock_session._token_budget = TokenBudget(max_session_tokens=10_000)
+        mock_session._token_budget.record_usage(5_000, 5_000)  # fully spent
+        coord._teammate_sessions["w1"] = mock_session
+
+        coord._on_teammate_done("w1")
+        assert lead_budget.max_session_tokens == 50_000  # unchanged
+
+
+# ── Idle Timeout ─────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+class TestIdleTimeout:
+    """Verify teammates idle > threshold are auto-shutdown."""
+
+    async def test_record_activity_resets_timer(self) -> None:
+        import time
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord.create_team("t1")
+        # Manually set activity since spawn_agent needs shared resources
+        coord._last_activity["w1"] = time.monotonic() - 1.0
+        old_time = coord._last_activity["w1"]
+
+        await asyncio.sleep(0.01)
+        coord.record_teammate_activity("w1")
+        new_time = coord._last_activity["w1"]
+        assert new_time > old_time
+
+    async def test_record_activity_unknown_name_is_noop(self) -> None:
+        coord = TeamCoordinator()
+        coord.record_teammate_activity("nonexistent")  # should not raise
+
+    async def test_idle_monitor_shuts_down_idle_teammate(self) -> None:
+        """An idle teammate should be auto-shutdown by the idle monitor."""
+        import time
+
+        async def _never_finish() -> None:
+            await asyncio.sleep(3600)
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord._idle_timeout = 0.1  # 100ms for testing
+
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+
+        # Set last activity far in the past
+        coord._last_activity["w1"] = time.monotonic() - 1.0
+
+        # Create a fake task that never finishes
+        fake_task = asyncio.create_task(_never_finish())
+        coord._teammate_tasks["w1"] = fake_task  # type: ignore[assignment]
+
+        # Mock _shutdown_teammate to verify it's called
+        with unittest.mock.patch.object(
+            coord, "_shutdown_teammate", new_callable=AsyncMock
+        ) as mock_shutdown:
+            monitor = asyncio.create_task(coord._idle_monitor_loop(check_interval=0.05))
+            await asyncio.sleep(0.15)
+            coord._manager = None  # stop the monitor loop
+            await asyncio.sleep(0.1)
+
+            mock_shutdown.assert_called_with("w1")
+            fake_task.cancel()
+            monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor
+
+    async def test_idle_monitor_skips_active_teammate(self) -> None:
+        """A recently active teammate should NOT be shutdown."""
+        import time
+
+        async def _never_finish() -> None:
+            await asyncio.sleep(3600)
+
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        coord._idle_timeout = 10.0  # 10 seconds
+
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        coord._last_activity["w1"] = time.monotonic()  # just active
+
+        fake_task = asyncio.create_task(_never_finish())
+        coord._teammate_tasks["w1"] = fake_task  # type: ignore[assignment]
+
+        with unittest.mock.patch.object(
+            coord, "_shutdown_teammate", new_callable=AsyncMock
+        ) as mock_shutdown:
+            monitor = asyncio.create_task(coord._idle_monitor_loop(check_interval=0.05))
+            await asyncio.sleep(0.15)
+            coord._manager = None
+            await asyncio.sleep(0.1)
+
+            mock_shutdown.assert_not_called()
+            fake_task.cancel()
+            monitor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await monitor

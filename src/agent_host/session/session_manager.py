@@ -442,6 +442,7 @@ class SessionManager:
                 workspace_id=(
                     self._session_context.workspace_id if self._session_context else None
                 ),
+                lead_token_budget=self._token_budget,
             )
 
     @staticmethod

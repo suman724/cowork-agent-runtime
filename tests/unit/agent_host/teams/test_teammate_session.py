@@ -165,3 +165,17 @@ class TestTeammateEventProxy:
         proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
         proxy.emit_step_started("task-1", 1)
         delegate.emit_step_started.assert_called_once_with("task-1", 1)
+
+
+class TestOnActivityCallback:
+    """Verify on_activity callback is invoked on each step."""
+
+    async def test_on_step_complete_calls_activity_callback(self) -> None:
+        calls: list[str] = []
+        t = _make_teammate(on_activity=lambda name: calls.append(name))
+        await t._on_step_complete("task-1", 1)
+        assert calls == ["worker"]
+
+    async def test_on_step_complete_no_callback_is_safe(self) -> None:
+        t = _make_teammate()  # no on_activity
+        await t._on_step_complete("task-1", 1)  # should not raise

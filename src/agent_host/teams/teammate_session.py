@@ -17,6 +17,8 @@ from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from agent_host.coordination.protocols import (
         ContextInjectionStrategy,
         ToolProviderStrategy,
@@ -100,11 +102,13 @@ class TeammateSessionManager:
         session_id: str | None = None,
         sync_interval: int = 5,
         team_id: str = "",
+        on_activity: Callable[[str], None] | None = None,
     ) -> None:
         self.name = name
         self.role = role
         self._team_name = team_name
         self._team_id = team_id
+        self._on_activity = on_activity
         self._llm_client = llm_client
         self._policy_enforcer = policy_enforcer
         self._tool_router = tool_router
@@ -175,7 +179,7 @@ class TeammateSessionManager:
             # Wrap event emitter to forward text chunks as teammate_output
             emitter = self._event_emitter
             if emitter and self._team_id:
-                emitter = _TeammateEventProxy(emitter, self._team_id, self.name)
+                emitter = _TeammateEventProxy(emitter, self._team_id, self.name)  # type: ignore[assignment]
 
             loop_runtime = LoopRuntime(
                 llm_client=self._llm_client,
@@ -203,21 +207,26 @@ class TeammateSessionManager:
 
             logger.info(
                 "teammate_loop_completed",
-                name=self.name,
+                teammate_name=self.name,
+                team_id=self._team_id,
                 reason=result.reason,
                 steps=result.step_count,
             )
             return result
 
         except asyncio.CancelledError:
-            logger.info("teammate_cancelled", name=self.name)
+            logger.info("teammate_cancelled", teammate_name=self.name, team_id=self._team_id)
             return None
         except Exception:
-            logger.exception("teammate_loop_error", name=self.name)
+            logger.exception("teammate_loop_error", teammate_name=self.name, team_id=self._team_id)
             return None
 
     async def _on_step_complete(self, task_id: str, step: int) -> None:
-        """Periodic history sync to Workspace Service (best-effort)."""
+        """Periodic history sync + activity tracking."""
+        # Notify coordinator that this teammate is active (resets idle timer)
+        if self._on_activity is not None:
+            self._on_activity(self.name)
+
         if (
             self._workspace_client
             and self._workspace_id
@@ -243,12 +252,18 @@ class TeammateSessionManager:
             )
             logger.info(
                 "teammate_history_synced",
-                name=self.name,
+                teammate_name=self.name,
+                team_id=self._team_id,
                 task_id=task_id,
                 message_count=len(messages),
             )
         except Exception:
-            logger.warning("teammate_history_sync_failed", name=self.name, exc_info=True)
+            logger.warning(
+                "teammate_history_sync_failed",
+                teammate_name=self.name,
+                team_id=self._team_id,
+                exc_info=True,
+            )
 
     def cancel(self) -> None:
         """Signal the teammate to stop."""

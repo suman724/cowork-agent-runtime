@@ -100,3 +100,14 @@ class TokenBudget:
         """
         self._input_tokens_used += input_tokens
         self._output_tokens_used += output_tokens
+
+    def add_budget(self, tokens: int) -> None:
+        """Increase the session token budget (e.g. from reclaimed teammate budget).
+
+        Args:
+            tokens: Number of tokens to add to the budget. Must be >= 0.
+        """
+        if tokens < 0:
+            msg = f"Cannot add negative tokens: {tokens}"
+            raise ValueError(msg)
+        self._max_session_tokens += tokens

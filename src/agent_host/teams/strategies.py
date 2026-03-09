@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -21,6 +22,7 @@ from agent_host.teams.tools import (
 )
 
 if TYPE_CHECKING:
+    from agent_host.budget.token_budget import TokenBudget
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
     from agent_host.loop.models import LoopResult
@@ -33,6 +35,9 @@ logger = structlog.get_logger()
 
 # Teammate shutdown timeout (seconds)
 _SHUTDOWN_TIMEOUT = 60
+
+# Default idle timeout for teammates (seconds)
+_DEFAULT_IDLE_TIMEOUT = 300  # 5 minutes
 
 
 class TeamCoordinator:
@@ -68,6 +73,14 @@ class TeamCoordinator:
         self._tool_provider: TeamToolProvider | None = None
         self._context_injector: TeamContextInjector | None = None
 
+        # Budget reallocation: lead's token budget (set via set_shared_resources)
+        self._lead_token_budget: TokenBudget | None = None
+
+        # Idle timeout tracking: per-teammate last-activity timestamp
+        self._idle_timeout = _DEFAULT_IDLE_TIMEOUT
+        self._last_activity: dict[str, float] = {}
+        self._idle_monitor_task: asyncio.Task[None] | None = None
+
     def set_shared_resources(
         self,
         llm_client: LLMClient,
@@ -78,6 +91,7 @@ class TeamCoordinator:
         max_context_tokens: int = 100_000,
         workspace_client: WorkspaceClient | None = None,
         workspace_id: str | None = None,
+        lead_token_budget: TokenBudget | None = None,
     ) -> None:
         """Provide shared resources from the lead's SessionManager."""
         self._llm_client = llm_client
@@ -88,6 +102,7 @@ class TeamCoordinator:
         self._max_context_tokens = max_context_tokens
         self._workspace_client = workspace_client
         self._workspace_id = workspace_id
+        self._lead_token_budget = lead_token_budget
 
     @property
     def manager(self) -> TeamManager | None:
@@ -107,6 +122,12 @@ class TeamCoordinator:
 
     async def on_session_shutdown(self) -> None:
         if self._manager is not None:
+            # Stop idle monitor first
+            if self._idle_monitor_task and not self._idle_monitor_task.done():
+                self._idle_monitor_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await self._idle_monitor_task
+                self._idle_monitor_task = None
             await self._shutdown_all_teammates()
             await self._upload_team_summary()
             self._manager = None
@@ -156,6 +177,7 @@ class TeamCoordinator:
                 event_emitter=self._event_emitter,
                 workspace_client=self._workspace_client,
                 workspace_id=self._workspace_id,
+                on_activity=self.record_teammate_activity,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
@@ -164,6 +186,13 @@ class TeamCoordinator:
             )
             self._teammate_tasks[name] = task
             info.status = "running"
+            self._last_activity[name] = time.monotonic()
+
+            # Start the idle monitor if not already running
+            if self._idle_monitor_task is None or self._idle_monitor_task.done():
+                self._idle_monitor_task = asyncio.create_task(
+                    self._idle_monitor_loop(), name="team-idle-monitor"
+                )
 
         if self._event_emitter and self._manager:
             self._event_emitter.emit_teammate_created(self._manager.team_id, name, role)
@@ -200,7 +229,11 @@ class TeamCoordinator:
         if self._manager is None:
             return
         if not (self._llm_client and self._policy_enforcer and self._tool_router):
-            logger.warning("resume_teammates_skipped", reason="shared_resources_not_set")
+            logger.warning(
+                "resume_teammates_skipped",
+                reason="shared_resources_not_set",
+                team_id=self.team_id,
+            )
             return
 
         from agent_host.teams.teammate_session import TeammateSessionManager
@@ -230,6 +263,7 @@ class TeamCoordinator:
                 event_emitter=self._event_emitter,
                 workspace_client=self._workspace_client,
                 workspace_id=self._workspace_id,
+                on_activity=self.record_teammate_activity,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(resume_prompt), name=f"teammate-{name}")
@@ -237,7 +271,8 @@ class TeamCoordinator:
                 lambda _t: self._on_teammate_done(_t.get_name().removeprefix("teammate-"))
             )
             self._teammate_tasks[name] = task
-            logger.info("teammate_resumed", name=name, role=info.role)
+            self._last_activity[name] = time.monotonic()
+            logger.info("teammate_resumed", name=name, role=info.role, team_id=self.team_id)
 
     def wake(self) -> None:
         """Signal the lead to wake from WaitForTeam."""
@@ -259,13 +294,58 @@ class TeamCoordinator:
         except TimeoutError:
             return "timeout"
 
+    def record_teammate_activity(self, name: str) -> None:
+        """Record that a teammate performed an action (resets idle timer)."""
+        if name in self._last_activity:
+            self._last_activity[name] = time.monotonic()
+
+    async def _idle_monitor_loop(self, check_interval: float = 60.0) -> None:
+        """Background task that checks for idle teammates periodically."""
+        try:
+            while self._manager is not None and self._last_activity:
+                await asyncio.sleep(check_interval)
+                now = time.monotonic()
+                idle_names = [
+                    name
+                    for name, last in self._last_activity.items()
+                    if now - last > self._idle_timeout
+                    and name in self._teammate_tasks
+                    and not self._teammate_tasks[name].done()
+                ]
+                for name in idle_names:
+                    logger.warning(
+                        "teammate_idle_timeout",
+                        name=name,
+                        team_id=self.team_id,
+                        idle_seconds=now - self._last_activity.get(name, now),
+                    )
+                    await self._shutdown_teammate(name)
+        except asyncio.CancelledError:
+            pass
+
     def _on_teammate_done(self, name: str) -> None:
         """Called when a teammate's asyncio task finishes (naturally or via error)."""
-        logger.info("teammate_task_done", name=name)
+        # Reclaim unused budget from the finished teammate
+        reclaimed = 0
+        session = self._teammate_sessions.get(name)
+        if session is not None and self._lead_token_budget is not None:
+            reclaimed = session._token_budget.remaining
+            if reclaimed > 0:
+                self._lead_token_budget.add_budget(reclaimed)
+
+        logger.info(
+            "teammate_task_done",
+            name=name,
+            team_id=self.team_id,
+            reclaimed_tokens=reclaimed,
+        )
 
         # Update member status to "stopped"
         if self._manager and name in self._manager.members:
             self._manager.members[name].status = "stopped"
+
+        # Clean up idle tracking
+        self._last_activity.pop(name, None)
 
         # Notify UI that teammate is done
         if self._event_emitter and self._manager:
@@ -314,7 +394,9 @@ class TeamCoordinator:
             )
             logger.info("team_summary_uploaded", team_id=self._manager.team_id)
         except Exception:
-            logger.warning("team_summary_upload_failed", exc_info=True)
+            logger.warning(
+                "team_summary_upload_failed", team_id=self._manager.team_id, exc_info=True
+            )
 
     async def _shutdown_teammate(self, name: str) -> None:
         """Cancel a teammate's loop and clean up."""
