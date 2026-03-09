@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from agent_host.teams.strategies import TeamContextInjector, TeamCoordinator, TeamToolProvider
@@ -245,7 +246,8 @@ class TestExitCheck:
         assert "1 incomplete task" in result
         assert "My work" in result
 
-    async def test_blocked_task_blocks_exit(self) -> None:
+    async def test_blocked_task_waits_on_wake_event(self) -> None:
+        """When all tasks are blocked, exit check waits on wake_event, not spin."""
         from agent_host.teams.task_list import SharedTaskList
 
         tl = SharedTaskList()
@@ -253,10 +255,43 @@ class TestExitCheck:
         await tl.create_task(
             "My report", "write report", created_by="worker", blocked_by=[t1.task_id]
         )
-        t = _make_teammate(task_list=tl)
+        wake = asyncio.Event()
+        t = _make_teammate(task_list=tl, wake_event=wake)
+
+        # Simulate: unblock the task after a short delay, then set wake
+        async def unblock_later() -> None:
+            await asyncio.sleep(0.05)
+            await tl.update_status(t1.task_id, "completed")
+            wake.set()
+
+        asyncio.create_task(unblock_later())
         result = await t._check_incomplete_tasks()
+        # After unblocking, the task is pending so we still get a nudge
         assert result is not None
-        assert "blocked" in result
+        assert "pending" in result
+
+    async def test_blocked_task_unblocked_fully_allows_exit(self) -> None:
+        """If all tasks complete while waiting, exit is allowed."""
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        t1 = await tl.create_task("Prereq", "research", created_by="researcher")
+        t2 = await tl.create_task(
+            "My report", "write report", created_by="worker", blocked_by=[t1.task_id]
+        )
+        wake = asyncio.Event()
+        t = _make_teammate(task_list=tl, wake_event=wake)
+
+        # Complete both tasks before wake
+        async def complete_all() -> None:
+            await asyncio.sleep(0.05)
+            await tl.update_status(t1.task_id, "completed")
+            await tl.update_status(t2.task_id, "completed", result="done")
+            wake.set()
+
+        asyncio.create_task(complete_all())
+        result = await t._check_incomplete_tasks()
+        assert result is None  # exit allowed
 
     async def test_other_teammates_tasks_dont_block_exit(self) -> None:
         from agent_host.teams.task_list import SharedTaskList

@@ -81,6 +81,9 @@ class TeamCoordinator:
         self._last_activity: dict[str, float] = {}
         self._idle_monitor_task: asyncio.Task[None] | None = None
 
+        # Per-teammate wake events — set when a message arrives or task unblocks
+        self._teammate_wake_events: dict[str, asyncio.Event] = {}
+
     def set_shared_resources(
         self,
         llm_client: LLMClient,
@@ -161,6 +164,8 @@ class TeamCoordinator:
         if self._llm_client and self._policy_enforcer and self._tool_router:
             from agent_host.teams.teammate_session import TeammateSessionManager
 
+            wake_event = asyncio.Event()
+            self._teammate_wake_events[name] = wake_event
             teammate = TeammateSessionManager(
                 name=name,
                 role=role,
@@ -179,6 +184,7 @@ class TeamCoordinator:
                 workspace_id=self._workspace_id,
                 on_activity=self.record_teammate_activity,
                 task_list=self._manager.task_list,
+                wake_event=wake_event,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
@@ -248,6 +254,8 @@ class TeamCoordinator:
                 "You are resuming after a restart. Check the team task list "
                 "for your assigned tasks and continue working."
             )
+            wake_event = asyncio.Event()
+            self._teammate_wake_events[name] = wake_event
             teammate = TeammateSessionManager(
                 name=name,
                 role=info.role,
@@ -266,6 +274,7 @@ class TeamCoordinator:
                 workspace_id=self._workspace_id,
                 on_activity=self.record_teammate_activity,
                 task_list=self._manager.task_list,
+                wake_event=wake_event,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(resume_prompt), name=f"teammate-{name}")
@@ -279,6 +288,12 @@ class TeamCoordinator:
     def wake(self) -> None:
         """Signal the lead to wake from WaitForTeam."""
         self._wake_event.set()
+
+    def wake_teammate(self, name: str) -> None:
+        """Signal a specific teammate to wake from a blocked wait."""
+        event = self._teammate_wake_events.get(name)
+        if event is not None:
+            event.set()
 
     async def wait_for_wake(self, timeout: float = 120.0) -> str:
         """Block until a wake condition fires or timeout. Returns reason.
@@ -346,8 +361,9 @@ class TeamCoordinator:
         if self._manager and name in self._manager.members:
             self._manager.members[name].status = "stopped"
 
-        # Clean up idle tracking
+        # Clean up idle tracking and wake event
         self._last_activity.pop(name, None)
+        self._teammate_wake_events.pop(name, None)
 
         # Notify UI that teammate is done
         if self._event_emitter and self._manager:
@@ -599,6 +615,14 @@ class TeamToolProvider:
                     self._coordinator._manager.team_id,
                     _task_to_dict(unblocked_task),
                 )
+        # Wake teammates whose tasks just became unblocked
+        for unblocked_task in unblocked:
+            creator = unblocked_task.created_by
+            if creator:
+                self._coordinator.wake_teammate(creator)
+            assignee = unblocked_task.assignee
+            if assignee and assignee != creator:
+                self._coordinator.wake_teammate(assignee)
         # Wake the lead when a task completes or fails
         if status in ("completed", "failed"):
             self._coordinator.wake()
@@ -654,6 +678,13 @@ class TeamToolProvider:
         # Wake the lead when a message is sent to them
         if to == "lead" or to == "all":
             self._coordinator.wake()
+        # Wake teammate if they're waiting on blocked tasks
+        if to == "all":
+            for member_name in (manager.members if manager else {}):
+                if member_name != agent_name:
+                    self._coordinator.wake_teammate(member_name)
+        elif to != "lead":
+            self._coordinator.wake_teammate(to)
         return {"status": "success", "message": f"Message sent to {to}."}
 
     async def _handle_wait_for_team(self, arguments: dict[str, Any]) -> dict[str, Any]:

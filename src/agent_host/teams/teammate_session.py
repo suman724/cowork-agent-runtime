@@ -186,6 +186,7 @@ class TeammateSessionManager:
         team_id: str = "",
         on_activity: Callable[[str], None] | None = None,
         task_list: SharedTaskList | None = None,
+        wake_event: asyncio.Event | None = None,
     ) -> None:
         self.name = name
         self.role = role
@@ -193,6 +194,7 @@ class TeammateSessionManager:
         self._team_id = team_id
         self._on_activity = on_activity
         self._task_list = task_list
+        self._wake_event = wake_event
         self._llm_client = llm_client
         self._policy_enforcer = policy_enforcer
         self._tool_router = tool_router
@@ -356,6 +358,10 @@ class TeammateSessionManager:
         Called by the ReactLoop before allowing natural termination.
         Returns None if exit is allowed (no incomplete work), or a string
         nudge to inject into the conversation to keep the loop alive.
+
+        If all remaining tasks are blocked, blocks on the wake_event until
+        something changes (message received, task unblocked) — avoids
+        burning LLM calls while waiting.
         """
         if self._task_list is None:
             return None
@@ -370,6 +376,32 @@ class TeammateSessionManager:
         if not my_incomplete:
             return None
 
+        # If all incomplete tasks are blocked, wait for a signal rather than
+        # spinning LLM calls.  The wake_event is set when a message arrives
+        # or a task is unblocked.
+        all_blocked = all(t.status == "blocked" for t in my_incomplete)
+        if all_blocked and self._wake_event is not None:
+            logger.info(
+                "teammate_waiting_for_unblock",
+                teammate_name=self.name,
+                blocked_tasks=[t.task_id for t in my_incomplete],
+            )
+            self._wake_event.clear()
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=300.0)
+            except TimeoutError:
+                logger.info("teammate_wait_timeout", teammate_name=self.name)
+            # Re-check after waking — tasks may have been unblocked
+            tasks = await self._task_list.list_tasks()
+            my_incomplete = [
+                t
+                for t in tasks
+                if t.status in ("pending", "in_progress", "blocked")
+                and (t.assignee == self.name or t.created_by == self.name)
+            ]
+            if not my_incomplete:
+                return None
+
         task_lines = "\n".join(
             f"- [{t.status}] {t.title} (id={t.task_id})" for t in my_incomplete
         )
@@ -377,8 +409,8 @@ class TeammateSessionManager:
             f"You still have {len(my_incomplete)} incomplete task(s):\n"
             f"{task_lines}\n\n"
             "Do NOT stop. Check the task list with TeamTaskList and continue "
-            "working on your tasks. If a task is blocked, wait and check again. "
-            "If a task is pending, pick it up with TeamTaskUpdate status='in_progress'."
+            "working on your tasks. If a task is pending, pick it up with "
+            "TeamTaskUpdate status='in_progress'."
         )
 
     def cancel(self) -> None:
