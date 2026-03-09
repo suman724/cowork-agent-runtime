@@ -133,3 +133,35 @@ class TestHistorySync:
         # Add a message so there's something to sync
         t._thread.add_user_message("hello")
         await t._sync_history("task-1")  # should not raise
+
+
+class TestTeamId:
+    def test_team_id_stored(self) -> None:
+        t = _make_teammate(team_id="tm-123")
+        assert t._team_id == "tm-123"
+
+    def test_team_id_defaults_to_empty(self) -> None:
+        t = _make_teammate()
+        assert t._team_id == ""
+
+
+class TestTeammateEventProxy:
+    def test_emit_text_chunk_forwards_and_adds_teammate_output(self) -> None:
+        from agent_host.teams.teammate_session import _TeammateEventProxy
+
+        delegate = MagicMock()
+        proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="researcher")
+        proxy.emit_text_chunk("task-1", "hello world", step_id="s-1")
+
+        # Should forward to delegate
+        delegate.emit_text_chunk.assert_called_once_with("task-1", "hello world", step_id="s-1")
+        # Should also emit teammate_output
+        delegate.emit_teammate_output.assert_called_once_with("tm-1", "researcher", "hello world")
+
+    def test_other_methods_delegated(self) -> None:
+        from agent_host.teams.teammate_session import _TeammateEventProxy
+
+        delegate = MagicMock()
+        proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
+        proxy.emit_step_started("task-1", 1)
+        delegate.emit_step_started.assert_called_once_with("task-1", 1)

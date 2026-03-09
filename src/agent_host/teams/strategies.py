@@ -94,6 +94,11 @@ class TeamCoordinator:
         return self._manager
 
     @property
+    def team_id(self) -> str:
+        """Return the active team's ID (empty string if no team)."""
+        return self._manager.team_id if self._manager else ""
+
+    @property
     def is_team_active(self) -> bool:
         return self._manager is not None
 
@@ -115,6 +120,8 @@ class TeamCoordinator:
             name=name, description=description, max_teammates=self._config.max_teammates
         )
         self._manager = TeamManager(lead_session_id=self._lead_session_id, config=config)
+        if self._event_emitter:
+            self._event_emitter.emit_team_created(self._manager.team_id, name)
         return self._manager
 
     async def spawn_agent(
@@ -137,6 +144,7 @@ class TeamCoordinator:
                 name=name,
                 role=role,
                 team_name=self._manager.config.name,
+                team_id=self._manager.team_id,
                 llm_client=self._llm_client,
                 policy_enforcer=self._policy_enforcer,
                 tool_router=self._tool_router,
@@ -156,6 +164,9 @@ class TeamCoordinator:
             )
             self._teammate_tasks[name] = task
             info.status = "running"
+
+        if self._event_emitter and self._manager:
+            self._event_emitter.emit_teammate_created(self._manager.team_id, name, role)
 
         return {
             "name": info.name,
@@ -207,6 +218,7 @@ class TeamCoordinator:
                 name=name,
                 role=info.role,
                 team_name=self._manager.config.name,
+                team_id=self._manager.team_id,
                 llm_client=self._llm_client,
                 policy_enforcer=self._policy_enforcer,
                 tool_router=self._tool_router,
@@ -248,8 +260,17 @@ class TeamCoordinator:
             return "timeout"
 
     def _on_teammate_done(self, name: str) -> None:
-        """Called when a teammate's asyncio task finishes."""
+        """Called when a teammate's asyncio task finishes (naturally or via error)."""
         logger.info("teammate_task_done", name=name)
+
+        # Update member status to "stopped"
+        if self._manager and name in self._manager.members:
+            self._manager.members[name].status = "stopped"
+
+        # Notify UI that teammate is done
+        if self._event_emitter and self._manager:
+            self._event_emitter.emit_teammate_removed(self._manager.team_id, name)
+
         self._wake_event.set()
 
     async def _upload_team_summary(self) -> None:
@@ -314,6 +335,8 @@ class TeamCoordinator:
                 pass
 
         if self._manager is not None:
+            if self._event_emitter:
+                self._event_emitter.emit_teammate_removed(self._manager.team_id, name)
             with contextlib.suppress(KeyError):
                 await self._manager.shutdown_teammate(name)
 
@@ -454,6 +477,18 @@ class TeamToolProvider:
             )
         except KeyError as e:
             return {"status": "error", "message": str(e)}
+        # Emit task_updated notification
+        if self._coordinator._event_emitter and self._coordinator._manager:
+            self._coordinator._event_emitter.emit_team_task_updated(
+                self._coordinator._manager.team_id,
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "assignee": task.assignee,
+                    "created_by": task.created_by,
+                },
+            )
         # Wake the lead when a teammate creates a task
         if agent_name != "lead":
             self._coordinator.wake()
@@ -472,6 +507,18 @@ class TeamToolProvider:
             task = await manager.task_list.update_status(task_id, status, result=result)
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
+        # Emit task_updated notification
+        if self._coordinator._event_emitter and self._coordinator._manager:
+            self._coordinator._event_emitter.emit_team_task_updated(
+                self._coordinator._manager.team_id,
+                {
+                    "task_id": task.task_id,
+                    "title": task.title,
+                    "status": task.status,
+                    "assignee": task.assignee,
+                    "result": task.result,
+                },
+            )
         # Wake the lead when a task completes or fails
         if status in ("completed", "failed"):
             self._coordinator.wake()
@@ -516,6 +563,14 @@ class TeamToolProvider:
                 await manager.send_message(agent_name, to, content)
         except KeyError as e:
             return {"status": "error", "message": str(e)}
+        # Emit team/message notification
+        if self._coordinator._event_emitter and self._coordinator._manager:
+            self._coordinator._event_emitter.emit_team_message(
+                self._coordinator._manager.team_id,
+                from_agent=agent_name,
+                to_agent=to,
+                content=content,
+            )
         # Wake the lead when a message is sent to them
         if to == "lead" or to == "all":
             self._coordinator.wake()

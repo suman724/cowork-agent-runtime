@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 
@@ -55,6 +55,24 @@ assigned tasks. Check the task list to see what others are working on to avoid c
 """
 
 
+class _TeammateEventProxy:
+    """Thin proxy that forwards all EventEmitter calls and adds teammate_output on text chunks."""
+
+    def __init__(self, delegate: EventEmitter, team_id: str, teammate_name: str) -> None:
+        self._delegate = delegate
+        self._team_id = team_id
+        self._teammate_name = teammate_name
+
+    def emit_text_chunk(self, task_id: str, text: str, step_id: str | None = None) -> None:
+        """Forward text_chunk and also emit teammate_output for the team UI."""
+        self._delegate.emit_text_chunk(task_id, text, step_id=step_id)
+        self._delegate.emit_teammate_output(self._team_id, self._teammate_name, text)
+
+    def __getattr__(self, name: str) -> Any:
+        """Delegate everything else to the real EventEmitter."""
+        return getattr(self._delegate, name)
+
+
 class TeammateSessionManager:
     """Lightweight session manager for teammate agents.
 
@@ -81,10 +99,12 @@ class TeammateSessionManager:
         workspace_id: str | None = None,
         session_id: str | None = None,
         sync_interval: int = 5,
+        team_id: str = "",
     ) -> None:
         self.name = name
         self.role = role
         self._team_name = team_name
+        self._team_id = team_id
         self._llm_client = llm_client
         self._policy_enforcer = policy_enforcer
         self._tool_router = tool_router
@@ -152,6 +172,11 @@ class TeammateSessionManager:
 
             compactor = DropOldestCompactor(recency_window=10)
 
+            # Wrap event emitter to forward text chunks as teammate_output
+            emitter = self._event_emitter
+            if emitter and self._team_id:
+                emitter = _TeammateEventProxy(emitter, self._team_id, self.name)
+
             loop_runtime = LoopRuntime(
                 llm_client=self._llm_client,
                 tool_executor=tool_executor,
@@ -159,7 +184,7 @@ class TeammateSessionManager:
                 compactor=compactor,
                 policy_enforcer=self._policy_enforcer,
                 token_budget=self._token_budget,
-                event_emitter=self._event_emitter,
+                event_emitter=emitter,
                 cancellation_event=self._cancel_event,
                 max_context_tokens=self._max_context_tokens,
                 working_memory=self._working_memory,

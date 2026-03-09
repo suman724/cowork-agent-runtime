@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest.mock
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -781,3 +781,199 @@ class TestWakeRaceFix:
         # Second wait should timeout (event was consumed)
         reason2 = await coord.wait_for_wake(timeout=0.05)
         assert reason2 == "timeout"
+
+
+# ── Team JSON-RPC notifications ──────────────────────────────────
+
+
+def _coord_with_emitter() -> tuple[TeamCoordinator, MagicMock]:
+    """Build a TeamCoordinator with a mocked EventEmitter."""
+    from agent_host.events.event_emitter import EventEmitter
+
+    emitter = MagicMock(spec=EventEmitter)
+    coord = TeamCoordinator(lead_session_id="sess-1")
+    coord._event_emitter = emitter
+    return coord, emitter
+
+
+@pytest.mark.asyncio
+class TestTeamNotifications:
+    """Verify that team lifecycle events fire JSON-RPC notifications."""
+
+    async def test_create_team_emits_team_created(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("research", "Find data")
+        emitter.emit_team_created.assert_called_once()
+        args = emitter.emit_team_created.call_args
+        assert args[0][1] == "research"  # team name
+
+    async def test_spawn_agent_emits_teammate_created(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        emitter.reset_mock()
+        await coord.spawn_agent("researcher", "research role", "find data", 5000)
+        emitter.emit_teammate_created.assert_called_once()
+        args = emitter.emit_teammate_created.call_args
+        assert args[0][1] == "researcher"
+        assert args[0][2] == "research role"
+
+    async def test_shutdown_teammate_emits_teammate_removed(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        emitter.reset_mock()
+        await coord.shutdown_agent("w1")
+        emitter.emit_teammate_removed.assert_called_once()
+        args = emitter.emit_teammate_removed.call_args
+        assert args[0][1] == "w1"
+
+    async def test_task_create_emits_task_updated(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        emitter.reset_mock()
+        tp = TeamToolProvider(coord)
+        result = await tp.handle_tool_call(
+            "TeamTaskCreate", {"title": "Task A", "description": "desc"}, "lead"
+        )
+        assert result["status"] == "success"
+        emitter.emit_team_task_updated.assert_called_once()
+        task_param = emitter.emit_team_task_updated.call_args[0][1]
+        assert task_param["title"] == "Task A"
+
+    async def test_task_update_emits_task_updated(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        tp = TeamToolProvider(coord)
+        create_result = await tp.handle_tool_call(
+            "TeamTaskCreate", {"title": "Task A", "description": "desc"}, "lead"
+        )
+        task_id = create_result["task_id"]
+        emitter.reset_mock()
+        await tp.handle_tool_call(
+            "TeamTaskUpdate", {"task_id": task_id, "status": "completed"}, "lead"
+        )
+        emitter.emit_team_task_updated.assert_called_once()
+        task_param = emitter.emit_team_task_updated.call_args[0][1]
+        assert task_param["status"] == "completed"
+
+    async def test_send_message_emits_team_message(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("worker", "coder", "code", 1000)
+        emitter.reset_mock()
+        tp = TeamToolProvider(coord)
+        await tp.handle_tool_call("SendTeamMessage", {"to": "worker", "content": "hello"}, "lead")
+        emitter.emit_team_message.assert_called_once()
+        kwargs = emitter.emit_team_message.call_args
+        assert kwargs.kwargs["from_agent"] == "lead"
+        assert kwargs.kwargs["to_agent"] == "worker"
+        assert kwargs.kwargs["content"] == "hello"
+
+    async def test_no_emitter_does_not_raise(self) -> None:
+        """When no EventEmitter is set, lifecycle calls should not crash."""
+        coord = TeamCoordinator(lead_session_id="sess-1")
+        # No event_emitter set — these should all succeed silently
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        await coord.shutdown_agent("w1")
+
+
+class TestEventEmitterTeamMethods:
+    """Unit tests for the EventEmitter team notification methods."""
+
+    def test_notify_raw_sends_notification(self) -> None:
+        from agent_host.events.event_emitter import EventEmitter
+        from agent_host.models import SessionContext
+
+        transport = MagicMock()
+        ctx = SessionContext(session_id="s1", workspace_id="w1", tenant_id="t1", user_id="u1")
+        emitter = EventEmitter(ctx, transport=transport)
+        emitter.notify_raw("team/created", {"teamId": "tm-1", "name": "research"})
+
+        transport.write_sync.assert_called_once()
+        import json
+
+        sent = json.loads(transport.write_sync.call_args[0][0])
+        assert sent["method"] == "team/created"
+        assert sent["params"]["teamId"] == "tm-1"
+        assert sent["jsonrpc"] == "2.0"
+
+    def test_notify_raw_no_transport_is_noop(self) -> None:
+        from agent_host.events.event_emitter import EventEmitter
+        from agent_host.models import SessionContext
+
+        ctx = SessionContext(session_id="s1", workspace_id="w1", tenant_id="t1", user_id="u1")
+        emitter = EventEmitter(ctx, transport=None)
+        # Should not raise
+        emitter.notify_raw("team/created", {"teamId": "tm-1"})
+
+    def test_emit_team_created_sends_correct_method(self) -> None:
+        from agent_host.events.event_emitter import EventEmitter
+        from agent_host.models import SessionContext
+
+        transport = MagicMock()
+        ctx = SessionContext(session_id="s1", workspace_id="w1", tenant_id="t1", user_id="u1")
+        emitter = EventEmitter(ctx, transport=transport)
+        emitter.emit_team_created("tm-1", "research")
+
+        import json
+
+        sent = json.loads(transport.write_sync.call_args[0][0])
+        assert sent["method"] == "team/created"
+        assert sent["params"]["name"] == "research"
+
+    def test_emit_teammate_output_sends_correct_method(self) -> None:
+        from agent_host.events.event_emitter import EventEmitter
+        from agent_host.models import SessionContext
+
+        transport = MagicMock()
+        ctx = SessionContext(session_id="s1", workspace_id="w1", tenant_id="t1", user_id="u1")
+        emitter = EventEmitter(ctx, transport=transport)
+        emitter.emit_teammate_output("tm-1", "researcher", "I found the data")
+
+        import json
+
+        sent = json.loads(transport.write_sync.call_args[0][0])
+        assert sent["method"] == "team/teammate_output"
+        assert sent["params"]["name"] == "researcher"
+        assert sent["params"]["content"] == "I found the data"
+
+
+@pytest.mark.asyncio
+class TestOnTeammateDone:
+    """Verify _on_teammate_done emits teammate_removed and updates status."""
+
+    async def test_emits_teammate_removed(self) -> None:
+        coord, emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        emitter.reset_mock()
+        # Simulate natural completion
+        coord._on_teammate_done("w1")
+        emitter.emit_teammate_removed.assert_called_once()
+        assert emitter.emit_teammate_removed.call_args[0][1] == "w1"
+
+    async def test_updates_member_status_to_stopped(self) -> None:
+        coord, _emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        assert coord.manager is not None
+        # Manually set to running (shared resources not available in test)
+        coord.manager.members["w1"].status = "running"
+        coord._on_teammate_done("w1")
+        assert coord.manager.members["w1"].status == "stopped"
+
+    async def test_wakes_lead(self) -> None:
+        coord, _emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        await coord.spawn_agent("w1", "coder", "code", 1000)
+        coord._on_teammate_done("w1")
+        assert coord._wake_event.is_set()
+
+    async def test_unknown_name_does_not_crash(self) -> None:
+        coord, _emitter = _coord_with_emitter()
+        coord.create_team("t1")
+        # Name not in members — should not raise
+        coord._on_teammate_done("nonexistent")
+        # Still wakes lead
+        assert coord._wake_event.is_set()
