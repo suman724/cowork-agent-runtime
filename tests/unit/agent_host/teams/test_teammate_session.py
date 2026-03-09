@@ -146,25 +146,60 @@ class TestTeamId:
 
 
 class TestTeammateEventProxy:
-    def test_emit_text_chunk_forwards_and_adds_teammate_output(self) -> None:
+    def test_emit_text_chunk_emits_teammate_output_only(self) -> None:
         from agent_host.teams.teammate_session import _TeammateEventProxy
 
         delegate = MagicMock()
         proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="researcher")
         proxy.emit_text_chunk("task-1", "hello world", step_id="s-1")
 
-        # Should forward to delegate
-        delegate.emit_text_chunk.assert_called_once_with("task-1", "hello world", step_id="s-1")
-        # Should also emit teammate_output
+        # Should NOT forward text_chunk to lead's conversation
+        delegate.emit_text_chunk.assert_not_called()
+        # Should emit teammate_output for the team UI
         delegate.emit_teammate_output.assert_called_once_with("tm-1", "researcher", "hello world")
 
-    def test_other_methods_delegated(self) -> None:
+    def test_tool_requested_emits_teammate_tool_only(self) -> None:
         from agent_host.teams.teammate_session import _TeammateEventProxy
 
         delegate = MagicMock()
         proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
+        proxy.emit_tool_requested("ReadFile", "File.Read", {"path": "/a"}, tool_call_id="tc-1")
+
+        delegate.emit_tool_requested.assert_not_called()
+        delegate.emit_teammate_tool.assert_called_once_with(
+            "tm-1", "worker", "ReadFile", "requested", "tc-1"
+        )
+
+    def test_tool_completed_emits_teammate_tool_only(self) -> None:
+        from agent_host.teams.teammate_session import _TeammateEventProxy
+
+        delegate = MagicMock()
+        proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
+        proxy.emit_tool_completed("ReadFile", "success", tool_call_id="tc-1")
+
+        delegate.emit_tool_completed.assert_not_called()
+        delegate.emit_teammate_tool.assert_called_once_with(
+            "tm-1", "worker", "ReadFile", "success", "tc-1"
+        )
+
+    def test_session_events_suppressed(self) -> None:
+        from agent_host.teams.teammate_session import _TeammateEventProxy
+
+        delegate = MagicMock()
+        proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
+        # Session events should be no-ops
         proxy.emit_step_started("task-1", 1)
-        delegate.emit_step_started.assert_called_once_with("task-1", 1)
+        proxy.emit_step_completed("task-1", 1)
+        delegate.emit_step_started.assert_not_called()
+        delegate.emit_step_completed.assert_not_called()
+
+    def test_team_notification_methods_forwarded(self) -> None:
+        from agent_host.teams.teammate_session import _TeammateEventProxy
+
+        delegate = MagicMock()
+        proxy = _TeammateEventProxy(delegate, team_id="tm-1", teammate_name="worker")
+        proxy.emit_team_created("tm-1", "my-team")
+        delegate.emit_team_created.assert_called_once_with("tm-1", "my-team")
 
 
 class TestOnActivityCallback:

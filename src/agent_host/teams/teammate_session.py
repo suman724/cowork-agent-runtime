@@ -64,30 +64,39 @@ Working without updating tasks or sending messages makes you invisible to the te
 
 
 class _TeammateEventProxy:
-    """Thin proxy that forwards all EventEmitter calls and adds teammate_output on text chunks."""
+    """Proxy that routes teammate events to team/* notifications only.
+
+    Teammate events should NOT appear as SessionEvents in the lead's conversation.
+    Instead, they are emitted as team/* JSON-RPC notifications:
+      - text_chunk → team/teammate_output (streaming text to teammate panel)
+      - tool_requested/completed → team/teammate_tool (tool activity indicator)
+      - all other session events → suppressed (no-op)
+
+    Only team/* notification methods (notify_raw, emit_team_*) are forwarded
+    to the real EventEmitter.
+    """
+
+    # Methods that should be forwarded to the delegate (team notifications only)
+    _FORWARDED_PREFIXES = ("notify_raw", "emit_team", "emit_teammate")
 
     def __init__(self, delegate: EventEmitter, team_id: str, teammate_name: str) -> None:
         self._delegate = delegate
         self._team_id = team_id
         self._teammate_name = teammate_name
 
-    def emit_text_chunk(self, task_id: str, text: str, step_id: str | None = None) -> None:
-        """Forward text_chunk and also emit teammate_output for the team UI."""
-        self._delegate.emit_text_chunk(task_id, text, step_id=step_id)
+    def emit_text_chunk(self, task_id: str, text: str, step_id: str | None = None) -> None:  # noqa: ARG002
+        """Emit teammate_output only — do NOT forward to lead's conversation."""
         self._delegate.emit_teammate_output(self._team_id, self._teammate_name, text)
 
     def emit_tool_requested(
         self,
         tool_name: str,
-        capability: str,
-        arguments: dict[str, Any],
+        capability: str,  # noqa: ARG002
+        arguments: dict[str, Any],  # noqa: ARG002
         tool_call_id: str = "",
-        tool_type: str = "tool",
+        tool_type: str = "tool",  # noqa: ARG002
     ) -> None:
-        """Forward tool_requested and emit teammate_tool for the team UI."""
-        self._delegate.emit_tool_requested(
-            tool_name, capability, arguments, tool_call_id, tool_type
-        )
+        """Emit teammate_tool only — do NOT forward to lead's conversation."""
         self._delegate.emit_teammate_tool(
             self._team_id, self._teammate_name, tool_name, "requested", tool_call_id
         )
@@ -97,21 +106,21 @@ class _TeammateEventProxy:
         tool_name: str,
         status: str,
         tool_call_id: str = "",
-        result: str | None = None,
-        error: str | None = None,
-        tool_type: str = "tool",
+        result: str | None = None,  # noqa: ARG002
+        error: str | None = None,  # noqa: ARG002
+        tool_type: str = "tool",  # noqa: ARG002
     ) -> None:
-        """Forward tool_completed and emit teammate_tool for the team UI."""
-        self._delegate.emit_tool_completed(
-            tool_name, status, tool_call_id, result, error, tool_type
-        )
+        """Emit teammate_tool only — do NOT forward to lead's conversation."""
         self._delegate.emit_teammate_tool(
             self._team_id, self._teammate_name, tool_name, status, tool_call_id
         )
 
     def __getattr__(self, name: str) -> Any:
-        """Delegate everything else to the real EventEmitter."""
-        return getattr(self._delegate, name)
+        """Forward team notification methods; suppress all other session events."""
+        if any(name.startswith(prefix) for prefix in self._FORWARDED_PREFIXES):
+            return getattr(self._delegate, name)
+        # Return a no-op for all session event methods (emit_step_started, etc.)
+        return lambda *_args, **_kwargs: None
 
 
 class TeammateSessionManager:
