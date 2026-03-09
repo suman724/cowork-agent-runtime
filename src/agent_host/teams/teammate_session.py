@@ -246,10 +246,17 @@ class TeammateSessionManager:
             if self._workspace_dir:
                 exec_context = ExecutionContext(working_directory=self._workspace_dir)
 
+            # Wrap event emitter BEFORE creating ToolExecutor so tool events
+            # are routed through the proxy to team/teammate_tool notifications.
+            emitter = self._event_emitter
+            if emitter and self._team_id:
+                emitter = _TeammateEventProxy(emitter, self._team_id, self.name)  # type: ignore[assignment]
+
             tool_executor = ToolExecutor(
                 tool_router=self._tool_router,
                 policy_enforcer=self._policy_enforcer,
                 execution_context=exec_context,
+                event_emitter=emitter,
             )
 
             agent_tool_handler = AgentToolHandler(
@@ -261,11 +268,6 @@ class TeammateSessionManager:
             )
 
             compactor = DropOldestCompactor(recency_window=10)
-
-            # Wrap event emitter to forward text chunks as teammate_output
-            emitter = self._event_emitter
-            if emitter and self._team_id:
-                emitter = _TeammateEventProxy(emitter, self._team_id, self.name)  # type: ignore[assignment]
 
             loop_runtime = LoopRuntime(
                 llm_client=self._llm_client,
