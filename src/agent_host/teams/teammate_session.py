@@ -43,11 +43,17 @@ You are working in: {workspace_dir}
 You share this workspace with other teammates. Stick to the files relevant to your \
 assigned tasks. Check the task list to see what others are working on to avoid conflicts.
 
-## Coordination
-- Use TeamTaskList to see what needs to be done
-- Use TeamTaskUpdate to pick up tasks and report completion
-- Use SendTeamMessage to communicate with teammates or the lead
-- Save your work frequently
+## Coordination — IMPORTANT
+You MUST use the team coordination tools to keep the team in sync:
+
+1. **Start of work**: Call TeamTaskCreate to register what you are working on.
+2. **Progress**: Call TeamTaskUpdate with status='in_progress' when you begin a task.
+3. **Completion**: Call TeamTaskUpdate with status='completed' and a result summary when done.
+4. **Communication**: Use SendTeamMessage to share findings, ask questions, or report to the lead.
+5. **Check tasks**: Use TeamTaskList to see what needs to be done and what others are doing.
+
+These tools are how the team stays coordinated and how the user sees your progress. \
+Working without updating tasks or sending messages makes you invisible to the team.
 
 ## Guidelines
 - Focus on your assigned tasks

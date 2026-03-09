@@ -12,7 +12,9 @@ LEAD_TOOLS: list[dict[str, Any]] = [
             "name": "CreateTeam",
             "description": (
                 "Initialize a team to coordinate multiple agents working together. "
-                "Call this before creating teammates."
+                "After creating the team: 1) Use TeamTaskCreate to define tasks, "
+                "2) Use CreateTeammate to spawn agents, 3) Use WaitForTeam to "
+                "monitor progress. Use SendTeamMessage to communicate with teammates."
             ),
             "parameters": {
                 "type": "object",
@@ -36,7 +38,9 @@ LEAD_TOOLS: list[dict[str, Any]] = [
             "name": "CreateTeammate",
             "description": (
                 "Spawn a new teammate agent to work on tasks. "
-                "The teammate gets its own context and runs independently."
+                "The teammate gets its own context and runs independently. "
+                "Before spawning, create tasks with TeamTaskCreate so the teammate "
+                "knows what to work on."
             ),
             "parameters": {
                 "type": "object",
