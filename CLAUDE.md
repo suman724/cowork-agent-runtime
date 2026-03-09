@@ -23,8 +23,8 @@ agent_host/     ← Local Agent Host (custom agent loop)
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
   coordination/ — Strategy interfaces (protocols) + Solo (no-op) implementations for extensibility (teams, MCP, etc.)
-  teams/        — Team primitives (SharedTaskList, MailboxRouter, TeamManager), strategy implementations, TeammateSessionManager
-  events/       — Event emitter: SessionEvent notifications + structured logging
+  teams/        — Team primitives (SharedTaskList, MailboxRouter, TeamManager), strategy implementations (TeamCoordinator, TeamToolProvider, TeamContextInjector, TeamCheckpointProvider), TeammateSessionManager, team tool definitions
+  events/       — Event emitter: SessionEvent notifications + team/* JSON-RPC notifications + structured logging
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
   router/       — ToolRouter implementation, tool registry, dispatch
@@ -54,6 +54,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - `ReactLoop` (`loop/react_loop.py`) — default strategy (linear ReAct). Owns context assembly (memory injection, working memory, compaction, error recovery) and tool routing (agent-internal vs external).
   - `AgentLoop` (`loop/agent_loop.py`) — thin alias for `ReactLoop` (backward compat).
 - **Coordination strategies** (`coordination/`) — 4 `@runtime_checkable` Protocol interfaces (`CoordinationStrategy`, `ToolProviderStrategy`, `ContextInjectionStrategy`, `CheckpointStrategy`) with Solo (no-op) defaults. Strategies are injected into `SessionManager`, `AgentToolHandler`, `LoopRuntime`, and `CheckpointManager`. Solo implementations preserve existing single-agent behavior; feature-specific implementations (e.g., Agent Teams) extend behavior without modifying core code. See `cowork-infra/docs/components/agent-teams.md`.
+- **Agent Teams** (`teams/`) — Multi-agent coordination via the strategy pattern. `TeamCoordinator` manages the team lifecycle (create, spawn, shutdown), `TeamToolProvider` exposes 9 team tools filtered by role (lead vs teammate), `TeamContextInjector` injects pending messages and task status into each agent's context, `TeamCheckpointProvider` captures/restores full team state. `TeammateSessionManager` runs a lightweight agent loop sharing the lead's `LLMClient`/`PolicyEnforcer`/`ToolRouter` with a fresh `MessageThread`/`TokenBudget`/`WorkingMemory`. Features: budget reallocation (unused teammate tokens reclaimed to lead on completion), idle timeout (auto-shutdown teammates idle > 5 min), `_TeammateEventProxy` for streaming teammate output to the Desktop UI. Team notifications use `team/*` JSON-RPC method names (not `SessionEvent` envelope).
 - **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
 - **Infrastructure layers inside LoopRuntime:**
   - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload. Supports **parallel tool execution** via `asyncio.gather()` with intelligent grouping (read-only tools batched, writes serialized per path, shell commands always serial). Also enforces **plan mode** restrictions (filters tool definitions, denies blocked tools with `PLAN_MODE_RESTRICTED`).
