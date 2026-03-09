@@ -755,13 +755,16 @@ class TeamContextInjector:
             lines = [f"From @{m.from_agent}: {m.content!r}" for m in messages]
             parts.append("[Team Messages]\n" + "\n".join(lines))
 
-        # Inject current task summary
+        # Inject current task summary (include result for completed tasks)
         tasks = await manager.task_list.list_tasks()
         if tasks:
             summary_lines: list[str] = []
             for t in tasks:
                 assignee = f", assigned to {t.assignee}" if t.assignee else ""
-                summary_lines.append(f"- [{t.status}] {t.title} (id={t.task_id}{assignee})")
+                line = f"- [{t.status}] {t.title} (id={t.task_id}{assignee})"
+                if t.status == "completed" and t.result:
+                    line += f"\n  Result: {t.result}"
+                summary_lines.append(line)
             parts.append("[Team Tasks]\n" + "\n".join(summary_lines))
 
         return parts
