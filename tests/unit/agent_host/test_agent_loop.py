@@ -387,6 +387,44 @@ class TestAgentLoopMemoryInjection:
         system_msgs = [m for m in call_args if m.get("role") == "system"]
         assert len(system_msgs) == 1  # just the system prompt
 
+    async def test_context_injections_appended_after_working_memory(self) -> None:
+        """Context injections from strategies should appear after working memory."""
+        mock = MockLLMClient()
+        mock.enqueue_text("Done")
+
+        wm = MagicMock()
+        wm.render.return_value = "# Working Memory\n\n- Task 1"
+        wm.task_tracker = MagicMock()
+
+        # Create a mock context injector (async get_injections)
+        from unittest.mock import AsyncMock
+
+        injector = MagicMock()
+        injector.get_injections = AsyncMock(
+            return_value=["[Team Messages]\nFrom @researcher: data ready"]
+        )
+        injector.estimate_overhead_tokens.return_value = 50
+
+        loop = _make_loop(mock, working_memory=wm)
+        loop._h._context_injector = injector
+
+        await loop.run("task-1")
+
+        call_args = mock.last_messages
+        assert call_args is not None
+
+        wm_idx = next(
+            i
+            for i, m in enumerate(call_args)
+            if m.get("role") == "system" and "Working Memory" in m.get("content", "")
+        )
+        inj_idx = next(
+            i
+            for i, m in enumerate(call_args)
+            if m.get("role") == "system" and "Team Messages" in m.get("content", "")
+        )
+        assert inj_idx > wm_idx
+
     async def test_memory_re_read_each_turn(self) -> None:
         """render_memory_context should be called once per loop iteration."""
         mock = MockLLMClient()

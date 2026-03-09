@@ -16,6 +16,10 @@ You have access to tools for reading files, writing files, deleting files,
 running shell commands, and making HTTP requests.
 
 Guidelines:
+- Answer questions from your own knowledge directly — do NOT use tools (ExecuteCode,
+  RunCommand, etc.) just to format or present information you already know. Tools are
+  for taking actions on the user's system (reading/writing files, running commands,
+  executing code that produces a computed result, making HTTP requests).
 - Use tools to accomplish the user's requests. Always verify your work.
 - When writing files, show the user what you plan to write before doing so.
 - When running commands, explain what the command does.
@@ -164,6 +168,8 @@ class SystemPromptBuilder:
                 "\nYou have access to the ExecuteCode tool for running Python scripts.\n"
                 "Use it for: data analysis, calculations, testing code you've written, "
                 "prototyping.\n"
+                "Do NOT use ExecuteCode to answer knowledge questions, explain concepts, "
+                "or format text — respond directly in your message instead.\n"
                 "Each execution is independent — write complete, self-contained scripts.\n"
                 "You can generate plots with matplotlib (plt.show() saves images "
                 "automatically).\n"

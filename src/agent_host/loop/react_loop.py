@@ -61,8 +61,16 @@ class ReactLoop:
                 logger.info("agent_loop_cancelled", task_id=task_id, step=step)
                 return LoopResult(reason="cancelled", step_count=step)
 
-            # 1. Context assembly
-            messages = self._build_messages(task_id, step, step_id)
+            # Wait for work if idle (teammates only — blocks until tasks/messages arrive)
+            if step > 0:
+                await self._h.wait_for_work_if_idle()
+                # Re-check cancellation after potentially long wait
+                if self._h.is_cancelled():
+                    return LoopResult(reason="cancelled", step_count=step)
+
+            # 1. Context assembly (pre-fetch async injections)
+            context_injections = await self._h.get_context_injections(task_id)
+            messages = self._build_messages(task_id, step, step_id, context_injections)
             tools = self._h.get_external_tool_defs() + self._h.get_agent_tool_defs()
 
             # 2. Emit step_started
@@ -115,6 +123,17 @@ class ReactLoop:
                     )
                     continue  # Re-enter loop so LLM creates a plan
 
+                # Exit check: teammates must not exit while they have incomplete tasks
+                nudge = await self._h.check_exit_allowed()
+                if nudge is not None:
+                    logger.info(
+                        "exit_blocked_by_check",
+                        task_id=task_id,
+                        step=step,
+                    )
+                    self._h.thread.add_system_injection(nudge)
+                    continue  # Re-enter loop
+
                 # Verification phase: inject verification prompt on first completion
                 if self._verification and self._verification.enabled and not verification_injected:
                     verification_injected = True
@@ -156,17 +175,24 @@ class ReactLoop:
 
         return LoopResult(reason="max_steps_exceeded", text=last_text, step_count=step)
 
-    def _build_messages(self, task_id: str, step: int, step_id: str) -> list[dict[str, object]]:
+    def _build_messages(
+        self,
+        task_id: str,
+        step: int,
+        step_id: str,
+        context_injections: list[str] | None = None,
+    ) -> list[dict[str, object]]:
         """Assemble LLM context optimized for prompt caching.
 
         Ordering (stable prefix first, volatile last):
         1. System prompt (stable — never changes mid-task)
         2. Persistent memory (semi-stable — changes only on SaveMemory)
         3. Conversation history (grows but prefix is stable)
-        4. Working memory (volatile — changes every turn, at the END)
-        5. Error recovery prompts (conditional — at the very end)
+        4. Working memory (volatile — changes every turn)
+        5. Context injections (team messages, task status — volatile)
+        6. Error recovery prompts (conditional — at the very end)
         """
-        injection_overhead = 0
+        injection_overhead = self._h.get_injection_overhead_tokens()
         persistent_memory_text: str | None = None
         working_memory_text: str | None = None
 
@@ -204,9 +230,14 @@ class ReactLoop:
             dropped = max(0, pre_count - post_count + 1)
             self._h.emit_context_compacted(task_id, dropped, pre_count, post_count, step_id)
 
-        # Append working memory at the end (volatile — doesn't break cache prefix)
+        # Append working memory (volatile — doesn't break cache prefix)
         if working_memory_text:
             messages.append({"role": "system", "content": working_memory_text})
+
+        # Context injections (team messages, task status — volatile)
+        if context_injections:
+            for injection in context_injections:
+                messages.append({"role": "system", "content": injection})
 
         # Error recovery prompt injection (at the very end)
         er = self._h.error_recovery

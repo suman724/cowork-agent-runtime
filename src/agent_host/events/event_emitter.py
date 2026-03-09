@@ -317,6 +317,80 @@ class EventEmitter:
             severity="warning",
         )
 
+    # ── Team notifications ─────────────────────────────────────────
+
+    def notify_raw(self, method: str, params: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification with an arbitrary method name.
+
+        Used for team/* notifications that bypass the SessionEvent envelope.
+        """
+        if self._transport:
+            try:
+                from agent_host.server.json_rpc import serialize_notification
+
+                notification = serialize_notification(method, params)
+                self._transport.write_sync(notification)
+            except Exception:
+                logger.warning("team_notification_failed", method=method, exc_info=True)
+
+    def emit_team_created(self, team_id: str, name: str) -> None:
+        """Emit team/created notification."""
+        logger.info("team_created", team_id=team_id, name=name)
+        self.notify_raw("team/created", {"teamId": team_id, "name": name})
+
+    def emit_teammate_created(self, team_id: str, name: str, role: str) -> None:
+        """Emit team/teammate_created notification."""
+        logger.info("teammate_created", team_id=team_id, name=name, role=role)
+        self.notify_raw("team/teammate_created", {"teamId": team_id, "name": name, "role": role})
+
+    def emit_teammate_removed(self, team_id: str, name: str) -> None:
+        """Emit team/teammate_removed notification."""
+        logger.info("teammate_removed", team_id=team_id, name=name)
+        self.notify_raw("team/teammate_removed", {"teamId": team_id, "name": name})
+
+    def emit_team_task_updated(self, team_id: str, task: dict[str, Any]) -> None:
+        """Emit team/task_updated notification."""
+        logger.info("team_task_updated", team_id=team_id, task_id=task.get("task_id"))
+        self.notify_raw("team/task_updated", {"teamId": team_id, "task": task})
+
+    def emit_team_message(self, team_id: str, from_agent: str, to_agent: str, content: str) -> None:
+        """Emit team/message notification."""
+        logger.info("team_message", team_id=team_id, from_agent=from_agent, to_agent=to_agent)
+        self.notify_raw(
+            "team/message",
+            {"teamId": team_id, "from": from_agent, "to": to_agent, "content": content},
+        )
+
+    def emit_teammate_output(self, team_id: str, name: str, content: str) -> None:
+        """Emit team/teammate_output notification (streaming teammate text to UI)."""
+        self.notify_raw(
+            "team/teammate_output",
+            {"teamId": team_id, "name": name, "content": content},
+        )
+
+    def emit_teammate_tool(
+        self,
+        team_id: str,
+        name: str,
+        tool_name: str,
+        status: str,
+        tool_call_id: str = "",
+        args: str = "",
+    ) -> None:
+        """Emit team/teammate_tool notification (tool activity indicator for UI)."""
+        payload: dict[str, Any] = {
+            "teamId": team_id,
+            "name": name,
+            "toolName": tool_name,
+            "toolCallId": tool_call_id,
+            "status": status,
+        }
+        if args:
+            payload["args"] = args
+        self.notify_raw("team/teammate_tool", payload)
+
+    # ── Plan mode / verification ───────────────────────────────────
+
     def emit_plan_mode_changed(
         self,
         task_id: str,

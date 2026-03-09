@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agent_host.budget.token_budget import TokenBudget
+    from agent_host.coordination.protocols import ContextInjectionStrategy
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
     from agent_host.llm.models import LLMResponse, ToolCallMessage
@@ -70,6 +71,10 @@ class LoopRuntime:
         skills: list[SkillDefinition] | None = None,
         max_concurrent_sub_agents: int = 5,
         workspace_dir: str | None = None,
+        context_injector: ContextInjectionStrategy | None = None,
+        agent_name: str = "lead",
+        exit_check: Callable[[], Awaitable[str | None]] | None = None,
+        wait_for_work: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -89,6 +94,10 @@ class LoopRuntime:
         self._skills = {s.name: s for s in (skills or [])}
         self._sub_agent_semaphore = asyncio.Semaphore(max_concurrent_sub_agents)
         self._workspace_dir = workspace_dir
+        self._context_injector = context_injector
+        self._agent_name = agent_name
+        self._exit_check = exit_check
+        self._wait_for_work = wait_for_work
 
         # Wire sub-agent/skill callbacks into the agent tool handler
         if self._agent_tool_handler:
@@ -101,9 +110,53 @@ class LoopRuntime:
         """Check if the task has been cancelled."""
         return self._cancel.is_set()
 
+    async def check_exit_allowed(self) -> str | None:
+        """Check if the loop is allowed to exit.
+
+        Returns None if exit is allowed, or a nudge message string if the
+        agent should continue working. Only set for teammate sessions —
+        solo sessions leave exit_check as None (always allow exit).
+        """
+        if self._exit_check is None:
+            return None
+        return await self._exit_check()
+
+    async def wait_for_work_if_idle(self) -> None:
+        """Block until there is work to do. No-op for solo sessions.
+
+        Called at the top of each loop iteration (after step 1).
+        For teammates, this blocks on the wake_event when there are no
+        pending tasks or messages — avoiding unnecessary LLM calls.
+        """
+        if self._wait_for_work is None:
+            return
+        await self._wait_for_work()
+
     def new_step_id(self) -> str:
         """Generate a new UUID v4 step ID."""
         return str(uuid.uuid4())
+
+    # ── Context Injection ────────────────────────────────────────
+
+    async def get_context_injections(self, _agent_name: str = "") -> list[str]:
+        """Get extra context strings from the injection strategy.
+
+        Called by LoopStrategy during context assembly. Returns empty list
+        if no injector is configured (solo mode).
+
+        Uses the ``agent_name`` set at construction (``"lead"`` for the lead,
+        teammate name for teammates) rather than the positional argument, which
+        historically received ``task_id`` by mistake.
+        """
+        if self._context_injector is None:
+            return []
+        return await self._context_injector.get_injections(self._agent_name)
+
+    def get_injection_overhead_tokens(self) -> int:
+        """Estimated token cost of context injections for compaction budget."""
+        if self._context_injector is None:
+            return 0
+        return self._context_injector.estimate_overhead_tokens()
 
     # ── LLM ─────────────────────────────────────────────────────
 
