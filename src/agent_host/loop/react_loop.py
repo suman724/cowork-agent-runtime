@@ -116,6 +116,17 @@ class ReactLoop:
                     )
                     continue  # Re-enter loop so LLM creates a plan
 
+                # Exit check: teammates must not exit while they have incomplete tasks
+                nudge = await self._h.check_exit_allowed()
+                if nudge is not None:
+                    logger.info(
+                        "exit_blocked_by_check",
+                        task_id=task_id,
+                        step=step,
+                    )
+                    self._h.thread.add_system_injection(nudge)
+                    continue  # Re-enter loop
+
                 # Verification phase: inject verification prompt on first completion
                 if self._verification and self._verification.enabled and not verification_injected:
                     verification_injected = True

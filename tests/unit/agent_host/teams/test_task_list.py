@@ -61,15 +61,17 @@ class TestUpdateStatus:
         tl = SharedTaskList()
         task = await tl.create_task("Work", "Do work")
         await tl.assign_task(task.task_id, "w")
-        updated = await tl.update_status(task.task_id, "completed", result="Done successfully")
+        updated, unblocked = await tl.update_status(task.task_id, "completed", result="Done successfully")
         assert updated.status == "completed"
         assert updated.result == "Done successfully"
+        assert unblocked == []
 
     async def test_fail_task(self) -> None:
         tl = SharedTaskList()
         task = await tl.create_task("Work", "Do work")
-        updated = await tl.update_status(task.task_id, "failed")
+        updated, unblocked = await tl.update_status(task.task_id, "failed")
         assert updated.status == "failed"
+        assert unblocked == []
 
     async def test_invalid_status_raises(self) -> None:
         tl = SharedTaskList()
@@ -85,7 +87,9 @@ class TestDependencyResolution:
         t2 = await tl.create_task("Second", "Do second", blocked_by=[t1.task_id])
         assert t2.status == "blocked"
 
-        await tl.update_status(t1.task_id, "completed")
+        _, unblocked = await tl.update_status(t1.task_id, "completed")
+        assert len(unblocked) == 1
+        assert unblocked[0].task_id == t2.task_id
         refreshed = await tl.get_task(t2.task_id)
         assert refreshed is not None
         assert refreshed.status == "pending"
@@ -97,12 +101,15 @@ class TestDependencyResolution:
         t3 = await tl.create_task("C", "c", blocked_by=[t1.task_id, t2.task_id])
         assert t3.status == "blocked"
 
-        await tl.update_status(t1.task_id, "completed")
+        _, unblocked = await tl.update_status(t1.task_id, "completed")
+        assert unblocked == []
         refreshed = await tl.get_task(t3.task_id)
         assert refreshed is not None
         assert refreshed.status == "blocked"
 
-        await tl.update_status(t2.task_id, "completed")
+        _, unblocked = await tl.update_status(t2.task_id, "completed")
+        assert len(unblocked) == 1
+        assert unblocked[0].task_id == t3.task_id
         refreshed = await tl.get_task(t3.task_id)
         assert refreshed is not None
         assert refreshed.status == "pending"

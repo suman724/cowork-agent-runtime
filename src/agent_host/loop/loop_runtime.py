@@ -73,6 +73,7 @@ class LoopRuntime:
         workspace_dir: str | None = None,
         context_injector: ContextInjectionStrategy | None = None,
         agent_name: str = "lead",
+        exit_check: Callable[[], Awaitable[str | None]] | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -94,6 +95,7 @@ class LoopRuntime:
         self._workspace_dir = workspace_dir
         self._context_injector = context_injector
         self._agent_name = agent_name
+        self._exit_check = exit_check
 
         # Wire sub-agent/skill callbacks into the agent tool handler
         if self._agent_tool_handler:
@@ -105,6 +107,17 @@ class LoopRuntime:
     def is_cancelled(self) -> bool:
         """Check if the task has been cancelled."""
         return self._cancel.is_set()
+
+    async def check_exit_allowed(self) -> str | None:
+        """Check if the loop is allowed to exit.
+
+        Returns None if exit is allowed, or a nudge message string if the
+        agent should continue working. Only set for teammate sessions —
+        solo sessions leave exit_check as None (always allow exit).
+        """
+        if self._exit_check is None:
+            return None
+        return await self._exit_check()
 
     def new_step_id(self) -> str:
         """Generate a new UUID v4 step ID."""

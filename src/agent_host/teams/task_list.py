@@ -58,8 +58,11 @@ class SharedTaskList:
         task_id: str,
         status: str,
         result: str | None = None,
-    ) -> TeamTask:
-        """Update task status. Completing a task auto-unblocks dependents."""
+    ) -> tuple[TeamTask, list[TeamTask]]:
+        """Update task status. Completing a task auto-unblocks dependents.
+
+        Returns a tuple of (updated_task, list_of_newly_unblocked_tasks).
+        """
         if status not in ("in_progress", "completed", "failed"):
             msg = f"Invalid status: {status}"
             raise ValueError(msg)
@@ -68,9 +71,10 @@ class SharedTaskList:
             task.status = status  # type: ignore[assignment]
             task.result = result
             task.updated_at = datetime.now(tz=UTC)
+            unblocked: list[TeamTask] = []
             if status == "completed":
-                self._unblock_dependents(task_id)
-            return task
+                unblocked = self._unblock_dependents(task_id)
+            return task, unblocked
 
     async def list_tasks(
         self,
@@ -110,8 +114,12 @@ class SharedTaskList:
                 msg = f"Dependency task not found: {dep_id}"
                 raise KeyError(msg)
 
-    def _unblock_dependents(self, completed_task_id: str) -> None:
-        """Transition blocked tasks to pending if all their blockers are completed."""
+    def _unblock_dependents(self, completed_task_id: str) -> list[TeamTask]:
+        """Transition blocked tasks to pending if all their blockers are completed.
+
+        Returns the list of tasks that were unblocked.
+        """
+        unblocked: list[TeamTask] = []
         for task in self._tasks.values():
             if task.status != "blocked":
                 continue
@@ -125,3 +133,5 @@ class SharedTaskList:
             if all_done:
                 task.status = "pending"
                 task.updated_at = datetime.now(tz=UTC)
+                unblocked.append(task)
+        return unblocked

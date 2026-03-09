@@ -13,6 +13,7 @@ from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.react_loop import ReactLoop
 from agent_host.loop.tool_executor import ToolExecutor
 from agent_host.memory.working_memory import WorkingMemory
+from agent_host.teams.task_list import SharedTaskList
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 
@@ -184,12 +185,14 @@ class TeammateSessionManager:
         sync_interval: int = 5,
         team_id: str = "",
         on_activity: Callable[[str], None] | None = None,
+        task_list: SharedTaskList | None = None,
     ) -> None:
         self.name = name
         self.role = role
         self._team_name = team_name
         self._team_id = team_id
         self._on_activity = on_activity
+        self._task_list = task_list
         self._llm_client = llm_client
         self._policy_enforcer = policy_enforcer
         self._tool_router = tool_router
@@ -278,6 +281,7 @@ class TeammateSessionManager:
                 context_injector=self._context_injector,
                 on_step_complete=self._on_step_complete,
                 agent_name=self.name,
+                exit_check=self._check_incomplete_tasks,
             )
 
             strategy = ReactLoop(loop_runtime, max_steps=self._max_steps)
@@ -345,6 +349,37 @@ class TeammateSessionManager:
                 team_id=self._team_id,
                 exc_info=True,
             )
+
+    async def _check_incomplete_tasks(self) -> str | None:
+        """Return a nudge message if this teammate still has incomplete tasks.
+
+        Called by the ReactLoop before allowing natural termination.
+        Returns None if exit is allowed (no incomplete work), or a string
+        nudge to inject into the conversation to keep the loop alive.
+        """
+        if self._task_list is None:
+            return None
+
+        tasks = await self._task_list.list_tasks()
+        my_incomplete = [
+            t
+            for t in tasks
+            if t.status in ("pending", "in_progress", "blocked")
+            and (t.assignee == self.name or t.created_by == self.name)
+        ]
+        if not my_incomplete:
+            return None
+
+        task_lines = "\n".join(
+            f"- [{t.status}] {t.title} (id={t.task_id})" for t in my_incomplete
+        )
+        return (
+            f"You still have {len(my_incomplete)} incomplete task(s):\n"
+            f"{task_lines}\n\n"
+            "Do NOT stop. Check the task list with TeamTaskList and continue "
+            "working on your tasks. If a task is blocked, wait and check again. "
+            "If a task is pending, pick it up with TeamTaskUpdate status='in_progress'."
+        )
 
     def cancel(self) -> None:
         """Signal the teammate to stop."""

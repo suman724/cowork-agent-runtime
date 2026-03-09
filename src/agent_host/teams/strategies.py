@@ -178,6 +178,7 @@ class TeamCoordinator:
                 workspace_client=self._workspace_client,
                 workspace_id=self._workspace_id,
                 on_activity=self.record_teammate_activity,
+                task_list=self._manager.task_list,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(initial_prompt), name=f"teammate-{name}")
@@ -264,6 +265,7 @@ class TeamCoordinator:
                 workspace_client=self._workspace_client,
                 workspace_id=self._workspace_id,
                 on_activity=self.record_teammate_activity,
+                task_list=self._manager.task_list,
             )
             self._teammate_sessions[name] = teammate
             task = asyncio.create_task(teammate.run(resume_prompt), name=f"teammate-{name}")
@@ -580,7 +582,9 @@ class TeamToolProvider:
             return {"status": "error", "message": "task_id and status are required"}
         result = arguments.get("result")
         try:
-            task = await manager.task_list.update_status(task_id, status, result=result)
+            task, unblocked = await manager.task_list.update_status(
+                task_id, status, result=result
+            )
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
         # Emit task_updated notification
@@ -589,6 +593,12 @@ class TeamToolProvider:
                 self._coordinator._manager.team_id,
                 _task_to_dict(task),
             )
+            # Also emit updates for newly unblocked tasks
+            for unblocked_task in unblocked:
+                self._coordinator._event_emitter.emit_team_task_updated(
+                    self._coordinator._manager.team_id,
+                    _task_to_dict(unblocked_task),
+                )
         # Wake the lead when a task completes or fails
         if status in ("completed", "failed"):
             self._coordinator.wake()

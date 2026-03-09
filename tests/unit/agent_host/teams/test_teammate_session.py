@@ -214,3 +214,55 @@ class TestOnActivityCallback:
     async def test_on_step_complete_no_callback_is_safe(self) -> None:
         t = _make_teammate()  # no on_activity
         await t._on_step_complete("task-1", 1)  # should not raise
+
+
+class TestExitCheck:
+    """Verify teammate exit check prevents premature termination."""
+
+    async def test_no_task_list_allows_exit(self) -> None:
+        t = _make_teammate()  # no task_list
+        result = await t._check_incomplete_tasks()
+        assert result is None  # exit allowed
+
+    async def test_no_incomplete_tasks_allows_exit(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        task = await tl.create_task("Done task", "desc", created_by="worker")
+        await tl.update_status(task.task_id, "completed", result="done")
+        t = _make_teammate(task_list=tl)
+        result = await t._check_incomplete_tasks()
+        assert result is None  # exit allowed
+
+    async def test_incomplete_created_task_blocks_exit(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        await tl.create_task("My work", "do stuff", created_by="worker")
+        t = _make_teammate(task_list=tl)
+        result = await t._check_incomplete_tasks()
+        assert result is not None
+        assert "1 incomplete task" in result
+        assert "My work" in result
+
+    async def test_blocked_task_blocks_exit(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        t1 = await tl.create_task("Prereq", "research", created_by="researcher")
+        await tl.create_task(
+            "My report", "write report", created_by="worker", blocked_by=[t1.task_id]
+        )
+        t = _make_teammate(task_list=tl)
+        result = await t._check_incomplete_tasks()
+        assert result is not None
+        assert "blocked" in result
+
+    async def test_other_teammates_tasks_dont_block_exit(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        await tl.create_task("Their work", "something", created_by="other_agent")
+        t = _make_teammate(task_list=tl)
+        result = await t._check_incomplete_tasks()
+        assert result is None  # exit allowed — not our task
