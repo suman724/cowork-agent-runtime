@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
-from agent_host.teams.models import TeamConfig
+from agent_host.teams.models import TeamConfig, TeamTask
 from agent_host.teams.team_manager import TeamManager
 from agent_host.teams.tools import (
     ALL_TEAM_TOOL_NAMES,
@@ -563,13 +563,7 @@ class TeamToolProvider:
         if self._coordinator._event_emitter and self._coordinator._manager:
             self._coordinator._event_emitter.emit_team_task_updated(
                 self._coordinator._manager.team_id,
-                {
-                    "task_id": task.task_id,
-                    "title": task.title,
-                    "status": task.status,
-                    "assignee": task.assignee,
-                    "created_by": task.created_by,
-                },
+                _task_to_dict(task),
             )
         # Wake the lead when a teammate creates a task
         if agent_name != "lead":
@@ -593,13 +587,7 @@ class TeamToolProvider:
         if self._coordinator._event_emitter and self._coordinator._manager:
             self._coordinator._event_emitter.emit_team_task_updated(
                 self._coordinator._manager.team_id,
-                {
-                    "task_id": task.task_id,
-                    "title": task.title,
-                    "status": task.status,
-                    "assignee": task.assignee,
-                    "result": task.result,
-                },
+                _task_to_dict(task),
             )
         # Wake the lead when a task completes or fails
         if status in ("completed", "failed"):
@@ -685,6 +673,20 @@ class TeamToolProvider:
             result["teammates"] = [{"name": a["name"], "status": a["status"]} for a in agents]
 
         return result
+
+
+def _task_to_dict(task: TeamTask) -> dict[str, Any]:
+    """Convert a TeamTask to a dict for the team/task_updated notification."""
+    return {
+        "task_id": task.task_id,
+        "title": task.title,
+        "description": task.description,
+        "status": task.status,
+        "assignee": task.assignee,
+        "created_by": task.created_by,
+        "result": task.result,
+        "blocked_by": task.blocked_by,
+    }
 
 
 class TeamContextInjector:
