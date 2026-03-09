@@ -76,6 +76,39 @@ class _TeammateEventProxy:
         self._delegate.emit_text_chunk(task_id, text, step_id=step_id)
         self._delegate.emit_teammate_output(self._team_id, self._teammate_name, text)
 
+    def emit_tool_requested(
+        self,
+        tool_name: str,
+        capability: str,
+        arguments: dict[str, Any],
+        tool_call_id: str = "",
+        tool_type: str = "tool",
+    ) -> None:
+        """Forward tool_requested and emit teammate_tool for the team UI."""
+        self._delegate.emit_tool_requested(
+            tool_name, capability, arguments, tool_call_id, tool_type
+        )
+        self._delegate.emit_teammate_tool(
+            self._team_id, self._teammate_name, tool_name, "requested", tool_call_id
+        )
+
+    def emit_tool_completed(
+        self,
+        tool_name: str,
+        status: str,
+        tool_call_id: str = "",
+        result: str | None = None,
+        error: str | None = None,
+        tool_type: str = "tool",
+    ) -> None:
+        """Forward tool_completed and emit teammate_tool for the team UI."""
+        self._delegate.emit_tool_completed(
+            tool_name, status, tool_call_id, result, error, tool_type
+        )
+        self._delegate.emit_teammate_tool(
+            self._team_id, self._teammate_name, tool_name, status, tool_call_id
+        )
+
     def __getattr__(self, name: str) -> Any:
         """Delegate everything else to the real EventEmitter."""
         return getattr(self._delegate, name)

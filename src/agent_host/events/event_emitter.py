@@ -368,6 +368,26 @@ class EventEmitter:
             {"teamId": team_id, "name": name, "content": content},
         )
 
+    def emit_teammate_tool(
+        self,
+        team_id: str,
+        name: str,
+        tool_name: str,
+        status: str,
+        tool_call_id: str = "",
+    ) -> None:
+        """Emit team/teammate_tool notification (tool activity indicator for UI)."""
+        self.notify_raw(
+            "team/teammate_tool",
+            {
+                "teamId": team_id,
+                "name": name,
+                "toolName": tool_name,
+                "toolCallId": tool_call_id,
+                "status": status,
+            },
+        )
+
     # ── Plan mode / verification ───────────────────────────────────
 
     def emit_plan_mode_changed(
