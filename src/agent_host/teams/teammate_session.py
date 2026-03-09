@@ -63,6 +63,37 @@ Working without updating tasks or sending messages makes you invisible to the te
 """
 
 
+def _summarize_args(tool_name: str, arguments: dict[str, Any]) -> str:
+    """Create a brief human-readable summary of tool arguments."""
+    if tool_name in ("ReadFile", "ViewImage"):
+        return str(arguments.get("path", ""))
+    if tool_name in ("WriteFile", "EditFile", "MultiEdit", "DeleteFile", "MoveFile"):
+        return str(arguments.get("path", ""))
+    if tool_name == "RunCommand":
+        return str(arguments.get("command", ""))[:80]
+    if tool_name in ("WebSearch", "FetchUrl"):
+        return str(arguments.get("query", "") or arguments.get("url", ""))[:80]
+    if tool_name == "GrepFiles":
+        return str(arguments.get("pattern", ""))[:60]
+    if tool_name == "FindFiles":
+        return str(arguments.get("pattern", ""))[:60]
+    if tool_name == "ListDirectory":
+        return str(arguments.get("path", ""))
+    if tool_name in ("TeamTaskCreate", "TeamTaskUpdate", "SendTeamMessage"):
+        return str(arguments.get("title", "") or arguments.get("content", ""))[:60]
+    if tool_name == "ExecuteCode":
+        return str(arguments.get("description", ""))[:60]
+    if tool_name == "HttpRequest":
+        method = arguments.get("method", "GET")
+        url = arguments.get("url", "")
+        return f"{method} {url}"[:80]
+    # Fallback: first string value
+    for v in arguments.values():
+        if isinstance(v, str) and v:
+            return v[:60]
+    return ""
+
+
 class _TeammateEventProxy:
     """Proxy that routes teammate events to team/* notifications only.
 
@@ -92,13 +123,15 @@ class _TeammateEventProxy:
         self,
         tool_name: str,
         capability: str,  # noqa: ARG002
-        arguments: dict[str, Any],  # noqa: ARG002
+        arguments: dict[str, Any],
         tool_call_id: str = "",
         tool_type: str = "tool",  # noqa: ARG002
     ) -> None:
         """Emit teammate_tool only — do NOT forward to lead's conversation."""
+        args_summary = _summarize_args(tool_name, arguments)
         self._delegate.emit_teammate_tool(
-            self._team_id, self._teammate_name, tool_name, "requested", tool_call_id
+            self._team_id, self._teammate_name, tool_name, "requested", tool_call_id,
+            args=args_summary,
         )
 
     def emit_tool_completed(

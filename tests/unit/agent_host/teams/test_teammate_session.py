@@ -167,7 +167,7 @@ class TestTeammateEventProxy:
 
         delegate.emit_tool_requested.assert_not_called()
         delegate.emit_teammate_tool.assert_called_once_with(
-            "tm-1", "worker", "ReadFile", "requested", "tc-1"
+            "tm-1", "worker", "ReadFile", "requested", "tc-1", args="/a"
         )
 
     def test_tool_completed_emits_teammate_tool_only(self) -> None:

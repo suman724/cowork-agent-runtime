@@ -375,18 +375,19 @@ class EventEmitter:
         tool_name: str,
         status: str,
         tool_call_id: str = "",
+        args: str = "",
     ) -> None:
         """Emit team/teammate_tool notification (tool activity indicator for UI)."""
-        self.notify_raw(
-            "team/teammate_tool",
-            {
-                "teamId": team_id,
-                "name": name,
-                "toolName": tool_name,
-                "toolCallId": tool_call_id,
-                "status": status,
-            },
-        )
+        payload: dict[str, Any] = {
+            "teamId": team_id,
+            "name": name,
+            "toolName": tool_name,
+            "toolCallId": tool_call_id,
+            "status": status,
+        }
+        if args:
+            payload["args"] = args
+        self.notify_raw("team/teammate_tool", payload)
 
     # ── Plan mode / verification ───────────────────────────────────
 
