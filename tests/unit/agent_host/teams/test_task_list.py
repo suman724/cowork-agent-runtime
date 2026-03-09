@@ -61,7 +61,9 @@ class TestUpdateStatus:
         tl = SharedTaskList()
         task = await tl.create_task("Work", "Do work")
         await tl.assign_task(task.task_id, "w")
-        updated, unblocked = await tl.update_status(task.task_id, "completed", result="Done successfully")
+        updated, unblocked = await tl.update_status(
+            task.task_id, "completed", result="Done successfully"
+        )
         assert updated.status == "completed"
         assert updated.result == "Done successfully"
         assert unblocked == []
@@ -78,6 +80,15 @@ class TestUpdateStatus:
         task = await tl.create_task("Work", "Do work")
         with pytest.raises(ValueError, match="Invalid status"):
             await tl.update_status(task.task_id, "bogus")
+
+    async def test_blocked_to_in_progress_rejected(self) -> None:
+        """Blocked tasks cannot be manually moved to in_progress."""
+        tl = SharedTaskList()
+        t1 = await tl.create_task("First", "Do first")
+        t2 = await tl.create_task("Second", "Do second", blocked_by=[t1.task_id])
+        assert t2.status == "blocked"
+        with pytest.raises(ValueError, match="blocked"):
+            await tl.update_status(t2.task_id, "in_progress")
 
 
 class TestDependencyResolution:
@@ -113,6 +124,36 @@ class TestDependencyResolution:
         refreshed = await tl.get_task(t3.task_id)
         assert refreshed is not None
         assert refreshed.status == "pending"
+
+
+class TestAutoAssign:
+    async def test_auto_assigns_on_in_progress(self) -> None:
+        """When a teammate starts a task with no assignee, they become the assignee."""
+        tl = SharedTaskList()
+        task = await tl.create_task("Work", "desc", created_by="lead")
+        assert task.assignee is None
+
+        updated, _ = await tl.update_status(task.task_id, "in_progress", updated_by="analyst")
+        assert updated.assignee == "analyst"
+
+    async def test_no_reassign_if_already_assigned(self) -> None:
+        """Auto-assign does not overwrite an existing assignee."""
+        tl = SharedTaskList()
+        task = await tl.create_task("Work", "desc", created_by="lead")
+        await tl.assign_task(task.task_id, "researcher")
+
+        updated, _ = await tl.update_status(task.task_id, "completed", updated_by="analyst")
+        assert updated.assignee == "researcher"  # unchanged
+
+    async def test_no_auto_assign_on_completed(self) -> None:
+        """Auto-assign only happens for in_progress, not completed."""
+        tl = SharedTaskList()
+        task = await tl.create_task("Work", "desc", created_by="lead")
+        # Move to in_progress first (required before completing)
+        await tl.update_status(task.task_id, "in_progress")
+
+        updated, _ = await tl.update_status(task.task_id, "completed", updated_by="analyst")
+        assert updated.assignee is None  # not auto-assigned on completion
 
 
 class TestListAndFilter:

@@ -24,6 +24,7 @@ class SharedTaskList:
         description: str,
         blocked_by: list[str] | None = None,
         created_by: str = "",
+        assignee: str | None = None,
     ) -> TeamTask:
         """Create a new task. Status is 'blocked' if it has unresolved dependencies."""
         blocked_by = blocked_by or []
@@ -37,6 +38,7 @@ class SharedTaskList:
                 status=status,
                 blocked_by=list(blocked_by),
                 created_by=created_by,
+                assignee=assignee,
             )
             self._tasks[task.task_id] = task
             return task
@@ -58,8 +60,14 @@ class SharedTaskList:
         task_id: str,
         status: str,
         result: str | None = None,
+        updated_by: str | None = None,
     ) -> tuple[TeamTask, list[TeamTask]]:
         """Update task status. Completing a task auto-unblocks dependents.
+
+        When a teammate sets status to 'in_progress' and the task has no
+        assignee yet, auto-assigns it to the updater.  This ensures the
+        exit check can identify tasks belonging to each teammate even when
+        the lead pre-created them.
 
         Returns a tuple of (updated_task, list_of_newly_unblocked_tasks).
         """
@@ -68,9 +76,20 @@ class SharedTaskList:
             raise ValueError(msg)
         async with self._lock:
             task = self._get_or_raise(task_id)
+            # Blocked tasks cannot be manually moved to in_progress — they
+            # must wait for _unblock_dependents to resolve them to "pending".
+            if task.status == "blocked" and status == "in_progress":
+                msg = (
+                    f"Cannot start task {task_id}: it is blocked by "
+                    f"{task.blocked_by}. Wait for dependencies to complete."
+                )
+                raise ValueError(msg)
             task.status = status  # type: ignore[assignment]
             task.result = result
             task.updated_at = datetime.now(tz=UTC)
+            # Auto-assign on first pickup
+            if updated_by and not task.assignee and status == "in_progress":
+                task.assignee = updated_by
             unblocked: list[TeamTask] = []
             if status == "completed":
                 unblocked = self._unblock_dependents(task_id)

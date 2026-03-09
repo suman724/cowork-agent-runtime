@@ -121,6 +121,10 @@ SHARED_TOOLS: list[dict[str, Any]] = [
                 "properties": {
                     "title": {"type": "string", "description": "Task title."},
                     "description": {"type": "string", "description": "Task description."},
+                    "assignee": {
+                        "type": "string",
+                        "description": "Teammate name to assign this task to (optional).",
+                    },
                     "blocked_by": {
                         "type": "array",
                         "items": {"type": "string"},

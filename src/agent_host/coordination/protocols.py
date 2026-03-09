@@ -112,6 +112,14 @@ class ContextInjectionStrategy(Protocol):
         """Estimated token cost of injections (for compaction budget)."""
         ...
 
+    def has_pending_messages(self, agent_name: str) -> bool:
+        """Non-consuming check for pending messages.
+
+        Used by teammates to decide whether to block or proceed
+        with the next LLM call. Does not drain the message queue.
+        """
+        ...
+
 
 @runtime_checkable
 class CheckpointStrategy(Protocol):

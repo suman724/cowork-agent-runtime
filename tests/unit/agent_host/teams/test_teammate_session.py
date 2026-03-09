@@ -218,7 +218,11 @@ class TestOnActivityCallback:
 
 
 class TestExitCheck:
-    """Verify teammate exit check prevents premature termination."""
+    """Verify teammate exit check prevents premature termination.
+
+    The exit check uses team-wide incomplete task detection (not filtered
+    by assignee/created_by) since tasks are pulled, not pushed.
+    """
 
     async def test_no_task_list_allows_exit(self) -> None:
         t = _make_teammate()  # no task_list
@@ -235,49 +239,69 @@ class TestExitCheck:
         result = await t._check_incomplete_tasks()
         assert result is None  # exit allowed
 
-    async def test_incomplete_created_task_blocks_exit(self) -> None:
+    async def test_incomplete_task_blocks_on_wake_event(self) -> None:
+        """Any incomplete team task causes the exit check to block on wake_event."""
         from agent_host.teams.task_list import SharedTaskList
 
         tl = SharedTaskList()
-        await tl.create_task("My work", "do stuff", created_by="worker")
-        t = _make_teammate(task_list=tl)
+        await tl.create_task("Team work", "do stuff", created_by="lead")
+        wake = asyncio.Event()
+        t = _make_teammate(task_list=tl, wake_event=wake)
+
+        # Should block until wake_event is set, then return nudge
+        async def wake_later() -> None:
+            await asyncio.sleep(0.05)
+            wake.set()
+
+        bg_task = asyncio.create_task(wake_later())  # noqa: F841, RUF006
         result = await t._check_incomplete_tasks()
         assert result is not None
         assert "1 incomplete task" in result
-        assert "My work" in result
+        assert "Team work" in result
+
+    async def test_incomplete_task_without_wake_event_returns_nudge(self) -> None:
+        """Without a wake_event, exit check returns nudge immediately."""
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        await tl.create_task("Team work", "do stuff", created_by="lead")
+        t = _make_teammate(task_list=tl)  # no wake_event
+        result = await t._check_incomplete_tasks()
+        assert result is not None
+        assert "1 incomplete task" in result
 
     async def test_blocked_task_waits_on_wake_event(self) -> None:
-        """When all tasks are blocked, exit check waits on wake_event, not spin."""
+        """When tasks are blocked, exit check blocks then returns nudge."""
         from agent_host.teams.task_list import SharedTaskList
 
         tl = SharedTaskList()
         t1 = await tl.create_task("Prereq", "research", created_by="researcher")
         await tl.create_task(
-            "My report", "write report", created_by="worker", blocked_by=[t1.task_id]
+            "My report", "write report", created_by="lead", blocked_by=[t1.task_id]
         )
         wake = asyncio.Event()
         t = _make_teammate(task_list=tl, wake_event=wake)
 
-        # Simulate: unblock the task after a short delay, then set wake
+        # Unblock the task after a short delay
         async def unblock_later() -> None:
             await asyncio.sleep(0.05)
             await tl.update_status(t1.task_id, "completed")
             wake.set()
 
-        asyncio.create_task(unblock_later())
+        bg_task = asyncio.create_task(unblock_later())  # noqa: F841, RUF006
         result = await t._check_incomplete_tasks()
         # After unblocking, the task is pending so we still get a nudge
         assert result is not None
         assert "pending" in result
 
-    async def test_blocked_task_unblocked_fully_allows_exit(self) -> None:
+    async def test_all_tasks_completed_allows_exit(self) -> None:
         """If all tasks complete while waiting, exit is allowed."""
         from agent_host.teams.task_list import SharedTaskList
 
         tl = SharedTaskList()
         t1 = await tl.create_task("Prereq", "research", created_by="researcher")
         t2 = await tl.create_task(
-            "My report", "write report", created_by="worker", blocked_by=[t1.task_id]
+            "Report", "write report", created_by="lead", blocked_by=[t1.task_id]
         )
         wake = asyncio.Event()
         t = _make_teammate(task_list=tl, wake_event=wake)
@@ -289,15 +313,86 @@ class TestExitCheck:
             await tl.update_status(t2.task_id, "completed", result="done")
             wake.set()
 
-        asyncio.create_task(complete_all())
+        bg_task = asyncio.create_task(complete_all())  # noqa: F841, RUF006
         result = await t._check_incomplete_tasks()
         assert result is None  # exit allowed
 
-    async def test_other_teammates_tasks_dont_block_exit(self) -> None:
+    async def test_any_team_task_blocks_exit(self) -> None:
+        """Any incomplete team task blocks exit — not filtered by owner."""
         from agent_host.teams.task_list import SharedTaskList
 
         tl = SharedTaskList()
-        await tl.create_task("Their work", "something", created_by="other_agent")
-        t = _make_teammate(task_list=tl)
+        await tl.create_task("Other's work", "something", created_by="other_agent")
+        wake = asyncio.Event()
+        t = _make_teammate(task_list=tl, wake_event=wake)
+
+        async def wake_later() -> None:
+            await asyncio.sleep(0.05)
+            wake.set()
+
+        bg_task = asyncio.create_task(wake_later())  # noqa: F841, RUF006
         result = await t._check_incomplete_tasks()
-        assert result is None  # exit allowed — not our task
+        assert result is not None  # exit blocked — team has incomplete work
+
+
+class TestWaitForWork:
+    """Verify deterministic pre-LLM-call blocking when no work is available."""
+
+    async def test_no_task_list_returns_immediately(self) -> None:
+        t = _make_teammate()  # no task_list
+        await t._wait_for_work()  # should not block
+
+    async def test_pending_task_returns_immediately(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        await tl.create_task("Available work", "desc")
+        t = _make_teammate(task_list=tl)
+        await t._wait_for_work()  # should return immediately
+
+    async def test_in_progress_task_returns_immediately(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        task = await tl.create_task("Active work", "desc")
+        await tl.update_status(task.task_id, "in_progress")
+        t = _make_teammate(task_list=tl)
+        await t._wait_for_work()  # should return immediately
+
+    async def test_all_tasks_done_returns_immediately(self) -> None:
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        task = await tl.create_task("Done", "desc")
+        await tl.update_status(task.task_id, "completed")
+        t = _make_teammate(task_list=tl)
+        await t._wait_for_work()  # should return — team is done
+
+    async def test_blocked_only_blocks_until_wake(self) -> None:
+        """When only blocked tasks exist, blocks on wake_event."""
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        t1 = await tl.create_task("Prereq", "research")
+        await tl.create_task("Blocked", "needs prereq", blocked_by=[t1.task_id])
+        wake = asyncio.Event()
+        t = _make_teammate(task_list=tl, wake_event=wake)
+
+        # Complete the prereq after a delay, which unblocks the dependent task
+        async def unblock_later() -> None:
+            await asyncio.sleep(0.05)
+            await tl.update_status(t1.task_id, "completed")
+            wake.set()
+
+        bg_task = asyncio.create_task(unblock_later())  # noqa: F841, RUF006
+        await t._wait_for_work()  # should block then return when pending task appears
+
+    async def test_no_wake_event_returns_immediately(self) -> None:
+        """Without wake_event, cannot block — returns immediately."""
+        from agent_host.teams.task_list import SharedTaskList
+
+        tl = SharedTaskList()
+        t1 = await tl.create_task("Prereq", "research")
+        await tl.create_task("Blocked", "needs prereq", blocked_by=[t1.task_id])
+        t = _make_teammate(task_list=tl)  # no wake_event
+        await t._wait_for_work()  # should return immediately

@@ -67,6 +67,9 @@ class SoloContextInjector:
     def estimate_overhead_tokens(self) -> int:
         return 0
 
+    def has_pending_messages(self, _agent_name: str) -> bool:
+        return False
+
 
 class SoloCheckpointProvider:
     """No-op checkpoint provider — no extra state to persist."""

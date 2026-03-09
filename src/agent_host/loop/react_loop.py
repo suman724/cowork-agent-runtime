@@ -61,6 +61,13 @@ class ReactLoop:
                 logger.info("agent_loop_cancelled", task_id=task_id, step=step)
                 return LoopResult(reason="cancelled", step_count=step)
 
+            # Wait for work if idle (teammates only — blocks until tasks/messages arrive)
+            if step > 0:
+                await self._h.wait_for_work_if_idle()
+                # Re-check cancellation after potentially long wait
+                if self._h.is_cancelled():
+                    return LoopResult(reason="cancelled", step_count=step)
+
             # 1. Context assembly (pre-fetch async injections)
             context_injections = await self._h.get_context_injections(task_id)
             messages = self._build_messages(task_id, step, step_id, context_injections)

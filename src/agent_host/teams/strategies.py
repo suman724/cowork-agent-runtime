@@ -491,7 +491,7 @@ class TeamToolProvider:
         if tool_name == "TeamTaskCreate":
             return await self._handle_task_create(arguments, agent_name)
         if tool_name == "TeamTaskUpdate":
-            return await self._handle_task_update(arguments)
+            return await self._handle_task_update(arguments, agent_name)
         if tool_name == "TeamTaskList":
             return await self._handle_task_list(arguments)
         if tool_name == "SendTeamMessage":
@@ -568,12 +568,14 @@ class TeamToolProvider:
         if not title:
             return {"status": "error", "message": "title is required"}
         blocked_by = arguments.get("blocked_by")
+        assignee = arguments.get("assignee")
         try:
             task = await manager.task_list.create_task(
                 title=title,
                 description=description,
                 blocked_by=blocked_by,
                 created_by=agent_name,
+                assignee=assignee,
             )
         except KeyError as e:
             return {"status": "error", "message": str(e)}
@@ -588,7 +590,9 @@ class TeamToolProvider:
             self._coordinator.wake()
         return {"status": "success", "task_id": task.task_id, "title": task.title}
 
-    async def _handle_task_update(self, arguments: dict[str, Any]) -> dict[str, Any]:
+    async def _handle_task_update(
+        self, arguments: dict[str, Any], agent_name: str = ""
+    ) -> dict[str, Any]:
         manager = self._coordinator.manager
         if manager is None:
             return {"status": "error", "message": "No active team"}
@@ -599,7 +603,7 @@ class TeamToolProvider:
         result = arguments.get("result")
         try:
             task, unblocked = await manager.task_list.update_status(
-                task_id, status, result=result
+                task_id, status, result=result, updated_by=agent_name
             )
         except (KeyError, ValueError) as e:
             return {"status": "error", "message": str(e)}
@@ -680,7 +684,7 @@ class TeamToolProvider:
             self._coordinator.wake()
         # Wake teammate if they're waiting on blocked tasks
         if to == "all":
-            for member_name in (manager.members if manager else {}):
+            for member_name in manager.members if manager else {}:
                 if member_name != agent_name:
                     self._coordinator.wake_teammate(member_name)
         elif to != "lead":
@@ -766,6 +770,13 @@ class TeamContextInjector:
         if self._coordinator.is_team_active:
             return self.OVERHEAD_TOKENS
         return 0
+
+    def has_pending_messages(self, agent_name: str) -> bool:
+        """Non-consuming check for pending messages in the agent's mailbox."""
+        manager = self._coordinator.manager
+        if manager is None:
+            return False
+        return manager.mailbox.has_messages(agent_name)
 
 
 class TeamCheckpointProvider:

@@ -74,6 +74,7 @@ class LoopRuntime:
         context_injector: ContextInjectionStrategy | None = None,
         agent_name: str = "lead",
         exit_check: Callable[[], Awaitable[str | None]] | None = None,
+        wait_for_work: Callable[[], Awaitable[None]] | None = None,
     ) -> None:
         self._llm_client = llm_client
         self._tool_executor = tool_executor
@@ -96,6 +97,7 @@ class LoopRuntime:
         self._context_injector = context_injector
         self._agent_name = agent_name
         self._exit_check = exit_check
+        self._wait_for_work = wait_for_work
 
         # Wire sub-agent/skill callbacks into the agent tool handler
         if self._agent_tool_handler:
@@ -118,6 +120,17 @@ class LoopRuntime:
         if self._exit_check is None:
             return None
         return await self._exit_check()
+
+    async def wait_for_work_if_idle(self) -> None:
+        """Block until there is work to do. No-op for solo sessions.
+
+        Called at the top of each loop iteration (after step 1).
+        For teammates, this blocks on the wake_event when there are no
+        pending tasks or messages — avoiding unnecessary LLM calls.
+        """
+        if self._wait_for_work is None:
+            return
+        await self._wait_for_work()
 
     def new_step_id(self) -> str:
         """Generate a new UUID v4 step ID."""

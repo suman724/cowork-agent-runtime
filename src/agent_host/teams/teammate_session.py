@@ -13,7 +13,6 @@ from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.react_loop import ReactLoop
 from agent_host.loop.tool_executor import ToolExecutor
 from agent_host.memory.working_memory import WorkingMemory
-from agent_host.teams.task_list import SharedTaskList
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
 
@@ -29,6 +28,7 @@ if TYPE_CHECKING:
     from agent_host.loop.models import LoopResult
     from agent_host.policy.policy_enforcer import PolicyEnforcer
     from agent_host.session.workspace_client import WorkspaceClient
+    from agent_host.teams.task_list import SharedTaskList
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -56,9 +56,21 @@ You MUST use the team coordination tools to keep the team in sync:
 These tools are how the team stays coordinated and how the user sees your progress. \
 Working without updating tasks or sending messages makes you invisible to the team.
 
+## Blocked Tasks — CRITICAL
+If a task you own has status **'blocked'**, you MUST NOT start working on it. \
+A blocked task means it depends on another teammate's output. \
+Do NOT attempt to draft, guess, or use your own knowledge as a substitute — \
+the whole point of the dependency is to use the other teammate's actual findings.
+
+Instead:
+1. Call TeamTaskList to confirm which tasks block yours.
+2. Send a message to the teammate working on the blocking task to check progress.
+3. **Wait.** You will be automatically notified when the blocking task completes.
+4. Only begin work once the task status changes from 'blocked' to 'pending'.
+
 ## Guidelines
 - Focus on your assigned tasks
-- When blocked, message the relevant teammate or the lead
+- When blocked, message the relevant teammate or the lead, then wait
 - When your current task is done, check the task list for more work
 - If the task list is empty and you have no messages, let the lead know you are idle
 """
@@ -131,7 +143,11 @@ class _TeammateEventProxy:
         """Emit teammate_tool only — do NOT forward to lead's conversation."""
         args_summary = _summarize_args(tool_name, arguments)
         self._delegate.emit_teammate_tool(
-            self._team_id, self._teammate_name, tool_name, "requested", tool_call_id,
+            self._team_id,
+            self._teammate_name,
+            tool_name,
+            "requested",
+            tool_call_id,
             args=args_summary,
         )
 
@@ -235,6 +251,15 @@ class TeammateSessionManager:
     async def run(self, initial_prompt: str) -> LoopResult | None:
         """Run the teammate agent loop."""
         task_id = f"teammate_{self.name}"
+        logger.info(
+            "teammate_loop_starting",
+            teammate_name=self.name,
+            team_id=self._team_id,
+            has_task_list=self._task_list is not None,
+            has_wake_event=self._wake_event is not None,
+            max_steps=self._max_steps,
+            budget=self._token_budget._max_session_tokens,
+        )
 
         # Add initial prompt as user message
         self._thread.add_user_message(initial_prompt)
@@ -286,6 +311,7 @@ class TeammateSessionManager:
                 on_step_complete=self._on_step_complete,
                 agent_name=self.name,
                 exit_check=self._check_incomplete_tasks,
+                wait_for_work=self._wait_for_work,
             )
 
             strategy = ReactLoop(loop_runtime, max_steps=self._max_steps)
@@ -354,65 +380,140 @@ class TeammateSessionManager:
                 exc_info=True,
             )
 
+    async def _wait_for_work(self) -> None:
+        """Block until there is work available. Called before each LLM call.
+
+        Checks for pending tasks or mailbox messages. If neither exists,
+        blocks on wake_event until signalled (task list change or message).
+        This is fully deterministic — zero LLM calls while waiting.
+        """
+        if self._task_list is None:
+            return
+
+        while True:
+            # Check for pending tasks we can pick up
+            tasks = await self._task_list.list_tasks()
+            has_pending = any(t.status == "pending" for t in tasks)
+            has_in_progress = any(t.status == "in_progress" for t in tasks)
+
+            # Check for mailbox messages (non-consuming peek via protocol)
+            has_messages = False
+            if self._context_injector is not None:
+                has_messages = self._context_injector.has_pending_messages(self.name)
+
+            if has_pending or has_in_progress or has_messages:
+                logger.info(
+                    "teammate_has_work",
+                    teammate_name=self.name,
+                    team_id=self._team_id,
+                    has_pending=has_pending,
+                    has_in_progress=has_in_progress,
+                    has_messages=has_messages,
+                )
+                return
+
+            # No work available — check if all tasks are done (team finished)
+            all_done = all(t.status in ("completed", "failed") for t in tasks) if tasks else False
+            if all_done:
+                logger.info(
+                    "teammate_all_tasks_done",
+                    teammate_name=self.name,
+                    team_id=self._team_id,
+                )
+                return  # Let LLM call proceed so it can wrap up
+
+            # Block on wake_event — zero token cost
+            if self._wake_event is None:
+                return  # No wake event, can't block
+
+            logger.info(
+                "teammate_waiting_for_work",
+                teammate_name=self.name,
+                team_id=self._team_id,
+                task_statuses={t.task_id: t.status for t in tasks},
+            )
+            # Check if a signal arrived between our task check and here
+            if self._wake_event.is_set():
+                self._wake_event.clear()
+                continue  # Re-check immediately
+            self._wake_event.clear()
+            try:
+                await asyncio.wait_for(self._wake_event.wait(), timeout=300.0)
+            except TimeoutError:
+                logger.info("teammate_wait_for_work_timeout", teammate_name=self.name)
+                return  # Timeout — let LLM call proceed to avoid permanent block
+            # Loop back to re-check
+
     async def _check_incomplete_tasks(self) -> str | None:
-        """Return a nudge message if this teammate still has incomplete tasks.
+        """Return a nudge message if the team still has incomplete tasks.
 
         Called by the ReactLoop before allowing natural termination.
-        Returns None if exit is allowed (no incomplete work), or a string
-        nudge to inject into the conversation to keep the loop alive.
+        Returns None if exit is allowed, or a string nudge to keep the loop alive.
 
-        If all remaining tasks are blocked, blocks on the wake_event until
-        something changes (message received, task unblocked) — avoids
-        burning LLM calls while waiting.
+        Uses team-wide incomplete check (not filtered by assignee/created_by)
+        since tasks are pulled, not pushed.
         """
         if self._task_list is None:
             return None
 
         tasks = await self._task_list.list_tasks()
-        my_incomplete = [
-            t
-            for t in tasks
-            if t.status in ("pending", "in_progress", "blocked")
-            and (t.assignee == self.name or t.created_by == self.name)
-        ]
-        if not my_incomplete:
+        incomplete = [t for t in tasks if t.status in ("pending", "in_progress", "blocked")]
+        if not incomplete:
             return None
 
-        # If all incomplete tasks are blocked, wait for a signal rather than
-        # spinning LLM calls.  The wake_event is set when a message arrives
-        # or a task is unblocked.
-        all_blocked = all(t.status == "blocked" for t in my_incomplete)
-        if all_blocked and self._wake_event is not None:
-            logger.info(
-                "teammate_waiting_for_unblock",
-                teammate_name=self.name,
-                blocked_tasks=[t.task_id for t in my_incomplete],
-            )
-            self._wake_event.clear()
-            try:
-                await asyncio.wait_for(self._wake_event.wait(), timeout=300.0)
-            except TimeoutError:
-                logger.info("teammate_wait_timeout", teammate_name=self.name)
-            # Re-check after waking — tasks may have been unblocked
-            tasks = await self._task_list.list_tasks()
-            my_incomplete = [
-                t
-                for t in tasks
-                if t.status in ("pending", "in_progress", "blocked")
-                and (t.assignee == self.name or t.created_by == self.name)
-            ]
-            if not my_incomplete:
-                return None
-
-        task_lines = "\n".join(
-            f"- [{t.status}] {t.title} (id={t.task_id})" for t in my_incomplete
+        logger.info(
+            "teammate_exit_blocked",
+            teammate_name=self.name,
+            team_id=self._team_id,
+            incomplete_count=len(incomplete),
+            task_statuses={t.task_id: t.status for t in incomplete},
         )
+
+        # Block on wake_event — zero token cost while waiting.
+        if self._wake_event is not None:
+            logger.info(
+                "teammate_waiting_for_signal",
+                teammate_name=self.name,
+                team_id=self._team_id,
+                task_ids=[t.task_id for t in incomplete],
+            )
+            # Check if a signal arrived between our task check and here
+            if not self._wake_event.is_set():
+                self._wake_event.clear()
+                try:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=300.0)
+                except TimeoutError:
+                    logger.info("teammate_wait_timeout", teammate_name=self.name)
+            self._wake_event.clear()
+            # Re-check after waking — tasks may have been completed
+            tasks = await self._task_list.list_tasks()
+            incomplete = [t for t in tasks if t.status in ("pending", "in_progress", "blocked")]
+            if not incomplete:
+                return None
+            logger.info(
+                "teammate_woke_up",
+                teammate_name=self.name,
+                team_id=self._team_id,
+                remaining_tasks={t.task_id: t.status for t in incomplete},
+            )
+
+        task_lines = "\n".join(f"- [{t.status}] {t.title} (id={t.task_id})" for t in incomplete)
+        has_blocked = any(t.status == "blocked" for t in incomplete)
+        blocked_note = (
+            (
+                "\n\nSome tasks are BLOCKED — do NOT work on them yet. "
+                "Wait for the blocking dependency to complete. You will be notified."
+            )
+            if has_blocked
+            else ""
+        )
+
         return (
-            f"You still have {len(my_incomplete)} incomplete task(s):\n"
+            f"You still have {len(incomplete)} incomplete task(s):\n"
             f"{task_lines}\n\n"
             "Do NOT stop. Check the task list with TeamTaskList and continue "
             "working on your tasks. If a task is pending, pick it up with "
-            "TeamTaskUpdate status='in_progress'."
+            f"TeamTaskUpdate status='in_progress'.{blocked_note}"
         )
 
     def cancel(self) -> None:
