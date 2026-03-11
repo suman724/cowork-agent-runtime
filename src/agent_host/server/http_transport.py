@@ -181,7 +181,10 @@ class HttpTransport:
         Query params:
         - since: replay events after this ID (default: 0 = all buffered events)
         """
-        since_str = request.query_params.get("since", "0")
+        # Support both ?since= query param and Last-Event-ID header (SSE spec)
+        since_str = request.query_params.get("since") or request.headers.get(
+            "Last-Event-ID", "0"
+        )
         try:
             since_id = int(since_str)
         except ValueError:
