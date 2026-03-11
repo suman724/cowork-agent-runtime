@@ -109,7 +109,7 @@ async def run_sandbox_startup(
     # Resolve container endpoint
     if config.sandbox_local_mode:
         container_ip = "127.0.0.1"
-        task_arn = f"local:{session_id}"
+        task_arn = f"local:{os.getpid()}"
         logger.info("sandbox_startup_local_mode", session_id=session_id)
     else:
         ecs = await _fetch_ecs_metadata()
