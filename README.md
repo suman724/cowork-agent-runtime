@@ -60,9 +60,20 @@ In stdio mode, streaming events are sent as JSON-RPC notifications (`SessionEven
 |------|-----------|-------------|
 | `ReadFile` | `File.Read` | Read file contents with encoding detection |
 | `WriteFile` | `File.Write` | Atomic file write with diff generation |
-| `DeleteFile` | `File.Delete` | Delete files (not directories) |
+| `EditFile` | `File.Write` | Exact-match find-and-replace editing |
+| `MultiEdit` | `File.Write` | Batch multiple find-and-replace edits atomically |
+| `DeleteFile` | `File.Delete` | Delete a file |
+| `CreateDirectory` | `File.Write` | Create directories without shell commands |
+| `MoveFile` | `File.Write` | Move or rename files and directories |
+| `ListDirectory` | `File.Read` | List files and directories at a path |
+| `FindFiles` | `File.Read` | Glob-pattern file discovery |
+| `GrepFiles` | `File.Read` | Regex search across files |
+| `ViewImage` | `File.Read` | Read image for multimodal LLM |
 | `RunCommand` | `Shell.Exec` | Execute shell commands with timeout |
 | `HttpRequest` | `Network.Http` | HTTP requests with SSRF prevention |
+| `FetchUrl` | `Network.Http` | Fetch URL, convert HTML to markdown |
+| `WebSearch` | `Search.Web` | Web search via Tavily API |
+| `ExecuteCode` | `Code.Execute` | Execute Python scripts with output capture |
 
 ## Development
 
@@ -108,6 +119,10 @@ make run-sandbox   # HTTP mode on localhost:8080
 | `APPROVAL_TIMEOUT_SECONDS` | `300` | Timeout for pending approval requests |
 | `LOG_LEVEL` | `info` | Structured logging level (debug, info, warning, error) |
 | `LLM_MODEL` | `gpt-4o` | LLM model identifier for OpenAI-compatible gateway |
+| `SKILLS_DIR` | `~/.cowork/skills/` | Override user skills directory |
+| `SESSION_ID` | — | Pre-assigned session ID (sandbox mode — triggers self-registration) |
+| `REGISTRATION_TOKEN` | — | Token for sandbox self-registration with Session Service |
+| `SANDBOX_LOCAL_MODE` | `false` | Skip ECS metadata, use localhost (sandbox local dev) |
 
 ## Architecture
 
@@ -124,12 +139,13 @@ Custom agent loop with production-grade harness:
 | `llm/` | LLM Gateway streaming client (openai SDK), response models, error classifier |
 | `thread/` | Message thread management, context compaction, token counting |
 | `memory/` | Working memory: task tracker, plan, notes (injected per-turn) |
-| `skills/` | Skill definitions, loader (built-in/markdown/policy), executor |
+| `skills/` | Skill definitions, loader (built-in/user/workspace/policy), executor |
 | `session/` | Session/Workspace HTTP clients, checkpoint manager, SessionManager |
 | `policy/` | Policy enforcer, path/command/domain matchers, risk assessor |
 | `budget/` | Session token budget tracking |
 | `approval/` | Approval gate (asyncio Futures for user approval flow) |
 | `events/` | Event emitter (JSON-RPC notifications + structlog) |
+| `sandbox/` | Sandbox mode: self-registration (startup.py), workspace file sync (workspace_sync.py) |
 
 ### tool_runtime/
 
@@ -138,9 +154,11 @@ Local tool execution engine:
 | Module | Purpose |
 |--------|---------|
 | `router/` | Tool registry and dispatch |
-| `tools/file/` | ReadFile, WriteFile, DeleteFile |
+| `tools/file/` | ReadFile, WriteFile, EditFile, MultiEdit, DeleteFile, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage |
 | `tools/shell/` | RunCommand with platform-specific process management |
-| `tools/network/` | HttpRequest with SSRF prevention |
+| `tools/network/` | HttpRequest, FetchUrl, WebSearch |
+| `tools/code/` | ExecuteCode (Python script execution) |
+| `code/` | Code execution engine (PythonExecutor) |
 | `platform/` | OS abstraction for macOS/Windows (path handling, shell resolution) |
 | `output/` | Output formatting, truncation, artifact extraction |
 
