@@ -1,4 +1,4 @@
-.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic build check clean coverage
+.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic test-sandbox build check clean coverage
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -45,6 +45,12 @@ test-chat: ## Full chat test: CreateSession + StartTask + LLM response (needs ba
 test-chat-anthropic: ## Full chat test using Anthropic Claude (needs backend + Anthropic API key)
 	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
 	set -a && . .env.anthropic; set +a && .venv/bin/python scripts/test-chat.py
+
+test-sandbox: ## E2E web sandbox test (needs LocalStack + backend services + agent-runtime in HTTP mode)
+	@# Prerequisites: LocalStack running on :4566, backend services running, agent-runtime started via `make run-sandbox`
+	@# The test script lives in cowork-session-service and exercises the full sandbox lifecycle:
+	@# CreateSession → LaunchSandbox → agent self-registration → StartTask → Shutdown
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python ../cowork-session-service/scripts/test-web-sandbox.py
 
 build: ## Build package
 	.venv/bin/python -m build

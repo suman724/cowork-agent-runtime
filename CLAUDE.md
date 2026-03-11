@@ -309,3 +309,4 @@ All exceptions carry structured context for logging. The `MethodDispatcher` catc
 - **Session manager tests**: Mock HTTP clients + mock LLM → test lifecycle
 - **Platform tests**: `@pytest.mark.skipif(sys.platform != 'darwin')` for macOS-specific, similar for Windows
 - **Fixtures**: Pre-built policy bundles in `tests/fixtures/policy_bundles.py`
+- **Sandbox E2E test**: `make test-sandbox` runs the full web sandbox lifecycle test from `cowork-session-service/scripts/test-web-sandbox.py`. Requires LocalStack, backend services, and agent-runtime in HTTP mode (`make run-sandbox`).

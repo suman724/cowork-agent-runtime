@@ -96,6 +96,21 @@ make run           # stdio mode (Desktop App)
 make run-sandbox   # HTTP mode on localhost:8080
 ```
 
+## Testing Sandbox Mode E2E
+
+To run the full web sandbox end-to-end test (CreateSession, LaunchSandbox, agent self-registration, StartTask, Shutdown):
+
+```bash
+make test-sandbox
+```
+
+**Prerequisites:**
+- LocalStack running on `:4566` (DynamoDB + S3)
+- Backend services running (session-service, policy-service, workspace-service)
+- Agent runtime started in HTTP mode (`make run-sandbox` in a separate terminal)
+
+The test script lives in `cowork-session-service/scripts/test-web-sandbox.py` and exercises the complete sandbox lifecycle. You can also run it directly from the session-service repo with `make test-web-sandbox`.
+
 ## CLI Arguments
 
 | Argument | Default | Description |
