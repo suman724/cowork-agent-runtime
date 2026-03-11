@@ -1,4 +1,4 @@
-.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic test-sandbox build check clean coverage
+.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic test-sandbox build check clean coverage docker-build docker-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -60,6 +60,12 @@ check: lint format-check typecheck test ## CI gate: lint + format-check + typech
 clean: ## Remove build artifacts and caches
 	rm -rf build/ dist/ *.egg-info .mypy_cache .pytest_cache .ruff_cache .coverage htmlcov/
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+docker-build: ## Build Docker image for sandbox mode
+	docker build -t cowork-agent-runtime:latest .
+
+docker-run: ## Run Docker container in sandbox mode (for testing)
+	docker run --rm -p 8080:8080 --env-file .env cowork-agent-runtime:latest
 
 coverage: ## Run tests with coverage
 	.venv/bin/coverage run -m pytest -m "unit or not integration" -x -q
