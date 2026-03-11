@@ -160,6 +160,49 @@ class SessionClient:
         retry=retry_if_exception(_is_retryable),
         reraise=True,
     )
+    async def register_sandbox(
+        self,
+        session_id: str,
+        *,
+        sandbox_endpoint: str,
+        task_arn: str,
+        registration_token: str | None = None,
+    ) -> dict[str, Any]:
+        """Register sandbox container via POST /sessions/{id}/register.
+
+        Returns registration response with sessionId, workspaceId,
+        workspaceServiceUrl, and policyBundle.
+        """
+        logger.info(
+            "session_client.register_sandbox",
+            session_id=session_id,
+            sandbox_endpoint=sandbox_endpoint,
+        )
+        body: dict[str, Any] = {
+            "sandboxEndpoint": sandbox_endpoint,
+            "taskArn": task_arn,
+        }
+        if registration_token:
+            body["registrationToken"] = registration_token
+        response = await self._client.post(
+            f"/sessions/{session_id}/register",
+            json=body,
+        )
+        await raise_for_status(response)
+        try:
+            result: dict[str, Any] = response.json()
+        except (ValueError, ValidationError) as exc:
+            raise AgentHostError(
+                f"Invalid response from Session Service: {exc}",
+            ) from exc
+        return result
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=5),
+        retry=retry_if_exception(_is_retryable),
+        reraise=True,
+    )
     async def cancel_session(self, session_id: str, request: SessionCancelRequest) -> None:
         """Cancel a session via POST /sessions/{id}/cancel.
 

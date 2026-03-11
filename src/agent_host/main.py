@@ -2,10 +2,15 @@
 
 Loads config, bootstraps components, runs the JSON-RPC read-dispatch-respond
 loop until Shutdown or EOF.
+
+Supports two transport modes:
+- stdio (default): JSON-RPC over stdin/stdout for desktop app
+- http: HTTP/SSE server for web/sandbox mode
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
@@ -22,20 +27,43 @@ from agent_host.server.json_rpc import (
     serialize_response,
 )
 from agent_host.server.method_dispatcher import MethodDispatcher
-from agent_host.server.stdio_transport import StdioTransport
 from agent_host.session.session_manager import SessionManager
 from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
 
 
-async def run() -> None:
-    """Main async entry point — runs the JSON-RPC server loop."""
-    # Load configuration
-    config = AgentHostConfig.from_env()
-    configure_logging(config.log_level, Path(config.log_dir))
+def parse_args() -> argparse.Namespace:
+    """Parse CLI arguments."""
+    parser = argparse.ArgumentParser(description="Cowork Agent Host")
+    parser.add_argument(
+        "--transport",
+        choices=["stdio", "http"],
+        default="stdio",
+        help="Transport mode: stdio (default) for desktop, http for web/sandbox",
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=8080,
+        help="HTTP server port (only used with --transport http, default: 8080)",
+    )
+    parser.add_argument(
+        "--host",
+        default="0.0.0.0",  # noqa: S104
+        help="HTTP server bind address (only used with --transport http, default: 0.0.0.0)",
+    )
+    parser.add_argument(
+        "--workspace-dir",
+        default=None,
+        help="Workspace directory for file operations (only used with --transport http)",
+    )
+    return parser.parse_args()
 
-    logger.info("agent_host_starting", model=config.llm_model)
+
+async def run_stdio(config: AgentHostConfig, args: argparse.Namespace) -> None:  # noqa: ARG001
+    """Run the agent host with stdio transport (desktop mode)."""
+    from agent_host.server.stdio_transport import StdioTransport
 
     # Initialize stdin reader
     reader = asyncio.StreamReader()
@@ -48,7 +76,7 @@ async def run() -> None:
     # Initialize tool router
     tool_router = ToolRouter()
 
-    # Initialize session manager (EventEmitter created lazily after session creation)
+    # Initialize session manager
     session_manager = SessionManager(
         config=config,
         tool_router=tool_router,
@@ -60,7 +88,7 @@ async def run() -> None:
     handlers = Handlers(session_manager)
     handlers.register_all(dispatcher)
 
-    logger.info("agent_host_ready")
+    logger.info("agent_host_ready", transport="stdio")
 
     # Read-dispatch-respond loop
     try:
@@ -68,38 +96,29 @@ async def run() -> None:
         while not shutdown_requested:
             raw = await transport.read_message()
             if raw is None:
-                # EOF — clean exit
                 logger.info("agent_host_eof")
                 break
 
             if not raw:
                 continue
 
-            # Parse request
             try:
                 request = parse_request(raw)
             except JsonRpcError as e:
-                error_response = JsonRpcResponse(
-                    id=None,
-                    error=e,
-                )
+                error_response = JsonRpcResponse(id=None, error=e)
                 await transport.write_message(serialize_response(error_response))
                 continue
 
-            # Skip notifications (no response expected)
             if request.is_notification:
                 await dispatcher.dispatch(request)
                 continue
 
-            # Dispatch and respond
             response = await dispatcher.dispatch(request)
             await transport.write_message(serialize_response(response))
 
-            # Check if shutdown was requested
             if request.method == "Shutdown":
                 shutdown_requested = True
     finally:
-        # Ensure HTTP clients are closed even on crash/EOF without Shutdown
         if not shutdown_requested:
             try:
                 await session_manager.shutdown()
@@ -107,6 +126,155 @@ async def run() -> None:
                 logger.warning("emergency_shutdown_failed", exc_info=True)
 
     logger.info("agent_host_exiting")
+
+
+async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
+    """Run the agent host with HTTP transport (web/sandbox mode).
+
+    In sandbox mode (SESSION_ID is set): runs self-registration with Session
+    Service, syncs workspace files, then serves HTTP.  On shutdown, syncs
+    workspace back before exiting.
+    """
+    from agent_host.server.event_buffer import EventBuffer
+    from agent_host.server.http_transport import HttpTransport
+
+    # Shared event buffer — owned by EventEmitter, read by HttpTransport for SSE
+    event_buffer = EventBuffer()
+
+    workspace_dir = args.workspace_dir
+
+    # Initialize transport (shares the event buffer for SSE streaming)
+    transport = HttpTransport(
+        host=args.host,
+        port=args.port,
+        workspace_dir=workspace_dir,
+        event_buffer=event_buffer,
+    )
+
+    # Initialize tool router
+    tool_router = ToolRouter()
+
+    # Initialize session manager (shares event buffer with transport)
+    session_manager = SessionManager(
+        config=config,
+        tool_router=tool_router,
+        transport=transport,
+        event_buffer=event_buffer,
+    )
+
+    # Set up method dispatcher
+    dispatcher = MethodDispatcher()
+    handlers = Handlers(session_manager)
+    handlers.register_all(dispatcher)
+
+    # Wire dispatcher into transport
+    transport.set_dispatcher(dispatcher)
+
+    # Sandbox startup: register + sync workspace BEFORE serving HTTP
+    sandbox_mode = bool(config.session_id)
+    registration_result = None
+    if sandbox_mode:
+        from agent_host.sandbox.startup import run_sandbox_startup
+        from agent_host.sandbox.workspace_sync import download_workspace
+        from agent_host.session.session_client import SessionClient
+
+        session_client = SessionClient(config.session_service_url)
+        try:
+            registration_result = await run_sandbox_startup(
+                config,
+                session_client,
+                port=args.port,
+            )
+        finally:
+            await session_client.close()
+
+        # Sync workspace files from Workspace Service
+        ws_url = registration_result.workspace_service_url
+        if ws_url and registration_result.workspace_id and workspace_dir:
+            await download_workspace(
+                ws_url,
+                registration_result.workspace_id,
+                workspace_dir,
+            )
+
+        # Initialize session from registration response (skip CreateSession RPC)
+        await session_manager.init_from_registration(
+            session_id=registration_result.session_id,
+            workspace_id=registration_result.workspace_id,
+            policy_bundle_data=registration_result.policy_bundle,
+            workspace_dir=workspace_dir,
+        )
+
+    # Start HTTP server
+    await transport.start()
+    transport.set_ready()
+
+    logger.info(
+        "agent_host_ready",
+        transport="http",
+        host=args.host,
+        port=args.port,
+        sandbox_mode=sandbox_mode,
+    )
+
+    # Wait for shutdown signal
+    stop_event = asyncio.Event()
+
+    def _handle_shutdown() -> None:
+        stop_event.set()
+
+    loop = asyncio.get_event_loop()
+    try:
+        import signal
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(sig, _handle_shutdown)
+    except NotImplementedError:
+        pass  # Windows doesn't support add_signal_handler
+
+    try:
+        await stop_event.wait()
+    finally:
+        logger.info("agent_host_shutting_down")
+
+        # Sandbox shutdown: sync workspace back BEFORE session cancellation
+        # (session_manager.shutdown() may cancel the session on the backend,
+        # after which workspace uploads could be rejected)
+        if sandbox_mode and registration_result and workspace_dir:
+            from agent_host.sandbox.workspace_sync import upload_workspace
+
+            try:
+                await upload_workspace(
+                    registration_result.workspace_service_url,
+                    registration_result.workspace_id,
+                    workspace_dir,
+                )
+            except Exception:
+                logger.warning("workspace_upload_on_shutdown_failed", exc_info=True)
+
+        try:
+            await session_manager.shutdown()
+        except Exception:
+            logger.warning("emergency_shutdown_failed", exc_info=True)
+        await transport.shutdown()
+
+    logger.info("agent_host_exiting")
+
+
+async def run() -> None:
+    """Main async entry point — runs the JSON-RPC server loop."""
+    args = parse_args()
+
+    # Load configuration
+    config = AgentHostConfig.from_env()
+    configure_logging(config.log_level, Path(config.log_dir))
+
+    logger.info("agent_host_starting", model=config.llm_model, transport=args.transport)
+
+    if args.transport == "http":
+        await run_http(config, args)
+    else:
+        await run_stdio(config, args)
 
 
 def main() -> None:

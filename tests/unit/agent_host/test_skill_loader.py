@@ -743,6 +743,111 @@ class TestCollectScripts:
         assert names == ["run.py"]
 
 
+class TestWorkspaceSkills:
+    """Tests for workspace-based skills ({workspace}/.cowork/skills/)."""
+
+    def test_workspace_skills_loaded(self, tmp_path: Path) -> None:
+        """Skills from workspace .cowork/skills/ are discovered."""
+        ws_dir = tmp_path / "workspace"
+        skill_dir = ws_dir / ".cowork" / "skills" / "deploy"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: deploy\ndescription: Deploy the app.\n---\nRun deploy.\n"
+        )
+
+        loader = SkillLoader(workspace_dir=str(ws_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        assert "deploy" in skills
+        assert skills["deploy"].description == "Deploy the app."
+
+    def test_workspace_skills_override_user(self, tmp_path: Path) -> None:
+        """Workspace skill overrides user skill with same name."""
+        user_dir = tmp_path / "user_skills"
+        user_skill = user_dir / "my-skill"
+        user_skill.mkdir(parents=True)
+        (user_skill / "SKILL.md").write_text("---\nname: my_skill\ndescription: From user.\n---\n")
+
+        ws_dir = tmp_path / "workspace"
+        ws_skill = ws_dir / ".cowork" / "skills" / "my-skill"
+        ws_skill.mkdir(parents=True)
+        (ws_skill / "SKILL.md").write_text(
+            "---\nname: my_skill\ndescription: From workspace.\n---\n"
+        )
+
+        loader = SkillLoader(
+            user_skills_dir=str(user_dir),
+            workspace_dir=str(ws_dir),
+        )
+        skills = {s.name: s for s in loader.load_all()}
+
+        assert skills["my_skill"].description == "From workspace."
+
+    def test_policy_overrides_workspace(self, tmp_path: Path) -> None:
+        """Policy skill overrides workspace skill with same name."""
+        ws_dir = tmp_path / "workspace"
+        ws_skill = ws_dir / ".cowork" / "skills" / "shared"
+        ws_skill.mkdir(parents=True)
+        (ws_skill / "SKILL.md").write_text("---\nname: shared\ndescription: From workspace.\n---\n")
+
+        loader = SkillLoader(
+            workspace_dir=str(ws_dir),
+            policy_skills=[{"name": "shared", "description": "From policy."}],
+        )
+        skills = {s.name: s for s in loader.load_all()}
+
+        assert skills["shared"].description == "From policy."
+
+    def test_no_workspace_dir(self) -> None:
+        """No workspace dir — only built-in skills load (graceful)."""
+        loader = SkillLoader(workspace_dir=None)
+        skills = loader.load_all()
+        # Should have built-in skills only, no errors
+        assert len(skills) >= 1
+
+    def test_workspace_skills_dir_missing(self, tmp_path: Path) -> None:
+        """Workspace exists but .cowork/skills/ doesn't — graceful no-op."""
+        ws_dir = tmp_path / "workspace"
+        ws_dir.mkdir()
+
+        loader = SkillLoader(workspace_dir=str(ws_dir))
+        skills = {s.name: s for s in loader.load_all()}
+        # Only built-in skills, no errors
+        assert all(s.source_dir is None for s in skills.values() if s.name.startswith("search"))
+
+    def test_skills_dir_env_override(self, tmp_path: Path) -> None:
+        """SKILLS_DIR override replaces default user skills path."""
+        custom_dir = tmp_path / "custom"
+        skill_dir = custom_dir / "custom-skill"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: custom_skill\ndescription: Custom.\n---\n")
+
+        loader = SkillLoader(user_skills_dir=str(custom_dir))
+        skills = {s.name: s for s in loader.load_all()}
+
+        assert "custom_skill" in skills
+
+    def test_sandbox_mode_no_home_dir(self, tmp_path: Path) -> None:
+        """Sandbox simulation: non-existent user dir + workspace skills."""
+        ws_dir = tmp_path / "workspace"
+        ws_skill = ws_dir / ".cowork" / "skills" / "sandbox-tool"
+        ws_skill.mkdir(parents=True)
+        (ws_skill / "SKILL.md").write_text(
+            "---\nname: sandbox_tool\ndescription: Sandbox tool.\n---\n"
+        )
+
+        loader = SkillLoader(
+            user_skills_dir="/nonexistent/home/.cowork/skills",
+            workspace_dir=str(ws_dir),
+        )
+        skills = {s.name: s for s in loader.load_all()}
+
+        # Built-in skills still load
+        assert "search_codebase" in skills
+        # Workspace skills load despite no user dir
+        assert "sandbox_tool" in skills
+
+
 class TestPolicySkills:
     def test_load_policy_skills(self) -> None:
         """Should load skills from policy bundle data."""

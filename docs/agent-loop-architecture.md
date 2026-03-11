@@ -36,13 +36,14 @@ The agent runtime is split into two packages with a strict boundary:
 ```
 cowork-agent-runtime/src/
 ├── agent_host/          # Agent loop, session management, LLM client, policy, events
-│   ├── server/          # JSON-RPC 2.0 server (stdio transport)
+│   ├── server/          # JSON-RPC 2.0 server (StdioTransport + HttpTransport), EventBuffer
 │   ├── session/         # Session/workspace HTTP clients, checkpoint manager
 │   ├── loop/            # LoopRuntime, LoopStrategy, ReactLoop, tool executor, agent tools, error recovery
 │   ├── llm/             # LLM Gateway streaming client (OpenAI SDK)
 │   ├── thread/          # Message thread, context compaction, token counting
 │   ├── memory/          # Working memory + persistent memory (project instructions, auto-memory)
-│   ├── skills/          # Skill definitions, loader, executor
+│   ├── skills/          # Skill definitions, loader (built-in/user/workspace/policy), executor
+│   ├── sandbox/         # Sandbox startup (self-registration), workspace file sync
 │   ├── policy/          # Policy enforcer, matchers, risk assessor
 │   ├── budget/          # Token budget tracking
 │   ├── approval/        # Approval gate (asyncio Futures)
@@ -125,7 +126,12 @@ graph TB
 
 ## 2. Process Lifecycle
 
-The agent host runs as a child process of the Desktop App, communicating over **stdin/stdout** using newline-delimited JSON-RPC 2.0.
+The agent host supports two transport modes:
+
+- **stdio (desktop):** Runs as a child process of the Desktop App, communicating over stdin/stdout using newline-delimited JSON-RPC 2.0.
+- **http (sandbox/web):** Runs as an HTTP/SSE server (`HttpTransport`) inside a sandbox container. Exposes `POST /rpc`, `GET /events` (SSE with replay), `GET /health`, `GET /ready`, `POST /upload`, `GET /files/{path}`, `GET /files`. In sandbox mode (`SESSION_ID` env var set), the runtime self-registers with Session Service, downloads workspace files, and initializes the session automatically — no `CreateSession` RPC needed.
+
+### stdio mode (Desktop App)
 
 ```mermaid
 sequenceDiagram
@@ -159,7 +165,18 @@ sequenceDiagram
     Main->>Main: exit
 ```
 
-**Entry point:** `agent_host/main.py:run()`
+**Entry point:** `agent_host/main.py:run()` (stdio) or `agent_host/main.py:run_http()` (http)
+
+### http mode (Sandbox / Web)
+
+In sandbox mode, the process lifecycle is different:
+
+1. Container starts with `SESSION_ID`, `REGISTRATION_TOKEN`, `WORKSPACE_SERVICE_URL` env vars
+2. `run_http()` detects sandbox mode, calls `sandbox.startup.register_sandbox()` — reads ECS metadata, calls `POST /sessions/{id}/register` on Session Service
+3. Downloads workspace files from Workspace Service into `--workspace-dir` via `sandbox.workspace_sync.download_workspace()`
+4. Initializes session from registration response via `SessionManager.init_from_registration()` (uses shared `_activate_session()` helper)
+5. Starts `HttpTransport` (uvicorn), serves JSON-RPC over HTTP + SSE events
+6. On SIGTERM: uploads workspace files via `sandbox.workspace_sync.upload_workspace()`, then calls `SessionManager.shutdown()`
 
 The JSON-RPC server exposes these methods:
 
@@ -194,6 +211,9 @@ stateDiagram-v2
 
     NoSession --> Resuming: ResumeSession
     Resuming --> Ready: Policy refreshed + history restored
+
+    NoSession --> Registering: init_from_registration (sandbox)
+    Registering --> Ready: Self-registration + workspace sync OK
 ```
 
 ### CreateSession Flow
@@ -210,7 +230,7 @@ stateDiagram-v2
    - `FileChangeTracker` — tracks file mutations for patch preview
    - `LLMClient` — OpenAI SDK streaming client pointed at LLM Gateway
    - `MessageThread` — conversation history with system prompt
-   - `SkillLoader` — loads skills from built-in, workspace, and policy sources
+   - `SkillLoader` — loads skills from built-in, user, workspace, and policy sources
 7. Restore from checkpoint (crash recovery — token budget, thread, working memory, session messages)
 8. Emit `session_created` event
 
@@ -807,6 +827,7 @@ graph TD
     subgraph Skill Sources
         Builtin[Built-in Skills<br/>Embedded Markdown]
         User[User Skills<br/>~/.cowork/skills/name/SKILL.md]
+        Workspace[Workspace Skills<br/>workspace/.cowork/skills/name/SKILL.md]
         Policy[Policy Bundle Skills<br/>from backend]
     end
 
@@ -815,7 +836,8 @@ graph TD
         Stage2[Stage 2: Full Content<br/>Load body + supporting .md files]
         Builtin -->|priority 1| Stage1
         User -->|priority 2, overrides| Stage1
-        Policy -->|priority 3, overrides| Stage1
+        Workspace -->|priority 3, overrides| Stage1
+        Policy -->|priority 4, overrides| Stage1
         Stage1 -->|deduplicates by name| Skills[list of SkillDefinition]
         Skills -->|on invocation| Stage2
     end
@@ -906,9 +928,12 @@ Built-in skills are defined as embedded Markdown strings in `skill_loader.py` an
 
 ### Skill Loading Priority
 
+`SkillLoader` accepts an optional `workspace_dir` parameter and an optional `user_skills_dir` override (from `SKILLS_DIR` env var). Priority order (higher wins on name collision):
+
 1. **Built-in** (embedded markdown, always available)
-2. **User directories** (`~/.cowork/skills/<name>/SKILL.md` — overrides built-in by name)
-3. **Policy bundle** (from `policyBundle.skills` — overrides user by name)
+2. **User directories** (`~/.cowork/skills/<name>/SKILL.md` — overrides built-in by name; path overridable via `SKILLS_DIR`)
+3. **Workspace skills** (`{workspace_dir}/.cowork/skills/<name>/SKILL.md` — overrides user by name; for project-level skills)
+4. **Policy bundle** (from `policyBundle.skills` — overrides workspace by name)
 
 ### Skill Invocation
 
@@ -1680,7 +1705,7 @@ graph TD
 | **WorkingMemory** | `memory/working_memory.py` | Task tracker + plan + notes |
 | **AgentToolHandler** | `loop/agent_tools.py` | Internal tools + skill tools (no policy); uses callbacks for sub-agent/skill |
 | **SubAgentManager constants** | `loop/sub_agent.py` | Constants only (spawning logic in LoopRuntime) |
-| **SkillLoader** | `skills/skill_loader.py` | Load skills from 3 sources |
+| **SkillLoader** | `skills/skill_loader.py` | Load skills from 4 sources (built-in/user/workspace/policy) |
 | **SkillExecutor constants** | `skills/skill_executor.py` | Constants only (execution logic in LoopRuntime) |
 | **ErrorRecovery** | `loop/error_recovery.py` | Loop detection + reflection |
 | **EventEmitter** | `events/event_emitter.py` | JSON-RPC notifications + logs |
@@ -1690,5 +1715,9 @@ graph TD
 | **MemoryManager** | `memory/memory_manager.py` | Orchestrate project instructions + auto-memory |
 | **ProjectInstructionsLoader** | `memory/project_instructions.py` | Load COWORK.md from directory tree |
 | **PersistentMemory** | `memory/persistent_memory.py` | AI-writable memory file storage |
+| **SandboxStartup** | `sandbox/startup.py` | Self-registration with Session Service (sandbox mode) |
+| **WorkspaceSync** | `sandbox/workspace_sync.py` | Download/upload workspace files (sandbox mode) |
+| **HttpTransport** | `server/http_transport.py` | Starlette/uvicorn ASGI server (sandbox/web mode) |
+| **EventBuffer** | `server/event_buffer.py` | Bounded ring buffer for SSE replay |
 | **PythonExecutor** | `tool_runtime/code/executor.py` | Stateless Python script execution |
 | **ExecuteCodeTool** | `tool_runtime/tools/code/execute_code.py` | Python code execution tool (Code.Execute) |

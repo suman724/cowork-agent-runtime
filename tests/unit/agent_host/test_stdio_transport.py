@@ -63,13 +63,22 @@ class TestStdioTransport:
         assert len(lines) == 2
         assert set(lines) == {"msg1", "msg2"}
 
-    def test_write_sync(self) -> None:
-        """write_sync writes synchronously."""
+    def test_send_event(self) -> None:
+        """send_event writes a JSON-RPC notification to stdout."""
         output = StringIO()
         transport = StdioTransport(writer=output)
 
-        transport.write_sync('{"notify":"event"}')
-        assert output.getvalue() == '{"notify":"event"}\n'
+        transport.send_event({"type": "test_event", "data": "hello"})
+        written = output.getvalue()
+        assert '"method":"SessionEvent"' in written
+        assert '"test_event"' in written
+
+    @pytest.mark.asyncio
+    async def test_start_and_shutdown_are_noop(self) -> None:
+        """start() and shutdown() are no-ops for stdio."""
+        transport = StdioTransport()
+        await transport.start()
+        await transport.shutdown()
 
     @pytest.mark.asyncio
     async def test_read_multiple_messages(self) -> None:

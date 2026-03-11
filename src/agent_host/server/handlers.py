@@ -36,6 +36,7 @@ class Handlers:
         dispatcher.register("ApproveAction", self.handle_approve_action)
         dispatcher.register("GetPatchPreview", self.handle_get_patch_preview)
         dispatcher.register("Shutdown", self.handle_shutdown)
+        dispatcher.register("GetEvents", self.handle_get_events)
 
     async def handle_create_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """CreateSession — initialize session with Session Service."""
@@ -67,6 +68,19 @@ class Handlers:
     async def handle_get_patch_preview(self, params: dict[str, Any]) -> dict[str, Any]:
         """GetPatchPreview — return unified diffs for file changes in a task."""
         return await self._session_manager.get_patch_preview(params)
+
+    async def handle_get_events(self, params: dict[str, Any]) -> dict[str, Any]:
+        """GetEvents — return buffered events since a given ID.
+
+        Params:
+            sinceId (int): Return events with ID > sinceId (default: 0 = all)
+
+        Returns:
+            events: list of event dicts with eventId
+            gapDetected: True if some events were evicted (data loss)
+            latestId: highest event ID in the buffer
+        """
+        return self._session_manager.get_events(params)
 
     async def handle_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
         """Shutdown — clean session teardown."""

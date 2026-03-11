@@ -1,4 +1,4 @@
-.PHONY: help install run run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic build check clean coverage
+.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic test-sandbox build check clean coverage docker-build docker-run
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -8,6 +8,10 @@ install: ## Install all dependencies
 
 run: ## Run the agent-runtime in stdio mode (sources .env)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main
+
+run-sandbox: ## Run the agent-runtime in HTTP/sandbox mode on localhost:8080 (sources .env)
+	@mkdir -p workspace
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main --transport http --port 8080 --workspace-dir ./workspace
 
 run-anthropic: ## Run the agent-runtime with Anthropic Claude (sources .env.anthropic)
 	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
@@ -42,6 +46,12 @@ test-chat-anthropic: ## Full chat test using Anthropic Claude (needs backend + A
 	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
 	set -a && . .env.anthropic; set +a && .venv/bin/python scripts/test-chat.py
 
+test-sandbox: ## E2E web sandbox test (needs LocalStack + backend services + agent-runtime in HTTP mode)
+	@# Prerequisites: LocalStack running on :4566, backend services running, agent-runtime started via `make run-sandbox`
+	@# The test script lives in cowork-session-service and exercises the full sandbox lifecycle:
+	@# CreateSession → LaunchSandbox → agent self-registration → StartTask → Shutdown
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python ../cowork-session-service/scripts/test-web-sandbox.py
+
 build: ## Build package
 	.venv/bin/python -m build
 
@@ -50,6 +60,12 @@ check: lint format-check typecheck test ## CI gate: lint + format-check + typech
 clean: ## Remove build artifacts and caches
 	rm -rf build/ dist/ *.egg-info .mypy_cache .pytest_cache .ruff_cache .coverage htmlcov/
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+
+docker-build: ## Build Docker image for sandbox mode
+	docker build -t cowork-agent-runtime:latest .
+
+docker-run: ## Run Docker container in sandbox mode (for testing)
+	docker run --rm -p 8080:8080 --env-file .env cowork-agent-runtime:latest
 
 coverage: ## Run tests with coverage
 	.venv/bin/coverage run -m pytest -m "unit or not integration" -x -q

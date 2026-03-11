@@ -118,3 +118,18 @@ class LoopAbortedError(AgentHostError):
     """Agent loop was aborted due to an unrecoverable error."""
 
     json_rpc_code = -32050
+
+
+# --- Sandbox errors ---
+
+
+class SandboxStartupError(AgentHostError):
+    """Sandbox startup or registration failed."""
+
+    json_rpc_code = -32060
+
+
+class WorkspaceSyncError(AgentHostError):
+    """Workspace file sync failed."""
+
+    json_rpc_code = -32061

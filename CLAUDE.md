@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-`cowork-agent-runtime` contains the Local Agent Host and Local Tool Runtime — the Python process that runs the agent loop on the user's desktop. It is spawned by the Desktop App as a child process and communicates via JSON-RPC 2.0 over stdio.
+`cowork-agent-runtime` contains the Local Agent Host and Local Tool Runtime — the Python process that runs the agent loop. It supports two transport modes:
+- **stdio** (default): Spawned by the Desktop App as a child process, communicates via JSON-RPC 2.0 over stdin/stdout.
+- **http**: Runs as an HTTP/SSE server for web/sandbox mode (`--transport http`). Exposes JSON-RPC via `POST /rpc`, events via `GET /events` (SSE), and file operations via `/upload` and `/files`.
 
 ## Architecture
 
@@ -12,17 +14,18 @@ Two top-level packages with a **strict boundary** — no cross-imports allowed:
 
 ```
 agent_host/     ← Local Agent Host (custom agent loop)
-  server/       — JSON-RPC 2.0 server over stdio (parse, serialize, dispatch, handlers)
+  server/       — Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay)
   session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
   loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
   thread/       — Message thread management, context compaction, token counting
   memory/       — Working memory: task tracker, plan, notes (injected per-turn)
-  skills/       — Skill definitions, loader (built-in/markdown/policy); execution via LoopRuntime
+  skills/       — Skill definitions, loader (built-in/user/workspace/policy); execution via LoopRuntime
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
   events/       — Event emitter: SessionEvent notifications + structured logging
+  sandbox/      — Sandbox mode: self-registration (startup.py), workspace file sync (workspace_sync.py)
 
 tool_runtime/   ← Local Tool Runtime (tool execution)
   router/       — ToolRouter implementation, tool registry, dispatch
@@ -62,7 +65,14 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
 - **Context compaction** (`thread/compactor.py`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
 - **Prompt caching optimization** — `ReactLoop._build_messages()` orders context for LLM provider cache efficiency: stable prefix (system prompt → persistent memory → conversation history) then volatile suffix (working memory → error recovery).
-- **Custom JSON-RPC 2.0 server** (~200 lines). Newline-delimited JSON with write lock.
+- **Transport protocol** (`server/transport.py`) — `Transport` protocol with `start()`, `send_event()`, `shutdown()`. Two implementations:
+  - `StdioTransport` — JSON-RPC over stdin/stdout with write lock (desktop mode)
+  - `HttpTransport` — Starlette/uvicorn ASGI server (sandbox/web mode): `POST /rpc`, `GET /events` (SSE with replay), `GET /health`, `GET /ready`, `POST /upload`, `GET /files/{path}`, `GET /files`
+- **Shared EventBuffer** (`server/event_buffer.py`) — bounded ring buffer (default 10K events) with monotonic IDs. Owned by `EventEmitter`, shared with both transports. Enables:
+  - SSE replay via `?since={id}` for HttpTransport
+  - `GetEvents` JSON-RPC method for Desktop App event replay after view navigation
+  - All `SessionEvent` notifications include `eventId` for client-side tracking
+- **Custom JSON-RPC 2.0 protocol** (~200 lines). Shared by both transports via `MethodDispatcher`.
 - **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
 - **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
 - **Pydantic models** from `cowork-platform` for all data contracts.
@@ -102,6 +112,29 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
 - `TAVILY_API_KEY` — Tavily API key (optional, required for WebSearch tool)
 - `WORKSPACE_SYNC_INTERVAL` — Sync checkpoint to workspace every N steps (default: 5, 0 = disabled)
+- `SESSION_ID` — Pre-assigned session ID (sandbox mode only, triggers self-registration)
+- `REGISTRATION_TOKEN` — Token for sandbox self-registration (sandbox mode only)
+- `SANDBOX_LOCAL_MODE` — Skip ECS metadata, use localhost endpoint (sandbox local dev)
+- `SKILLS_DIR` — Override user skills directory (default: `~/.cowork/skills/`)
+
+## Sandbox Mode
+
+When `SESSION_ID` is set and `--transport http` is used, the agent runtime runs in **sandbox mode**:
+
+1. **Self-registration**: Reads container IP from ECS metadata (or localhost in `SANDBOX_LOCAL_MODE`), calls `POST /sessions/{sessionId}/register` on Session Service
+2. **Workspace sync**: Downloads workspace files from Workspace Service to `--workspace-dir` before serving HTTP
+3. **Session initialization**: Initializes from registration response (policy bundle, workspace ID) — skips `CreateSession` RPC
+4. **Skills**: Loads from `{workspace}/.cowork/skills/` (project-level) in addition to built-in skills. No home directory needed. `SKILLS_DIR` env var overrides the user skills path.
+5. **Graceful shutdown**: On SIGTERM, uploads workspace files back to Workspace Service before exiting
+
+Stdio mode is completely unaffected by sandbox-related code.
+
+## CLI Arguments
+
+- `--transport {stdio,http}` — Transport mode (default: `stdio`)
+- `--host HOST` — HTTP server bind address (default: `0.0.0.0`, only with `--transport http`)
+- `--port PORT` — HTTP server port (default: `8080`, only with `--transport http`)
+- `--workspace-dir DIR` — Workspace directory for file upload/download (only with `--transport http`)
 
 ## Platform Adapters
 
@@ -146,6 +179,7 @@ cowork-agent-runtime/
       thread/                 # Message thread, context compaction, token counting
       memory/                 # Working memory: task tracker, plan, notes
       skills/                 # Skill definitions, loader, executor
+      sandbox/                # Sandbox startup (self-registration), workspace file sync
       policy/                 # Policy enforcer, path/command/domain matchers, risk assessor
       budget/                 # Token budget tracking
       approval/               # Approval gate (asyncio Futures)
@@ -193,6 +227,9 @@ cowork-agent-runtime/
 | `pydantic>=2.0,<3.0` | Data validation (from cowork-platform contracts) |
 | `structlog>=24.0,<26.0` | Structured logging to stderr |
 | `markdownify>=0.14,<1.0` | HTML to markdown conversion (FetchUrl tool) |
+| `starlette>=0.41,<1.0` | ASGI framework for HttpTransport (web/sandbox mode) |
+| `uvicorn>=0.32,<1.0` | ASGI server for HttpTransport |
+| `python-multipart>=0.0.18,<1.0` | Multipart form parsing for file upload |
 
 ### Package Boundary Enforcement
 
@@ -232,7 +269,9 @@ AgentHostError (base, json_rpc_code=-32000)
   ├── ApprovalTimeoutError (-32022)
   ├── CheckpointError (-32030)
   ├── TaskCancelledError (-32040)
-  └── NoActiveTaskError (-32041)
+  ├── NoActiveTaskError (-32041)
+  ├── SandboxStartupError (-32060)
+  └── WorkspaceSyncError (-32061)
 ```
 
 All exceptions carry structured context for logging. The `MethodDispatcher` catches `AgentHostError` and maps `json_rpc_code` to JSON-RPC error responses; unexpected exceptions become `-32603 Internal error`.
@@ -270,3 +309,4 @@ All exceptions carry structured context for logging. The `MethodDispatcher` catc
 - **Session manager tests**: Mock HTTP clients + mock LLM → test lifecycle
 - **Platform tests**: `@pytest.mark.skipif(sys.platform != 'darwin')` for macOS-specific, similar for Windows
 - **Fixtures**: Pre-built policy bundles in `tests/fixtures/policy_bundles.py`
+- **Sandbox E2E test**: `make test-sandbox` runs the full web sandbox lifecycle test from `cowork-session-service/scripts/test-web-sandbox.py`. Requires LocalStack, backend services, and agent-runtime in HTTP mode (`make run-sandbox`).

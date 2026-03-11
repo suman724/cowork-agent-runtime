@@ -13,8 +13,8 @@ _output_dir = _os.environ.get("COWORK_OUTPUT_DIR", "/tmp")
 _fig_count = 0
 
 try:
-    import matplotlib
-    matplotlib.use("Agg")
+    import matplotlib as _matplotlib
+    _matplotlib.use("Agg")
     import matplotlib.pyplot as _plt
     _original_show = _plt.show
     def _cowork_show(*args, **kwargs):
