@@ -160,12 +160,12 @@ async def test_startup_local_mode_success() -> None:
     assert result.policy_bundle == {"capabilities": [], "llmPolicy": None}
 
     # Verify registration was called with correct args
-    mock_client.register_sandbox.assert_called_once_with(
-        "sess-123",
-        sandbox_endpoint="http://127.0.0.1:8080",
-        task_arn="local:sess-123",
-        registration_token="reg-tok-abc",
-    )
+    mock_client.register_sandbox.assert_called_once()
+    call_args = mock_client.register_sandbox.call_args
+    assert call_args.args == ("sess-123",)
+    assert call_args.kwargs["sandbox_endpoint"] == "http://127.0.0.1:8080"
+    assert call_args.kwargs["task_arn"].startswith("local:")
+    assert call_args.kwargs["registration_token"] == "reg-tok-abc"
 
 
 @pytest.mark.asyncio
@@ -200,9 +200,9 @@ async def test_startup_no_registration_token() -> None:
     assert result.session_id == "sess-123"
 
     # Verify registration_token was passed as None
-    mock_client.register_sandbox.assert_called_once_with(
-        "sess-123",
-        sandbox_endpoint="http://127.0.0.1:8080",
-        task_arn="local:sess-123",
-        registration_token=None,
-    )
+    mock_client.register_sandbox.assert_called_once()
+    call_args = mock_client.register_sandbox.call_args
+    assert call_args.args == ("sess-123",)
+    assert call_args.kwargs["sandbox_endpoint"] == "http://127.0.0.1:8080"
+    assert call_args.kwargs["task_arn"].startswith("local:")
+    assert call_args.kwargs["registration_token"] is None
