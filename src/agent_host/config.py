@@ -71,6 +71,11 @@ class AgentHostConfig:
     compaction_strategy: str = "hybrid"  # "drop_oldest" | "hybrid"
     compaction_llm_summary: bool = True  # enable LLM summarization phase
 
+    # Sandbox mode (set when running inside a sandbox container)
+    session_id: str = ""  # Pre-assigned session ID (sandbox only)
+    registration_token: str = ""  # Token for sandbox self-registration
+    sandbox_local_mode: bool = False  # Skip ECS metadata, use localhost endpoint
+
     @classmethod
     def from_env(cls) -> AgentHostConfig:
         """Load configuration from environment variables.
@@ -121,6 +126,10 @@ class AgentHostConfig:
             verification_max_steps=int(os.environ.get("VERIFICATION_MAX_STEPS", "3")),
             compaction_strategy=os.environ.get("COMPACTION_STRATEGY", "hybrid"),
             compaction_llm_summary=os.environ.get("COMPACTION_LLM_SUMMARY", "true").lower()
+            in ("true", "1", "yes"),
+            session_id=os.environ.get("SESSION_ID", ""),
+            registration_token=os.environ.get("REGISTRATION_TOKEN", ""),
+            sandbox_local_mode=os.environ.get("SANDBOX_LOCAL_MODE", "false").lower()
             in ("true", "1", "yes"),
         )
 

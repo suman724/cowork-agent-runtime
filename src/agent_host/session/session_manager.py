@@ -211,35 +211,17 @@ class SessionManager:
                 "error": "Client version incompatible with server",
             }
 
-        # Store session context
-        self._session_context = SessionContext(
+        context = SessionContext(
             session_id=response.sessionId,
             workspace_id=response.workspaceId,
             tenant_id=tenant_id,
             user_id=user_id,
         )
-
-        # Create EventEmitter now that session context is available
-        from agent_host.events.event_emitter import EventEmitter
-
-        self._event_emitter = EventEmitter(
-            self._session_context, self._transport, self._event_buffer
-        )
-
-        # Initialize components with policy bundle
-        if response.policyBundle:
-            canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
-            self._init_components(canonical_bundle)
-
-        # Reset cumulative history for the new session
-        self._session_messages = []
+        policy_data = response.policyBundle.model_dump() if response.policyBundle else None
+        self._activate_session(context, policy_data)
 
         # Restore token budget and session messages from checkpoint (crash recovery)
         await self._restore_from_checkpoint()
-
-        # Emit session_created event
-        if self._event_emitter:
-            self._event_emitter.emit_session_created()
 
         logger.info(
             "session_created",
@@ -254,6 +236,35 @@ class SessionManager:
             "status": "ready",
         }
 
+    async def init_from_registration(
+        self,
+        session_id: str,
+        workspace_id: str,
+        policy_bundle_data: dict[str, Any],
+        workspace_dir: str | None = None,
+    ) -> None:
+        """Initialize session from sandbox registration response.
+
+        Used in sandbox/HTTP mode — the session already exists on the backend,
+        so we skip create_session() and initialize directly from the registration
+        response data (session context + policy bundle).
+        """
+        self._workspace_dir = workspace_dir
+
+        context = SessionContext(
+            session_id=session_id,
+            workspace_id=workspace_id,
+            tenant_id="",
+            user_id="",
+        )
+        self._activate_session(context, policy_bundle_data)
+
+        logger.info(
+            "session_initialized_from_registration",
+            session_id=session_id,
+            workspace_id=workspace_id,
+        )
+
     async def resume_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """Resume an existing session — reuses the same session ID.
 
@@ -267,28 +278,16 @@ class SessionManager:
         # Resume via Session Service (refreshes policy, extends expiry)
         response = await self._session_client.resume_session(session_id)
 
-        # Store session context
-        self._session_context = SessionContext(
+        context = SessionContext(
             session_id=response.sessionId,
             workspace_id=response.workspaceId,
             tenant_id="",  # Not returned by resume; not needed for agent loop
             user_id="",
         )
-
-        # Create EventEmitter
-        from agent_host.events.event_emitter import EventEmitter
-
-        self._event_emitter = EventEmitter(
-            self._session_context, self._transport, self._event_buffer
-        )
-
-        # Initialize components with refreshed policy bundle
-        if response.policyBundle:
-            canonical_bundle = PolicyBundle.model_validate(response.policyBundle.model_dump())
-            self._init_components(canonical_bundle)
+        policy_data = response.policyBundle.model_dump() if response.policyBundle else None
+        self._activate_session(context, policy_data)
 
         # Restore cumulative history from Workspace Service
-        self._session_messages = []
         prior_messages = await self._workspace_client.get_session_history(
             workspace_id=response.workspaceId,
             session_id=response.sessionId,
@@ -319,6 +318,29 @@ class SessionManager:
             "logDir": self._config.log_dir,
             "status": "ready",
         }
+
+    def _activate_session(
+        self,
+        context: SessionContext,
+        policy_bundle_data: dict[str, Any] | None,
+    ) -> None:
+        """Common session activation: set context, create emitter, init components.
+
+        Called by create_session(), resume_session(), and init_from_registration()
+        after they obtain session data from their respective sources.
+        """
+        from agent_host.events.event_emitter import EventEmitter
+
+        self._session_context = context
+        self._event_emitter = EventEmitter(context, self._transport, self._event_buffer)
+
+        if policy_bundle_data:
+            canonical_bundle = PolicyBundle.model_validate(policy_bundle_data)
+            self._init_components(canonical_bundle)
+
+        self._session_messages = []
+
+        self._event_emitter.emit_session_created()
 
     def _init_components(
         self,

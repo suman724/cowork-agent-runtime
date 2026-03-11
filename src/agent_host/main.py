@@ -129,18 +129,25 @@ async def run_stdio(config: AgentHostConfig, args: argparse.Namespace) -> None: 
 
 
 async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
-    """Run the agent host with HTTP transport (web/sandbox mode)."""
+    """Run the agent host with HTTP transport (web/sandbox mode).
+
+    In sandbox mode (SESSION_ID is set): runs self-registration with Session
+    Service, syncs workspace files, then serves HTTP.  On shutdown, syncs
+    workspace back before exiting.
+    """
     from agent_host.server.event_buffer import EventBuffer
     from agent_host.server.http_transport import HttpTransport
 
     # Shared event buffer — owned by EventEmitter, read by HttpTransport for SSE
     event_buffer = EventBuffer()
 
+    workspace_dir = args.workspace_dir
+
     # Initialize transport (shares the event buffer for SSE streaming)
     transport = HttpTransport(
         host=args.host,
         port=args.port,
-        workspace_dir=args.workspace_dir,
+        workspace_dir=workspace_dir,
         event_buffer=event_buffer,
     )
 
@@ -163,11 +170,52 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     # Wire dispatcher into transport
     transport.set_dispatcher(dispatcher)
 
+    # Sandbox startup: register + sync workspace BEFORE serving HTTP
+    sandbox_mode = bool(config.session_id)
+    registration_result = None
+    if sandbox_mode:
+        from agent_host.sandbox.startup import run_sandbox_startup
+        from agent_host.sandbox.workspace_sync import download_workspace
+        from agent_host.session.session_client import SessionClient
+
+        session_client = SessionClient(config.session_service_url)
+        try:
+            registration_result = await run_sandbox_startup(
+                config,
+                session_client,
+                port=args.port,
+            )
+        finally:
+            await session_client.close()
+
+        # Sync workspace files from Workspace Service
+        ws_url = registration_result.workspace_service_url
+        if ws_url and registration_result.workspace_id and workspace_dir:
+            await download_workspace(
+                ws_url,
+                registration_result.workspace_id,
+                workspace_dir,
+            )
+
+        # Initialize session from registration response (skip CreateSession RPC)
+        await session_manager.init_from_registration(
+            session_id=registration_result.session_id,
+            workspace_id=registration_result.workspace_id,
+            policy_bundle_data=registration_result.policy_bundle,
+            workspace_dir=workspace_dir,
+        )
+
     # Start HTTP server
     await transport.start()
     transport.set_ready()
 
-    logger.info("agent_host_ready", transport="http", host=args.host, port=args.port)
+    logger.info(
+        "agent_host_ready",
+        transport="http",
+        host=args.host,
+        port=args.port,
+        sandbox_mode=sandbox_mode,
+    )
 
     # Wait for shutdown signal
     stop_event = asyncio.Event()
@@ -188,6 +236,22 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         await stop_event.wait()
     finally:
         logger.info("agent_host_shutting_down")
+
+        # Sandbox shutdown: sync workspace back BEFORE session cancellation
+        # (session_manager.shutdown() may cancel the session on the backend,
+        # after which workspace uploads could be rejected)
+        if sandbox_mode and registration_result and workspace_dir:
+            from agent_host.sandbox.workspace_sync import upload_workspace
+
+            try:
+                await upload_workspace(
+                    registration_result.workspace_service_url,
+                    registration_result.workspace_id,
+                    workspace_dir,
+                )
+            except Exception:
+                logger.warning("workspace_upload_on_shutdown_failed", exc_info=True)
+
         try:
             await session_manager.shutdown()
         except Exception:
