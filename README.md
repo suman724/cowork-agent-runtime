@@ -75,6 +75,43 @@ In stdio mode, streaming events are sent as JSON-RPC notifications (`SessionEven
 | `WebSearch` | `Search.Web` | Web search via Tavily API |
 | `ExecuteCode` | `Code.Execute` | Execute Python scripts with output capture |
 
+## Docker
+
+The agent runtime ships as a Docker image for cloud sandbox deployment (ECS Fargate).
+
+### Build
+
+```bash
+make docker-build    # Builds cowork-agent-runtime:latest
+```
+
+### Run locally
+
+```bash
+# Using .env file (must contain LLM_GATEWAY_ENDPOINT, LLM_GATEWAY_AUTH_TOKEN, etc.)
+make docker-run
+
+# Or manually with explicit env vars
+docker run --rm -p 8080:8080 \
+  -e SESSION_ID=sess_123 \
+  -e REGISTRATION_TOKEN=tok_abc \
+  -e LLM_GATEWAY_ENDPOINT=https://llm.example.com \
+  -e LLM_GATEWAY_AUTH_TOKEN=secret \
+  -e SESSION_SERVICE_URL=https://api.example.com \
+  -e WORKSPACE_SERVICE_URL=https://api.example.com \
+  -e SANDBOX_LOCAL_MODE=true \
+  cowork-agent-runtime:latest
+```
+
+### Dockerfile details
+
+- **Multi-stage build**: `python:3.12-slim` base → builder stage installs `cowork-platform` and app deps → runtime stage copies `site-packages` (keeps image small)
+- **Non-root user**: Runs as `appuser` (created with `adduser --system`)
+- **Port 8080**: Exposed for `HttpTransport` (JSON-RPC, SSE, file upload/download)
+- **`/workspace` volume**: Writable directory for workspace file sync (owned by `appuser`)
+- **Health check**: `curl -f http://localhost:8080/health` (30s interval, 10s start period)
+- **Entrypoint**: `python -m agent_host.main --transport http` — starts in HTTP/sandbox mode
+
 ## Development
 
 ```bash
