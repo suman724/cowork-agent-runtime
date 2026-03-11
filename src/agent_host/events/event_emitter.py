@@ -1,4 +1,8 @@
-"""Event emitter — emits agent loop events as JSON-RPC notifications + structlog."""
+"""Event emitter — emits agent loop events as JSON-RPC notifications + structlog.
+
+All events are buffered in an ``EventBuffer`` for replay by any transport
+(SSE reconnection for HttpTransport, ``GetEvents`` RPC for Desktop App).
+"""
 
 from __future__ import annotations
 
@@ -7,15 +11,21 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from cowork_platform_sdk import Component, EventType, build_event
 
+from agent_host.server.event_buffer import EventBuffer
+
 if TYPE_CHECKING:
     from agent_host.models import SessionContext
-    from agent_host.server.stdio_transport import StdioTransport
+    from agent_host.server.transport import Transport
 
 logger = structlog.get_logger()
 
 
 class EventEmitter:
-    """Emits events both as structured logs (stderr) and JSON-RPC notifications (stdout).
+    """Emits events as structured logs (stderr), to the transport, and to an event buffer.
+
+    The event buffer enables replay for:
+    - HttpTransport: SSE ``/events?since={id}`` for reconnecting web clients
+    - StdioTransport: ``GetEvents`` JSON-RPC method for Desktop App view navigation
 
     All emission is fire-and-forget — errors are logged but never propagated.
     """
@@ -23,10 +33,17 @@ class EventEmitter:
     def __init__(
         self,
         session_context: SessionContext,
-        transport: StdioTransport | None = None,
+        transport: Transport | None = None,
+        event_buffer: EventBuffer | None = None,
     ) -> None:
         self._ctx = session_context
         self._transport = transport
+        self._event_buffer = event_buffer or EventBuffer()
+
+    @property
+    def event_buffer(self) -> EventBuffer:
+        """Access the shared event buffer."""
+        return self._event_buffer
 
     def emit(
         self,
@@ -38,8 +55,9 @@ class EventEmitter:
     ) -> None:
         """Emit a structured event.
 
-        - Logs to stderr via structlog
-        - Sends JSON-RPC notification to stdout (if transport available)
+        1. Pushes to the event buffer (assigns monotonic ID)
+        2. Logs to stderr via structlog
+        3. Sends event via transport with eventId (if transport available)
         """
         event = build_event(
             event_type=event_type,
@@ -54,21 +72,23 @@ class EventEmitter:
             payload=payload or {},
         )
 
-        # Log to stderr
+        # 1. Buffer for replay (always, regardless of transport)
+        event_id = self._event_buffer.push(event)
+
+        # 2. Log to stderr
         logger.info(
             "session_event",
             event_type=event_type,
+            event_id=event_id,
             task_id=task_id,
             session_id=self._ctx.session_id,
         )
 
-        # Send JSON-RPC notification (fire-and-forget)
+        # 3. Send via transport with eventId (fire-and-forget)
         if self._transport:
             try:
-                from agent_host.server.json_rpc import serialize_notification
-
-                notification = serialize_notification("SessionEvent", event)
-                self._transport.write_sync(notification)
+                event_with_id = {**event, "eventId": event_id}
+                self._transport.send_event(event_with_id)
             except Exception:
                 logger.warning(
                     "event_notification_failed",

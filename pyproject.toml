@@ -16,6 +16,9 @@ dependencies = [
     "tenacity>=9.0,<10.0",
     "pyyaml>=6.0,<7.0",
     "markdownify>=0.14,<1.0",
+    "starlette>=0.41,<1.0",
+    "uvicorn>=0.32,<1.0",
+    "python-multipart>=0.0.18,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -26,6 +29,7 @@ dev = [
     "pytest>=8.0,<9.0",
     "pytest-asyncio>=0.24,<1.0",
     "coverage>=7.0,<8.0",
+    "httpx>=0.27,<1.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -63,6 +67,11 @@ follow_untyped_imports = true
 [[tool.mypy.overrides]]
 module = ["markdownify", "markdownify.*"]
 ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["starlette", "starlette.*", "uvicorn", "uvicorn.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -52,7 +52,8 @@ from tool_runtime.models import ExecutionContext
 if TYPE_CHECKING:
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
-    from agent_host.server.stdio_transport import StdioTransport
+    from agent_host.server.event_buffer import EventBuffer
+    from agent_host.server.transport import Transport
     from agent_host.skills.models import SkillDefinition
     from tool_runtime import ToolRouter
 
@@ -75,11 +76,13 @@ class SessionManager:
         self,
         config: AgentHostConfig,
         tool_router: ToolRouter,
-        transport: StdioTransport | None = None,
+        transport: Transport | None = None,
+        event_buffer: EventBuffer | None = None,
     ) -> None:
         self._config = config
         self._tool_router = tool_router
         self._transport = transport
+        self._event_buffer = event_buffer
 
         # Service clients
         self._session_client = SessionClient(config.session_service_url)
@@ -219,7 +222,9 @@ class SessionManager:
         # Create EventEmitter now that session context is available
         from agent_host.events.event_emitter import EventEmitter
 
-        self._event_emitter = EventEmitter(self._session_context, self._transport)
+        self._event_emitter = EventEmitter(
+            self._session_context, self._transport, self._event_buffer
+        )
 
         # Initialize components with policy bundle
         if response.policyBundle:
@@ -273,7 +278,9 @@ class SessionManager:
         # Create EventEmitter
         from agent_host.events.event_emitter import EventEmitter
 
-        self._event_emitter = EventEmitter(self._session_context, self._transport)
+        self._event_emitter = EventEmitter(
+            self._session_context, self._transport, self._event_buffer
+        )
 
         # Initialize components with refreshed policy bundle
         if response.policyBundle:
@@ -1158,6 +1165,26 @@ class SessionManager:
             return {"taskId": task_id, "files": []}
 
         return self._file_change_tracker.get_patch_preview(task_id)
+
+    def get_events(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Return buffered events since a given ID.
+
+        Used by the Desktop App to replay missed events when the user
+        navigates back to a running session.
+        """
+        since_id = int(params.get("sinceId", 0))
+
+        if self._event_emitter is None:
+            return {"events": [], "gapDetected": False, "latestId": 0}
+
+        buf = self._event_emitter.event_buffer
+        events, gap = buf.get_since(since_id)
+
+        return {
+            "events": [{"eventId": e.id, **e.data} for e in events],
+            "gapDetected": gap,
+            "latestId": buf.max_id,
+        }
 
     async def get_session_state(self) -> dict[str, Any]:
         """Return current session and task status."""

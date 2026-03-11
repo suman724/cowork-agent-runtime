@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-`cowork-agent-runtime` contains the Local Agent Host and Local Tool Runtime — the Python process that runs the agent loop on the user's desktop. It is spawned by the Desktop App as a child process and communicates via JSON-RPC 2.0 over stdio.
+`cowork-agent-runtime` contains the Local Agent Host and Local Tool Runtime — the Python process that runs the agent loop. It supports two transport modes:
+- **stdio** (default): Spawned by the Desktop App as a child process, communicates via JSON-RPC 2.0 over stdin/stdout.
+- **http**: Runs as an HTTP/SSE server for web/sandbox mode (`--transport http`). Exposes JSON-RPC via `POST /rpc`, events via `GET /events` (SSE), and file operations via `/upload` and `/files`.
 
 ## Architecture
 
@@ -12,7 +14,7 @@ Two top-level packages with a **strict boundary** — no cross-imports allowed:
 
 ```
 agent_host/     ← Local Agent Host (custom agent loop)
-  server/       — JSON-RPC 2.0 server over stdio (parse, serialize, dispatch, handlers)
+  server/       — Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay)
   session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
   loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
@@ -62,7 +64,14 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
 - **Context compaction** (`thread/compactor.py`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
 - **Prompt caching optimization** — `ReactLoop._build_messages()` orders context for LLM provider cache efficiency: stable prefix (system prompt → persistent memory → conversation history) then volatile suffix (working memory → error recovery).
-- **Custom JSON-RPC 2.0 server** (~200 lines). Newline-delimited JSON with write lock.
+- **Transport protocol** (`server/transport.py`) — `Transport` protocol with `start()`, `send_event()`, `shutdown()`. Two implementations:
+  - `StdioTransport` — JSON-RPC over stdin/stdout with write lock (desktop mode)
+  - `HttpTransport` — Starlette/uvicorn ASGI server (sandbox/web mode): `POST /rpc`, `GET /events` (SSE with replay), `GET /health`, `GET /ready`, `POST /upload`, `GET /files/{path}`, `GET /files`
+- **Shared EventBuffer** (`server/event_buffer.py`) — bounded ring buffer (default 10K events) with monotonic IDs. Owned by `EventEmitter`, shared with both transports. Enables:
+  - SSE replay via `?since={id}` for HttpTransport
+  - `GetEvents` JSON-RPC method for Desktop App event replay after view navigation
+  - All `SessionEvent` notifications include `eventId` for client-side tracking
+- **Custom JSON-RPC 2.0 protocol** (~200 lines). Shared by both transports via `MethodDispatcher`.
 - **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
 - **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
 - **Pydantic models** from `cowork-platform` for all data contracts.
@@ -102,6 +111,13 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
 - `TAVILY_API_KEY` — Tavily API key (optional, required for WebSearch tool)
 - `WORKSPACE_SYNC_INTERVAL` — Sync checkpoint to workspace every N steps (default: 5, 0 = disabled)
+
+## CLI Arguments
+
+- `--transport {stdio,http}` — Transport mode (default: `stdio`)
+- `--host HOST` — HTTP server bind address (default: `0.0.0.0`, only with `--transport http`)
+- `--port PORT` — HTTP server port (default: `8080`, only with `--transport http`)
+- `--workspace-dir DIR` — Workspace directory for file upload/download (only with `--transport http`)
 
 ## Platform Adapters
 
@@ -193,6 +209,9 @@ cowork-agent-runtime/
 | `pydantic>=2.0,<3.0` | Data validation (from cowork-platform contracts) |
 | `structlog>=24.0,<26.0` | Structured logging to stderr |
 | `markdownify>=0.14,<1.0` | HTML to markdown conversion (FetchUrl tool) |
+| `starlette>=0.41,<1.0` | ASGI framework for HttpTransport (web/sandbox mode) |
+| `uvicorn>=0.32,<1.0` | ASGI server for HttpTransport |
+| `python-multipart>=0.0.18,<1.0` | Multipart form parsing for file upload |
 
 ### Package Boundary Enforcement
 
