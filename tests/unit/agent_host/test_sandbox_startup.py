@@ -165,7 +165,7 @@ async def test_startup_local_mode_success() -> None:
     assert call_args.args == ("sess-123",)
     assert call_args.kwargs["sandbox_endpoint"] == "http://127.0.0.1:8080"
     assert call_args.kwargs["task_arn"].startswith("local:")
-    assert call_args.kwargs["registration_token"] == "reg-tok-abc"
+    assert call_args.kwargs["registration_token"] == "reg-tok-abc"  # noqa: S105
 
 
 @pytest.mark.asyncio
