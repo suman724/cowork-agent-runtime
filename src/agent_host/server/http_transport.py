@@ -405,6 +405,7 @@ class HttpTransport:
             failed: list of paths that failed
             direction: echo of the requested direction
         """
+        from agent_host.exceptions import WorkspaceSyncError
         from agent_host.sandbox.workspace_sync import (
             download_files,
             download_workspace,
@@ -414,30 +415,23 @@ class HttpTransport:
 
         direction = params.get("direction", "pull")
         if direction not in ("pull", "push"):
-            from agent_host.exceptions import WorkspaceSyncError
-
             raise WorkspaceSyncError(f"Invalid sync direction: {direction}")
 
         if not self._workspace_service_url or not self._workspace_id:
-            from agent_host.exceptions import WorkspaceSyncError
-
             raise WorkspaceSyncError("Workspace sync context not configured")
 
         if self._workspace_dir is None:
-            from agent_host.exceptions import WorkspaceSyncError
-
             raise WorkspaceSyncError("Workspace directory not configured")
 
         # Wait for startup sync to finish before processing
-        try:
-            await asyncio.wait_for(
-                self._startup_sync_complete.wait(),
-                timeout=self.STARTUP_SYNC_GATE_TIMEOUT,
-            )
-        except TimeoutError as exc:
-            from agent_host.exceptions import WorkspaceSyncError
-
-            raise WorkspaceSyncError("Startup workspace sync not yet complete") from exc
+        if not self._startup_sync_complete.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._startup_sync_complete.wait(),
+                    timeout=self.STARTUP_SYNC_GATE_TIMEOUT,
+                )
+            except TimeoutError as exc:
+                raise WorkspaceSyncError("Startup workspace sync not yet complete") from exc
 
         paths: list[str] | None = params.get("paths")
         ws_url = self._workspace_service_url

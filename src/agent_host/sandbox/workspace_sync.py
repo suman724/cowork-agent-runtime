@@ -28,6 +28,9 @@ logger = structlog.get_logger()
 # Max concurrent file operations to avoid overwhelming the service
 _MAX_CONCURRENCY = 10
 
+# Shared timeout for all workspace sync HTTP calls
+_SYNC_TIMEOUT = httpx.Timeout(120.0, connect=10.0)
+
 # Directories to exclude from workspace uploads
 _EXCLUDED_DIRS = frozenset(
     {
@@ -46,6 +49,11 @@ _EXCLUDED_DIRS = frozenset(
 )
 
 
+def _files_base_url(workspace_service_url: str, workspace_id: str) -> str:
+    """Build the base URL for workspace file operations."""
+    return f"{workspace_service_url.rstrip('/')}/workspaces/{workspace_id}/files"
+
+
 async def download_workspace(
     workspace_service_url: str,
     workspace_id: str,
@@ -62,11 +70,9 @@ async def download_workspace(
     target.mkdir(parents=True, exist_ok=True)
     target_resolved = target.resolve()
 
-    base_url = f"{workspace_service_url.rstrip('/')}/workspaces/{workspace_id}/files"
+    base_url = _files_base_url(workspace_service_url, workspace_id)
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    ) as client:
+    async with httpx.AsyncClient(timeout=_SYNC_TIMEOUT) as client:
         # Step 1: List files
         try:
             resp = await client.get(base_url)
@@ -257,21 +263,20 @@ async def download_files(
     if not paths:
         return {"synced": [], "failed": []}
 
+    # Deduplicate paths while preserving order
+    unique_paths = list(dict.fromkeys(paths))
+
     target = Path(target_dir)
     target.mkdir(parents=True, exist_ok=True)
     target_resolved = target.resolve()
 
-    base_url = f"{workspace_service_url.rstrip('/')}/workspaces/{workspace_id}/files"
+    base_url = _files_base_url(workspace_service_url, workspace_id)
     semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    synced: list[str] = []
-    failed: list[str] = []
+    async with httpx.AsyncClient(timeout=_SYNC_TIMEOUT) as client:
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    ) as client:
-
-        async def _download_one(file_path: str) -> None:
+        async def _download_one(file_path: str) -> bool:
+            """Download a single file. Returns True on success."""
             async with semaphore:
                 try:
                     resp = await client.get(f"{base_url}/{file_path}")
@@ -282,8 +287,7 @@ async def download_files(
                         path=file_path,
                         error=str(exc),
                     )
-                    failed.append(file_path)
-                    return
+                    return False
 
                 if resp.status_code >= 400:
                     logger.warning(
@@ -292,8 +296,7 @@ async def download_files(
                         path=file_path,
                         status=resp.status_code,
                     )
-                    failed.append(file_path)
-                    return
+                    return False
 
                 # Path traversal prevention
                 dest = (target / file_path).resolve()
@@ -303,14 +306,16 @@ async def download_files(
                         workspace_id=workspace_id,
                         path=file_path,
                     )
-                    failed.append(file_path)
-                    return
+                    return False
 
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_bytes(resp.content)
-                synced.append(file_path)
+                return True
 
-        await asyncio.gather(*[_download_one(p) for p in paths])
+        results = await asyncio.gather(*[_download_one(p) for p in unique_paths])
+
+    synced = [p for p, ok in zip(unique_paths, results, strict=True) if ok]
+    failed = [p for p, ok in zip(unique_paths, results, strict=True) if not ok]
 
     logger.info(
         "files_downloaded",
@@ -335,31 +340,31 @@ async def upload_files(
     if not paths:
         return {"synced": [], "failed": []}
 
+    # Deduplicate paths while preserving order
+    unique_paths = list(dict.fromkeys(paths))
+
     source = Path(source_dir)
-    base_url = f"{workspace_service_url.rstrip('/')}/workspaces/{workspace_id}/files"
+    base_url = _files_base_url(workspace_service_url, workspace_id)
     semaphore = asyncio.Semaphore(_MAX_CONCURRENCY)
 
-    synced: list[str] = []
-    failed: list[str] = []
+    async with httpx.AsyncClient(timeout=_SYNC_TIMEOUT) as client:
 
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    ) as client:
-
-        async def _upload_one(rel_path: str) -> None:
+        async def _upload_one(rel_path: str) -> bool:
+            """Upload a single file. Returns True on success."""
             async with semaphore:
                 abs_path = source / rel_path
-                if not abs_path.is_file():
+                try:
+                    content = abs_path.read_bytes()
+                except OSError as exc:
                     logger.warning(
                         "upload_file_not_found",
                         workspace_id=workspace_id,
                         path=rel_path,
+                        error=str(exc),
                     )
-                    failed.append(rel_path)
-                    return
+                    return False
 
                 try:
-                    content = abs_path.read_bytes()
                     resp = await client.post(
                         base_url,
                         params={"path": rel_path},
@@ -378,9 +383,8 @@ async def upload_files(
                             path=rel_path,
                             status=resp.status_code,
                         )
-                        failed.append(rel_path)
-                        return
-                    synced.append(rel_path)
+                        return False
+                    return True
                 except httpx.HTTPError as exc:
                     logger.warning(
                         "upload_file_failed",
@@ -388,9 +392,12 @@ async def upload_files(
                         path=rel_path,
                         error=str(exc),
                     )
-                    failed.append(rel_path)
+                    return False
 
-        await asyncio.gather(*[_upload_one(p) for p in paths])
+        results = await asyncio.gather(*[_upload_one(p) for p in unique_paths])
+
+    synced = [p for p, ok in zip(unique_paths, results, strict=True) if ok]
+    failed = [p for p, ok in zip(unique_paths, results, strict=True) if not ok]
 
     logger.info(
         "files_uploaded",

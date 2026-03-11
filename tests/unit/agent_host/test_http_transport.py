@@ -279,15 +279,6 @@ class TestWorkspaceSyncRpc:
 
     def test_pull_with_paths(self, sync_client: TestClient, workspace_dir: str) -> None:
         """workspace.sync pull with specific paths downloads files."""
-        with patch(
-            "agent_host.server.http_transport.HttpTransport.handle_workspace_sync",
-            new_callable=AsyncMock,
-            return_value={"synced": ["test.txt"], "failed": [], "direction": "pull"},
-        ):
-            # Re-register the mock
-            pass
-
-        # Test the actual handler with mocked download_files
         mock_result = {"synced": ["test.txt"], "failed": []}
         with patch(
             "agent_host.sandbox.workspace_sync.download_files",
