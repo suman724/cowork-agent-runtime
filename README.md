@@ -1,10 +1,45 @@
 # cowork-agent-runtime
 
-Local Agent Host and Tool Runtime for the Cowork desktop agent system. Runs as a child process of the Desktop App, executing the agent loop locally for fast file/tool interactions while routing LLM calls through an external gateway.
+Local Agent Host and Tool Runtime for the Cowork agent system. Supports two transport modes:
+
+- **stdio** (default): Spawned by the Desktop App as a child process, communicates via JSON-RPC 2.0 over stdin/stdout.
+- **http**: Runs as an HTTP/SSE server for web/sandbox mode. Exposes JSON-RPC via `POST /rpc`, events via `GET /events` (SSE), and file operations via `/upload` and `/files`.
+
+## Transport Modes
+
+### stdio mode (Desktop App)
+
+```bash
+make run          # Start in stdio mode (default)
+```
+
+The Desktop App spawns the agent-runtime as a child process. JSON-RPC 2.0 requests are sent on stdin, responses and event notifications on stdout.
+
+### HTTP mode (Web / Sandbox)
+
+```bash
+make run-sandbox  # Start in HTTP mode on localhost:8080
+```
+
+Or with explicit options:
+
+```bash
+python -m agent_host.main --transport http --host 0.0.0.0 --port 8080 --workspace-dir ./workspace
+```
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/rpc` | POST | JSON-RPC 2.0 dispatch (same methods as stdio) |
+| `/events` | GET | SSE event stream with replay (`?since={id}`) |
+| `/health` | GET | Liveness probe (always 200) |
+| `/ready` | GET | Readiness probe (200 when SessionManager initialized) |
+| `/upload` | POST | Multipart file upload to workspace directory |
+| `/files/{path}` | GET | Download file from workspace |
+| `/files` | GET | List workspace files (or zip archive with `?archive=true`) |
 
 ## JSON-RPC API
 
-The Desktop App communicates with the Agent Host via JSON-RPC 2.0 over stdio (newline-delimited JSON).
+Both transports use the same JSON-RPC 2.0 methods:
 
 | Method | Description |
 |--------|-------------|
@@ -14,9 +49,10 @@ The Desktop App communicates with the Agent Host via JSON-RPC 2.0 over stdio (ne
 | `CancelTask` | Cancel the currently running task |
 | `GetSessionState` | Return session status, active task, token usage, `currentStep`, and `maxSteps` |
 | `ApproveAction` | Deliver a user approval/denial for a pending tool call |
+| `GetEvents` | Return buffered events since a given ID (for replay after reconnect) |
 | `Shutdown` | Cancel task, clean up session, close connections |
 
-Streaming events are sent as JSON-RPC notifications (`SessionEvent`) on stdout.
+In stdio mode, streaming events are sent as JSON-RPC notifications (`SessionEvent`) on stdout. In HTTP mode, events are streamed via SSE on `GET /events`. All events include a monotonic `eventId` for replay tracking.
 
 ## Built-in Tools
 
@@ -43,7 +79,20 @@ make format        # Auto-format code
 make typecheck     # Run mypy strict mode
 make test          # Run unit tests
 make coverage      # Run tests with coverage report
+
+# Run locally
+make run           # stdio mode (Desktop App)
+make run-sandbox   # HTTP mode on localhost:8080
 ```
+
+## CLI Arguments
+
+| Argument | Default | Description |
+|----------|---------|-------------|
+| `--transport` | `stdio` | Transport mode: `stdio` (Desktop App) or `http` (web/sandbox) |
+| `--host` | `0.0.0.0` | HTTP server bind address (only with `--transport http`) |
+| `--port` | `8080` | HTTP server port (only with `--transport http`) |
+| `--workspace-dir` | — | Workspace directory for file upload/download (only with `--transport http`) |
 
 ## Configuration
 
@@ -70,7 +119,7 @@ Custom agent loop with production-grade harness:
 
 | Module | Purpose |
 |--------|---------|
-| `server/` | JSON-RPC 2.0 server (parse, serialize, stdio transport, dispatch, handlers) |
+| `server/` | Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay) |
 | `loop/` | Core agent loop, tool executor, agent-internal tools, error recovery, sub-agents |
 | `llm/` | LLM Gateway streaming client (openai SDK), response models, error classifier |
 | `thread/` | Message thread management, context compaction, token counting |
@@ -104,3 +153,6 @@ Local tool execution engine:
 | `httpx` | Async HTTP for backend service calls |
 | `pydantic` | Data validation (cowork-platform contracts) |
 | `structlog` | Structured logging to stderr |
+| `starlette` | ASGI framework for HttpTransport (web/sandbox mode) |
+| `uvicorn` | ASGI server for HttpTransport |
+| `python-multipart` | Multipart form parsing for file upload |

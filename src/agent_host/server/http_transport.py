@@ -188,19 +188,25 @@ class HttpTransport:
             since_id = 0
 
         async def event_stream() -> Any:
-            async for event in self._event_buffer.subscribe(since_id):
-                if event.id == -1 and event.data.get("_gap"):
-                    gap_data = json.dumps(
-                        {
-                            "since": event.data["since"],
-                            "message": "Some events were evicted from buffer",
-                        }
-                    )
-                    yield f"event: gap\ndata: {gap_data}\n\n"
-                    continue
+            try:
+                async for event in self._event_buffer.subscribe(since_id):
+                    if event.id == -1 and event.data.get("_gap"):
+                        gap_data = json.dumps(
+                            {
+                                "since": event.data["since"],
+                                "message": "Some events were evicted from buffer",
+                            }
+                        )
+                        yield f"event: gap\ndata: {gap_data}\n\n"
+                        continue
 
-                data = json.dumps({"id": event.id, **event.data})
-                yield f"id: {event.id}\nevent: session_event\ndata: {data}\n\n"
+                    data = json.dumps({"id": event.id, **event.data})
+                    yield f"id: {event.id}\nevent: session_event\ndata: {data}\n\n"
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("sse_stream_error")
+                return
 
         return StreamingResponse(
             event_stream(),
@@ -237,7 +243,14 @@ class HttpTransport:
                 status_code=400,
             )
 
-        form = await request.form()
+        try:
+            form = await request.form()
+        except Exception:
+            logger.warning("upload_form_parse_error")
+            return JSONResponse(
+                {"error": "Failed to parse multipart form data"},
+                status_code=400,
+            )
         uploaded_files: list[dict[str, str | int]] = []
         total_size = 0
 
@@ -311,8 +324,12 @@ class HttpTransport:
         if not target.is_file():
             return JSONResponse({"error": "File not found"}, status_code=404)
 
-        mime_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
-        content = target.read_bytes()
+        try:
+            mime_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
+            content = target.read_bytes()
+        except OSError:
+            logger.warning("file_download_read_error", path=file_path)
+            return JSONResponse({"error": "Failed to read file"}, status_code=500)
         return Response(
             content=content,
             media_type=mime_type,

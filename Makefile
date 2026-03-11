@@ -1,4 +1,4 @@
-.PHONY: help install run run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic build check clean coverage
+.PHONY: help install run run-sandbox run-anthropic lint format format-check typecheck test test-integration test-jsonrpc test-chat test-chat-anthropic build check clean coverage
 
 help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -8,6 +8,10 @@ install: ## Install all dependencies
 
 run: ## Run the agent-runtime in stdio mode (sources .env)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main
+
+run-sandbox: ## Run the agent-runtime in HTTP/sandbox mode on localhost:8080 (sources .env)
+	@mkdir -p workspace
+	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main --transport http --port 8080 --workspace-dir ./workspace
 
 run-anthropic: ## Run the agent-runtime with Anthropic Claude (sources .env.anthropic)
 	@[ -f .env.anthropic ] || (echo "ERROR: .env.anthropic not found. Copy the example and add your API key:" && echo "  cp .env.anthropic.example .env.anthropic" && exit 1)
