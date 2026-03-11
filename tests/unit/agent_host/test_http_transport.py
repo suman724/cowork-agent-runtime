@@ -6,6 +6,7 @@ import json
 import tempfile
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from starlette.testclient import TestClient
@@ -249,3 +250,163 @@ class TestSharedEventBuffer:
         assert len(events) == 2
         assert events[0].data["type"] == "event1"
         assert events[0].data["payload"] == {"key": "val"}
+
+
+class TestWorkspaceSyncRpc:
+    """Tests for the workspace.sync JSON-RPC handler."""
+
+    @pytest.fixture
+    def sync_transport(self, workspace_dir: str) -> HttpTransport:
+        """Transport with workspace sync context configured."""
+        t = HttpTransport(workspace_dir=workspace_dir)
+        dispatcher = MethodDispatcher()
+        dispatcher.register("workspace.sync", t.handle_workspace_sync)
+        t.set_dispatcher(dispatcher)
+        t.set_ready()
+        t.set_workspace_sync_context("http://ws:8000", "ws-123")
+        t.mark_startup_sync_complete()
+        return t
+
+    @pytest.fixture
+    def sync_client(self, sync_transport: HttpTransport) -> TestClient:
+        return TestClient(sync_transport.app)
+
+    def _rpc(self, client: TestClient, params: dict[str, Any]) -> dict[str, Any]:
+        body = json.dumps({"jsonrpc": "2.0", "method": "workspace.sync", "params": params, "id": 1})
+        resp = client.post("/rpc", content=body)
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_pull_with_paths(self, sync_client: TestClient, workspace_dir: str) -> None:
+        """workspace.sync pull with specific paths downloads files."""
+        with patch(
+            "agent_host.server.http_transport.HttpTransport.handle_workspace_sync",
+            new_callable=AsyncMock,
+            return_value={"synced": ["test.txt"], "failed": [], "direction": "pull"},
+        ):
+            # Re-register the mock
+            pass
+
+        # Test the actual handler with mocked download_files
+        mock_result = {"synced": ["test.txt"], "failed": []}
+        with patch(
+            "agent_host.sandbox.workspace_sync.download_files",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            data = self._rpc(sync_client, {"direction": "pull", "paths": ["test.txt"]})
+
+        assert "result" in data
+        assert data["result"]["direction"] == "pull"
+        assert data["result"]["synced"] == ["test.txt"]
+
+    def test_push_with_paths(self, sync_client: TestClient, workspace_dir: str) -> None:
+        """workspace.sync push with specific paths uploads files."""
+        # Create a file to upload
+        Path(workspace_dir, "out.txt").write_text("output")
+
+        mock_result = {"synced": ["out.txt"], "failed": []}
+        with patch(
+            "agent_host.sandbox.workspace_sync.upload_files",
+            new_callable=AsyncMock,
+            return_value=mock_result,
+        ):
+            data = self._rpc(sync_client, {"direction": "push", "paths": ["out.txt"]})
+
+        assert "result" in data
+        assert data["result"]["direction"] == "push"
+        assert data["result"]["synced"] == ["out.txt"]
+
+    def test_pull_without_paths(self, sync_client: TestClient) -> None:
+        """workspace.sync pull without paths does full download."""
+        with patch(
+            "agent_host.sandbox.workspace_sync.download_workspace",
+            new_callable=AsyncMock,
+        ) as mock_dl:
+            data = self._rpc(sync_client, {"direction": "pull"})
+
+        mock_dl.assert_called_once()
+        assert "result" in data
+        assert data["result"]["direction"] == "pull"
+
+    def test_push_without_paths(self, sync_client: TestClient) -> None:
+        """workspace.sync push without paths does full upload."""
+        with patch(
+            "agent_host.sandbox.workspace_sync.upload_workspace",
+            new_callable=AsyncMock,
+        ) as mock_ul:
+            data = self._rpc(sync_client, {"direction": "push"})
+
+        mock_ul.assert_called_once()
+        assert "result" in data
+        assert data["result"]["direction"] == "push"
+
+    def test_invalid_direction(self, sync_client: TestClient) -> None:
+        """workspace.sync with invalid direction returns error."""
+        data = self._rpc(sync_client, {"direction": "invalid"})
+        assert "error" in data
+        assert data["error"]["code"] == -32061
+
+    def test_no_sync_context(self, workspace_dir: str) -> None:
+        """workspace.sync without sync context configured returns error."""
+        t = HttpTransport(workspace_dir=workspace_dir)
+        dispatcher = MethodDispatcher()
+        dispatcher.register("workspace.sync", t.handle_workspace_sync)
+        t.set_dispatcher(dispatcher)
+        t.set_ready()
+        t.mark_startup_sync_complete()
+        # NOT calling set_workspace_sync_context()
+
+        c = TestClient(t.app)
+        body = json.dumps(
+            {"jsonrpc": "2.0", "method": "workspace.sync", "params": {"direction": "pull"}, "id": 1}
+        )
+        resp = c.post("/rpc", content=body)
+        data = resp.json()
+        assert "error" in data
+        assert data["error"]["code"] == -32061
+
+    def test_startup_gate_blocks(self, workspace_dir: str) -> None:
+        """workspace.sync blocks until startup sync completes, times out if not set."""
+        t = HttpTransport(workspace_dir=workspace_dir)
+        t.STARTUP_SYNC_GATE_TIMEOUT = 0.1  # Very short timeout for test
+        dispatcher = MethodDispatcher()
+        dispatcher.register("workspace.sync", t.handle_workspace_sync)
+        t.set_dispatcher(dispatcher)
+        t.set_ready()
+        t.set_workspace_sync_context("http://ws:8000", "ws-123")
+        # NOT calling mark_startup_sync_complete()
+
+        c = TestClient(t.app)
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "method": "workspace.sync",
+                "params": {"direction": "pull", "paths": ["test.txt"]},
+                "id": 1,
+            }
+        )
+        resp = c.post("/rpc", content=body)
+        data = resp.json()
+        assert "error" in data
+        assert data["error"]["code"] == -32061
+        assert "not yet complete" in data["error"]["message"]
+
+    def test_no_workspace_dir(self) -> None:
+        """workspace.sync without workspace dir returns error."""
+        t = HttpTransport()  # No workspace_dir
+        dispatcher = MethodDispatcher()
+        dispatcher.register("workspace.sync", t.handle_workspace_sync)
+        t.set_dispatcher(dispatcher)
+        t.set_ready()
+        t.set_workspace_sync_context("http://ws:8000", "ws-123")
+        t.mark_startup_sync_complete()
+
+        c = TestClient(t.app)
+        body = json.dumps(
+            {"jsonrpc": "2.0", "method": "workspace.sync", "params": {"direction": "pull"}, "id": 1}
+        )
+        resp = c.post("/rpc", content=body)
+        data = resp.json()
+        assert "error" in data
+        assert data["error"]["code"] == -32061

@@ -1,7 +1,7 @@
 """HTTP/SSE transport for web/sandbox mode.
 
 Provides a Starlette server with:
-- POST /rpc — JSON-RPC 2.0 dispatch
+- POST /rpc — JSON-RPC 2.0 dispatch (includes workspace.sync method)
 - GET /events — SSE event stream with replay
 - GET /health — liveness probe
 - GET /ready — readiness probe
@@ -49,6 +49,10 @@ class HttpTransport:
     server that exposes JSON-RPC via HTTP and events via SSE.
     """
 
+    # Timeout for waiting on startup sync to complete before processing
+    # workspace.sync RPC calls (seconds).
+    STARTUP_SYNC_GATE_TIMEOUT = 30.0
+
     def __init__(
         self,
         host: str = "0.0.0.0",  # noqa: S104
@@ -64,6 +68,18 @@ class HttpTransport:
         self._ready = False
         self._server: Any = None
         self._serve_task: asyncio.Task[None] | None = None
+
+        # Workspace sync context — set via set_workspace_sync_context()
+        self._workspace_service_url: str | None = None
+        self._workspace_id: str | None = None
+
+        # Startup sync gate: blocks workspace.sync RPC until initial
+        # download_workspace() completes. Set via mark_startup_sync_complete().
+        self._startup_sync_complete = asyncio.Event()
+
+        # Serialize concurrent workspace.sync operations
+        self._sync_lock = asyncio.Lock()
+
         self._app = self._create_app()
 
     def set_dispatcher(self, dispatcher: Any) -> None:
@@ -80,6 +96,27 @@ class HttpTransport:
     def set_workspace_dir(self, workspace_dir: str) -> None:
         """Set the workspace directory for file operations."""
         self._workspace_dir = Path(workspace_dir)
+
+    def set_workspace_sync_context(
+        self,
+        workspace_service_url: str,
+        workspace_id: str,
+    ) -> None:
+        """Set workspace sync context for the workspace.sync RPC handler.
+
+        Must be called before workspace.sync RPCs can succeed.
+        """
+        self._workspace_service_url = workspace_service_url
+        self._workspace_id = workspace_id
+
+    def mark_startup_sync_complete(self) -> None:
+        """Signal that initial download_workspace() has finished.
+
+        Unblocks any pending workspace.sync RPC calls that are waiting
+        on the startup gate. Must be called even if download_workspace()
+        fails — otherwise all future sync RPCs will hang.
+        """
+        self._startup_sync_complete.set()
 
     @property
     def event_buffer(self) -> EventBuffer:
@@ -355,6 +392,91 @@ class HttpTransport:
             return self._create_workspace_archive()
 
         return self._list_workspace_files()
+
+    async def handle_workspace_sync(self, params: dict[str, Any]) -> dict[str, Any]:
+        """Handle workspace.sync JSON-RPC method.
+
+        Params:
+            direction: "pull" (S3 → local) or "push" (local → S3)
+            paths: list[str] | None — specific files, or None for full sync
+
+        Returns:
+            synced: list of paths successfully synced
+            failed: list of paths that failed
+            direction: echo of the requested direction
+        """
+        from agent_host.sandbox.workspace_sync import (
+            download_files,
+            download_workspace,
+            upload_files,
+            upload_workspace,
+        )
+
+        direction = params.get("direction", "pull")
+        if direction not in ("pull", "push"):
+            from agent_host.exceptions import WorkspaceSyncError
+
+            raise WorkspaceSyncError(f"Invalid sync direction: {direction}")
+
+        if not self._workspace_service_url or not self._workspace_id:
+            from agent_host.exceptions import WorkspaceSyncError
+
+            raise WorkspaceSyncError("Workspace sync context not configured")
+
+        if self._workspace_dir is None:
+            from agent_host.exceptions import WorkspaceSyncError
+
+            raise WorkspaceSyncError("Workspace directory not configured")
+
+        # Wait for startup sync to finish before processing
+        try:
+            await asyncio.wait_for(
+                self._startup_sync_complete.wait(),
+                timeout=self.STARTUP_SYNC_GATE_TIMEOUT,
+            )
+        except TimeoutError as exc:
+            from agent_host.exceptions import WorkspaceSyncError
+
+            raise WorkspaceSyncError("Startup workspace sync not yet complete") from exc
+
+        paths: list[str] | None = params.get("paths")
+        ws_url = self._workspace_service_url
+        ws_id = self._workspace_id
+        ws_dir = str(self._workspace_dir)
+
+        async with self._sync_lock:
+            logger.info(
+                "workspace_sync_start",
+                direction=direction,
+                paths=paths,
+                workspace_id=ws_id,
+            )
+
+            if direction == "pull":
+                if paths:
+                    result = await download_files(ws_url, ws_id, ws_dir, paths)
+                else:
+                    await download_workspace(ws_url, ws_id, ws_dir)
+                    result = {"synced": [], "failed": []}
+            else:
+                if paths:
+                    result = await upload_files(ws_url, ws_id, ws_dir, paths)
+                else:
+                    await upload_workspace(ws_url, ws_id, ws_dir)
+                    result = {"synced": [], "failed": []}
+
+            logger.info(
+                "workspace_sync_complete",
+                direction=direction,
+                synced=len(result["synced"]),
+                failed=len(result["failed"]),
+            )
+
+            return {
+                "synced": result["synced"],
+                "failed": result["failed"],
+                "direction": direction,
+            }
 
     def _list_workspace_files(self) -> JSONResponse:
         """List all files in the workspace directory."""

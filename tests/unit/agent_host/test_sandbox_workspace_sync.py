@@ -9,7 +9,12 @@ import httpx
 import pytest
 
 from agent_host.exceptions import WorkspaceSyncError
-from agent_host.sandbox.workspace_sync import download_workspace, upload_workspace
+from agent_host.sandbox.workspace_sync import (
+    download_files,
+    download_workspace,
+    upload_files,
+    upload_workspace,
+)
 
 _PATCH_TARGET = "agent_host.sandbox.workspace_sync.httpx.AsyncClient"
 
@@ -320,3 +325,161 @@ async def test_upload_workspace_connection_error_best_effort(
 
     with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
         await upload_workspace("http://ws:8000", "ws-123", str(tmp_path))
+
+
+# -- download_files tests --
+
+
+@pytest.mark.asyncio
+async def test_download_files_success(tmp_path: Path) -> None:
+    """Download specific files by path."""
+    mock_client = AsyncMock()
+
+    async def mock_get(url: str, **kwargs: object) -> httpx.Response:
+        if url.endswith("/files/hello.txt"):
+            return httpx.Response(200, content=b"Hello!")
+        if url.endswith("/files/src/main.py"):
+            return httpx.Response(200, content=b"print('hi')")
+        return httpx.Response(404)
+
+    mock_client.get = AsyncMock(side_effect=mock_get)
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await download_files(
+            "http://ws:8000", "ws-123", str(tmp_path), ["hello.txt", "src/main.py"]
+        )
+
+    assert set(result["synced"]) == {"hello.txt", "src/main.py"}
+    assert result["failed"] == []
+    assert (tmp_path / "hello.txt").read_text() == "Hello!"
+    assert (tmp_path / "src" / "main.py").read_text() == "print('hi')"
+
+
+@pytest.mark.asyncio
+async def test_download_files_empty_paths(tmp_path: Path) -> None:
+    """Empty paths list is a no-op."""
+    result = await download_files("http://ws:8000", "ws-123", str(tmp_path), [])
+    assert result == {"synced": [], "failed": []}
+
+
+@pytest.mark.asyncio
+async def test_download_files_missing_file(tmp_path: Path) -> None:
+    """Missing files in S3 are reported as failed, not raised."""
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(
+        return_value=httpx.Response(404, text="Not Found"),
+    )
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await download_files("http://ws:8000", "ws-123", str(tmp_path), ["missing.txt"])
+
+    assert result["synced"] == []
+    assert result["failed"] == ["missing.txt"]
+
+
+@pytest.mark.asyncio
+async def test_download_files_path_traversal(tmp_path: Path) -> None:
+    """Path traversal attempts are rejected and reported as failed."""
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(
+        return_value=httpx.Response(200, content=b"evil"),
+    )
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await download_files(
+            "http://ws:8000", "ws-123", str(tmp_path), ["../../../etc/passwd"]
+        )
+
+    assert result["synced"] == []
+    assert result["failed"] == ["../../../etc/passwd"]
+
+
+@pytest.mark.asyncio
+async def test_download_files_connection_error(tmp_path: Path) -> None:
+    """Connection errors are caught and reported as failed."""
+    mock_client = AsyncMock()
+    mock_client.get = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await download_files("http://ws:8000", "ws-123", str(tmp_path), ["fail.txt"])
+
+    assert result["synced"] == []
+    assert result["failed"] == ["fail.txt"]
+
+
+# -- upload_files tests --
+
+
+@pytest.mark.asyncio
+async def test_upload_files_success(tmp_path: Path) -> None:
+    """Upload specific files by path."""
+    (tmp_path / "a.txt").write_text("aaa")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "b.txt").write_text("bbb")
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(
+        return_value=httpx.Response(200, json={"status": "ok"}),
+    )
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await upload_files(
+            "http://ws:8000", "ws-123", str(tmp_path), ["a.txt", "sub/b.txt"]
+        )
+
+    assert set(result["synced"]) == {"a.txt", "sub/b.txt"}
+    assert result["failed"] == []
+    assert mock_client.post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_files_empty_paths(tmp_path: Path) -> None:
+    """Empty paths list is a no-op."""
+    result = await upload_files("http://ws:8000", "ws-123", str(tmp_path), [])
+    assert result == {"synced": [], "failed": []}
+
+
+@pytest.mark.asyncio
+async def test_upload_files_missing_local(tmp_path: Path) -> None:
+    """Files that don't exist locally are reported as failed."""
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock()
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await upload_files("http://ws:8000", "ws-123", str(tmp_path), ["nonexistent.txt"])
+
+    assert result["synced"] == []
+    assert result["failed"] == ["nonexistent.txt"]
+    mock_client.post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_upload_files_server_error(tmp_path: Path) -> None:
+    """Server errors are caught and reported as failed."""
+    (tmp_path / "fail.txt").write_text("content")
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(
+        return_value=httpx.Response(500, text="Error"),
+    )
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await upload_files("http://ws:8000", "ws-123", str(tmp_path), ["fail.txt"])
+
+    assert result["synced"] == []
+    assert result["failed"] == ["fail.txt"]
+
+
+@pytest.mark.asyncio
+async def test_upload_files_connection_error(tmp_path: Path) -> None:
+    """Connection errors are caught and reported as failed."""
+    (tmp_path / "fail.txt").write_text("content")
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=httpx.ConnectError("refused"))
+
+    with patch(_PATCH_TARGET, _mock_client_cls(mock_client)):
+        result = await upload_files("http://ws:8000", "ws-123", str(tmp_path), ["fail.txt"])
+
+    assert result["synced"] == []
+    assert result["failed"] == ["fail.txt"]

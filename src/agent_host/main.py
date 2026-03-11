@@ -167,6 +167,9 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     handlers = Handlers(session_manager)
     handlers.register_all(dispatcher)
 
+    # Register workspace.sync handler (HTTP/sandbox mode only)
+    dispatcher.register("workspace.sync", transport.handle_workspace_sync)
+
     # Wire dispatcher into transport
     transport.set_dispatcher(dispatcher)
 
@@ -188,14 +191,28 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         finally:
             await session_client.close()
 
-        # Sync workspace files from Workspace Service
+        # Wire workspace sync context into transport (for workspace.sync RPC)
         ws_url = registration_result.workspace_service_url
-        if ws_url and registration_result.workspace_id and workspace_dir:
-            await download_workspace(
-                ws_url,
-                registration_result.workspace_id,
-                workspace_dir,
+        if ws_url and registration_result.workspace_id:
+            transport.set_workspace_sync_context(
+                workspace_service_url=ws_url,
+                workspace_id=registration_result.workspace_id,
             )
+
+        # Sync workspace files from Workspace Service
+        if ws_url and registration_result.workspace_id and workspace_dir:
+            try:
+                await download_workspace(
+                    ws_url,
+                    registration_result.workspace_id,
+                    workspace_dir,
+                )
+            finally:
+                # Always mark complete — even on failure — so workspace.sync
+                # RPCs don't hang forever waiting on the gate.
+                transport.mark_startup_sync_complete()
+        else:
+            transport.mark_startup_sync_complete()
 
         # Initialize session from registration response (skip CreateSession RPC)
         await session_manager.init_from_registration(
