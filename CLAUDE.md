@@ -20,7 +20,7 @@ agent_host/     ← Local Agent Host (custom agent loop)
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
   thread/       — Message thread management, context compaction, token counting
   memory/       — Working memory: task tracker, plan, notes (injected per-turn)
-  skills/       — Skill definitions, loader (built-in/markdown/policy); execution via LoopRuntime
+  skills/       — Skill definitions, loader (built-in/user/workspace/policy); execution via LoopRuntime
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
   approval/     — Approval gate (asyncio Futures for user approval flow)
@@ -115,6 +115,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `SESSION_ID` — Pre-assigned session ID (sandbox mode only, triggers self-registration)
 - `REGISTRATION_TOKEN` — Token for sandbox self-registration (sandbox mode only)
 - `SANDBOX_LOCAL_MODE` — Skip ECS metadata, use localhost endpoint (sandbox local dev)
+- `SKILLS_DIR` — Override user skills directory (default: `~/.cowork/skills/`)
 
 ## Sandbox Mode
 
@@ -123,7 +124,8 @@ When `SESSION_ID` is set and `--transport http` is used, the agent runtime runs 
 1. **Self-registration**: Reads container IP from ECS metadata (or localhost in `SANDBOX_LOCAL_MODE`), calls `POST /sessions/{sessionId}/register` on Session Service
 2. **Workspace sync**: Downloads workspace files from Workspace Service to `--workspace-dir` before serving HTTP
 3. **Session initialization**: Initializes from registration response (policy bundle, workspace ID) — skips `CreateSession` RPC
-4. **Graceful shutdown**: On SIGTERM, uploads workspace files back to Workspace Service before exiting
+4. **Skills**: Loads from `{workspace}/.cowork/skills/` (project-level) in addition to built-in skills. No home directory needed. `SKILLS_DIR` env var overrides the user skills path.
+5. **Graceful shutdown**: On SIGTERM, uploads workspace files back to Workspace Service before exiting
 
 Stdio mode is completely unaffected by sandbox-related code.
 

@@ -75,6 +75,7 @@ class AgentHostConfig:
     session_id: str = ""  # Pre-assigned session ID (sandbox only)
     registration_token: str = ""  # Token for sandbox self-registration
     sandbox_local_mode: bool = False  # Skip ECS metadata, use localhost endpoint
+    skills_dir: str = ""  # Override user skills directory (default: ~/.cowork/skills/)
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -131,6 +132,7 @@ class AgentHostConfig:
             registration_token=os.environ.get("REGISTRATION_TOKEN", ""),
             sandbox_local_mode=os.environ.get("SANDBOX_LOCAL_MODE", "false").lower()
             in ("true", "1", "yes"),
+            skills_dir=os.environ.get("SKILLS_DIR", ""),
         )
 
 

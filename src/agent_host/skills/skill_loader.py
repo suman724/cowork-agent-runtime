@@ -1,10 +1,13 @@
 """SkillLoader — loads skills from built-in markdown and user SKILL.md directories.
 
-Sources (in priority order):
+Sources (in priority order — later sources override earlier on name collision):
 1. Built-in skills (embedded markdown strings, always available)
 2. User skills (~/.cowork/skills/<name>/SKILL.md, directory-based markdown)
+3. Workspace skills ({workspace}/.cowork/skills/<name>/SKILL.md, project-level)
+4. Policy bundle skills (Phase 3+, dict-based)
 
-Policy bundle skills are accepted but not yet wired (Phase 3+).
+In sandbox mode, user skills dir defaults to the workspace skills dir (no home
+directory available). The SKILLS_DIR env var can override the user skills path.
 
 Progressive disclosure:
 - Stage 1 (metadata): Parse frontmatter only from each SKILL.md (~100 tokens per skill)
@@ -254,21 +257,26 @@ def _collect_scripts(script_dirs: list[Path]) -> list[Path]:
 class SkillLoader:
     """Loads skill definitions from multiple sources with progressive disclosure.
 
-    Sources (in priority order):
+    Sources (in priority order — later sources override earlier on name collision):
     1. Built-in skills (embedded markdown, always available, prompt_content pre-populated)
     2. User skills (directory-based SKILL.md, prompt_content lazy-loaded)
-    3. Policy bundle skills (Phase 3+, dict-based)
+    3. Workspace skills (project-level .cowork/skills/ in workspace dir)
+    4. Policy bundle skills (Phase 3+, dict-based)
     """
 
     def __init__(
         self,
         user_skills_dir: str | None = None,
+        workspace_dir: str | None = None,
         policy_skills: list[dict[str, Any]] | None = None,
     ) -> None:
         if user_skills_dir is not None:
             self._user_skills_dir = Path(user_skills_dir)
         else:
             self._user_skills_dir = _default_user_skills_dir()
+        self._workspace_skills_dir: Path | None = None
+        if workspace_dir:
+            self._workspace_skills_dir = Path(workspace_dir) / ".cowork" / "skills"
         self._policy_skills = policy_skills or []
 
     def load_all(self) -> list[SkillDefinition]:
@@ -283,7 +291,11 @@ class SkillLoader:
         for skill in self._load_user_skills():
             skills[skill.name] = skill
 
-        # 3. Policy skills — Phase 3+ (override user if same name)
+        # 3. Workspace skills (override user if same name)
+        for skill in self._load_workspace_skills():
+            skills[skill.name] = skill
+
+        # 4. Policy skills — Phase 3+ (override workspace if same name)
         for skill in self._load_policy_skills():
             skills[skill.name] = skill
 
@@ -315,6 +327,30 @@ class SkillLoader:
                     skills.append(skill)
                     logger.info(
                         "user_skill_loaded",
+                        name=skill.name,
+                        path=str(skill_dir),
+                    )
+            except Exception:
+                logger.warning(
+                    "skill_load_failed",
+                    path=str(skill_dir),
+                    exc_info=True,
+                )
+        return skills
+
+    def _load_workspace_skills(self) -> list[SkillDefinition]:
+        """Load skills from workspace directory ({workspace}/.cowork/skills/)."""
+        if not self._workspace_skills_dir:
+            return []
+        skill_dirs = _discover_skill_dirs(self._workspace_skills_dir)
+        skills: list[SkillDefinition] = []
+        for skill_dir in skill_dirs:
+            try:
+                skill = _parse_skill_metadata(skill_dir)
+                if skill:
+                    skills.append(skill)
+                    logger.info(
+                        "workspace_skill_loaded",
                         name=skill.name,
                         path=str(skill_dir),
                     )

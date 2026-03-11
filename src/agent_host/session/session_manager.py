@@ -408,7 +408,10 @@ class SessionManager:
         )
 
         # Load skills
-        skill_loader = SkillLoader()
+        skill_loader = SkillLoader(
+            user_skills_dir=self._config.skills_dir or None,
+            workspace_dir=self._workspace_dir,
+        )
         self._skills = skill_loader.load_all()
         if self._skills:
             logger.info("skills_loaded", count=len(self._skills))
