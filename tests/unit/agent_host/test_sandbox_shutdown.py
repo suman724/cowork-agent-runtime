@@ -80,11 +80,11 @@ async def test_shutdown_uploads_before_session_shutdown() -> None:
 
     with (
         patch(
-            "agent_host.server.event_buffer.EventBuffer",
+            "agent_host.events.event_buffer.EventBuffer",
             return_value=MagicMock(),
         ),
         patch(
-            "agent_host.server.http_transport.HttpTransport",
+            "agent_host.transport.http_transport.HttpTransport",
             return_value=mock_transport,
         ),
         patch("agent_host.main.ToolRouter"),
@@ -156,11 +156,11 @@ async def test_shutdown_upload_failure_does_not_block() -> None:
 
     with (
         patch(
-            "agent_host.server.event_buffer.EventBuffer",
+            "agent_host.events.event_buffer.EventBuffer",
             return_value=MagicMock(),
         ),
         patch(
-            "agent_host.server.http_transport.HttpTransport",
+            "agent_host.transport.http_transport.HttpTransport",
             return_value=mock_transport,
         ),
         patch("agent_host.main.ToolRouter"),

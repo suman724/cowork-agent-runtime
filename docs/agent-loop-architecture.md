@@ -31,24 +31,31 @@ This document provides a detailed walkthrough of the `cowork-agent-runtime` impl
 
 ## 1. High-Level Architecture
 
-The agent runtime is split into two packages with a strict boundary:
+The agent runtime is split into three packages: `agent_sdk` (reusable building blocks, from `cowork-agent-sdk` repo), `agent_host` (cowork application layer), and `tool_runtime` (tool execution). `agent_host` and `tool_runtime` have a strict boundary — no cross-imports.
 
 ```
+cowork-agent-sdk/src/
+└── agent_sdk/           # Reusable agent building blocks (external pip dependency)
+    ├── loop/            # LoopContext protocol, LoopStrategy protocol, ReactLoop, error recovery, verification
+    ├── thread/          # MessageThread, context compaction, token counting
+    ├── memory/          # WorkingMemory, MemoryManager, persistent memory, plan, task tracker
+    ├── policy/          # PolicyEnforcer, matchers, risk assessor (pure, no I/O)
+    ├── llm/             # LLM Gateway streaming client (OpenAI SDK)
+    ├── budget/          # TokenBudget tracking
+    ├── approval/        # ApprovalGate (asyncio Futures)
+    ├── skills/          # SkillLoader, SkillDefinition
+    ├── checkpoint/      # CheckpointManager (crash recovery persistence)
+    └── tracking/        # FileChangeTracker (patch preview)
+
 cowork-agent-runtime/src/
-├── agent_host/          # Agent loop, session management, LLM client, policy, events
-│   ├── server/          # JSON-RPC 2.0 server (StdioTransport + HttpTransport), EventBuffer
-│   ├── session/         # Session/workspace HTTP clients, checkpoint manager
-│   ├── loop/            # LoopRuntime, LoopStrategy, ReactLoop, tool executor, agent tools, error recovery
-│   ├── llm/             # LLM Gateway streaming client (OpenAI SDK)
-│   ├── thread/          # Message thread, context compaction, token counting
-│   ├── memory/          # Working memory + persistent memory (project instructions, auto-memory)
-│   ├── skills/          # Skill definitions, loader (built-in/user/workspace/policy), executor
-│   ├── sandbox/         # Sandbox startup (self-registration), workspace file sync
-│   ├── policy/          # Policy enforcer, matchers, risk assessor
-│   ├── budget/          # Token budget tracking
-│   ├── approval/        # Approval gate (asyncio Futures)
-│   ├── events/          # Event emitter (JSON-RPC notifications + structlog)
-│   └── agent/           # File change tracker
+├── agent_host/          # Cowork application layer — session lifecycle, transport, events
+│   ├── transport/       # Transport protocol, StdioTransport, HttpTransport, JSON-RPC, MethodDispatcher
+│   ├── server/          # JSON-RPC method handlers (thin delegation to SessionManager)
+│   ├── session/         # Session/Workspace HTTP clients, SessionManager
+│   ├── loop/            # LoopRuntime (implements LoopContext), tool executor, agent tools, sub-agents
+│   ├── approval/        # ApprovalClient (HTTP to Approval Service)
+│   ├── events/          # EventEmitter, EventBuffer (SSE replay ring buffer)
+│   └── sandbox/         # Sandbox startup (self-registration), workspace file sync
 │
 └── tool_runtime/        # Tool execution (isolated from agent_host)
     ├── router/          # ToolRouter (registry, dispatch)
@@ -64,11 +71,11 @@ cowork-agent-runtime/src/
 
 ```mermaid
 graph TB
-    subgraph Desktop App
+    subgraph "Desktop App"
         UI[Electron/React UI]
     end
 
-    subgraph Agent Runtime Process
+    subgraph "Agent Runtime Process"
         subgraph agent_host
             Server[JSON-RPC Server<br/>stdio transport]
             SM[Session Manager]
@@ -94,13 +101,13 @@ graph TB
         end
     end
 
-    subgraph Backend Services
+    subgraph "Backend Services"
         SS[Session Service]
         WS[Workspace Service]
         PS[Policy Service]
     end
 
-    subgraph LLM Gateway
+    subgraph "LLM Gateway"
         GW[OpenAI-compatible endpoint]
     end
 
@@ -212,7 +219,7 @@ stateDiagram-v2
     NoSession --> Resuming: ResumeSession
     Resuming --> Ready: Policy refreshed + history restored
 
-    NoSession --> Registering: init_from_registration (sandbox)
+    NoSession --> Registering: init_from_registration, sandbox
     Registering --> Ready: Self-registration + workspace sync OK
 ```
 
@@ -278,7 +285,7 @@ LoopRuntime wires its `spawn_sub_agent` and `execute_skill` methods as callback 
 
 ### LoopStrategy Protocol
 
-**File:** `agent_host/loop/strategy.py`
+**File:** `agent_sdk/loop/strategy.py`
 
 A single-method protocol that all loop strategies implement:
 
@@ -291,7 +298,7 @@ Strategies compose `LoopRuntime` primitives to implement different orchestration
 
 ### ReactLoop — Default Strategy
 
-**File:** `agent_host/loop/react_loop.py`
+**File:** `agent_sdk/loop/react_loop.py`
 
 The default strategy, extracted from the original monolithic `AgentLoop`. Implements a linear ReAct loop that alternates between LLM calls and tool execution.
 
@@ -508,7 +515,7 @@ sequenceDiagram
 
 ## 6. Policy Enforcement
 
-**File:** `agent_host/policy/policy_enforcer.py`
+**File:** `agent_sdk/policy/policy_enforcer.py`
 
 The `PolicyEnforcer` is **stateless and pure** — no I/O, no side effects. It receives a `PolicyBundle` at init and validates tool calls against it.
 
@@ -551,7 +558,7 @@ The `check_llm_call()` method verifies the `LLM.Call` capability is granted and 
 
 ### Risk Assessment
 
-**File:** `agent_host/policy/risk_assessor.py`
+**File:** `agent_sdk/policy/risk_assessor.py`
 
 When a capability has `requiresApproval: true`, the `assess_risk()` function determines the risk level sent with the approval request:
 
@@ -572,7 +579,7 @@ When a capability has `requiresApproval: true`, the `assess_risk()` function det
 
 ## 7. Approval Gate
 
-**File:** `agent_host/approval/approval_gate.py`
+**File:** `agent_sdk/approval/approval_gate.py`
 
 When a tool call requires user approval, the system uses asyncio Futures to block execution until the user decides.
 
@@ -618,7 +625,7 @@ Key points:
 
 ## 8. Working Memory
 
-**File:** `agent_host/memory/working_memory.py`
+**File:** `agent_sdk/memory/working_memory.py`
 
 Working memory is **structured agent state** injected into every LLM call after the system prompt. It prevents goal drift during long multi-step tasks.
 
@@ -676,7 +683,7 @@ Agent-internal tools manipulate working memory, spawn sub-agents, and invoke ski
 
 ```mermaid
 graph LR
-    LLM[LLM response] -->|tool_calls| Route{Agent tool<br/>or Skill_*?}
+    LLM[LLM response] -->|tool_calls| Route{"Agent tool<br/>or Skill_*?"}
     Route -->|Yes| ATH[AgentToolHandler<br/>No policy check<br/>No ToolRouter]
     Route -->|No| TE[ToolExecutor<br/>Policy + Approval + ToolRouter]
 
@@ -771,9 +778,9 @@ flowchart TB
     LR --> Sub2[Child LoopRuntime + ReactLoop<br/>max_steps=10]
     LR --> SubN[Child LoopRuntime + ReactLoop<br/>max_steps=10]
 
-    Sub1 --> Result1[Result<br/>≤ 2000 chars]
-    Sub2 --> Result2[Result<br/>≤ 2000 chars]
-    SubN --> ResultN[Result<br/>≤ 2000 chars]
+    Sub1 --> Result1["Result<br/>&#8804; 2000 chars"]
+    Sub2 --> Result2["Result<br/>&#8804; 2000 chars"]
+    SubN --> ResultN["Result<br/>&#8804; 2000 chars"]
 
     Result1 --> Parent
     Result2 --> Parent
@@ -818,13 +825,13 @@ flowchart TB
 
 ## 11. Skills
 
-**Files:** `agent_host/skills/models.py`, `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py` (constants only), `agent_host/loop/loop_runtime.py` (`execute_skill()`)
+**Files:** `agent_sdk/skills/models.py`, `agent_sdk/skills/skill_loader.py`, `agent_host/loop/loop_runtime.py` (`execute_skill()`)
 
 Skills are **formalized multi-step workflows** — reusable sub-conversations with custom system prompts and optional tool restrictions. Skills use **directory-based Markdown format** with progressive disclosure.
 
 ```mermaid
 graph TD
-    subgraph Skill Sources
+    subgraph "Skill Sources"
         Builtin[Built-in Skills<br/>Embedded Markdown]
         User[User Skills<br/>~/.cowork/skills/name/SKILL.md]
         Workspace[Workspace Skills<br/>workspace/.cowork/skills/name/SKILL.md]
@@ -832,8 +839,8 @@ graph TD
     end
 
     subgraph SkillLoader
-        Stage1[Stage 1: Metadata<br/>Parse frontmatter only]
-        Stage2[Stage 2: Full Content<br/>Load body + supporting .md files]
+        Stage1["Stage 1: Metadata<br/>Parse frontmatter only"]
+        Stage2["Stage 2: Full Content<br/>Load body + supporting .md files"]
         Builtin -->|priority 1| Stage1
         User -->|priority 2, overrides| Stage1
         Workspace -->|priority 3, overrides| Stage1
@@ -848,7 +855,7 @@ graph TD
         Exec -->|$ARGUMENTS substitution| Prompt[Build system prompt]
         Prompt --> Thread[Fresh MessageThread]
         Thread --> Loop[Child LoopRuntime + ReactLoop<br/>skill-specific max_steps]
-        Loop --> Result[Result ≤ 4000 chars]
+        Loop --> Result["Result &#8804; 4000 chars"]
     end
 ```
 
@@ -962,7 +969,7 @@ Skills run as focused sub-conversations via `LoopRuntime.execute_skill()`, simil
 
 ## 12. LLM Client
 
-**File:** `agent_host/llm/client.py`
+**File:** `agent_sdk/llm/client.py`
 
 The `LLMClient` wraps the OpenAI SDK to stream chat completions from an OpenAI-compatible LLM Gateway.
 
@@ -995,7 +1002,7 @@ sequenceDiagram
         else Transient error
             LLM->>LLM: Classify error
             LLM->>LLM: sleep(backoff + jitter)
-            Note over LLM: Retry with exponential backoff<br/>base=1s, max=30s, jitter=25%
+            Note over LLM: Retry with exponential backoff<br/>base=1s, max=30s, jitter=25 percent
         end
     end
 ```
@@ -1011,7 +1018,7 @@ sequenceDiagram
 
 ### Error Classification
 
-**File:** `agent_host/llm/error_classifier.py`
+**File:** `agent_sdk/llm/error_classifier.py`
 
 - **Transient (retried):** Connection errors (`httpx.ConnectError`, `httpx.ReadError`), timeouts, rate limits (429), server errors (502, 503, 504), and SDK exceptions (`RateLimitError`, `ServiceUnavailableError`, `APIConnectionError`, `APITimeoutError`)
 - **Permanent (not retried):** `LLMBudgetExceededError`, `LLMGuardrailBlockedError`, `PolicyExpiredError`, auth errors, invalid requests
@@ -1038,7 +1045,7 @@ When the API doesn't return usage data (e.g., Anthropic's OpenAI-compatible endp
 
 ### MessageThread
 
-**File:** `agent_host/thread/message_thread.py`
+**File:** `agent_sdk/thread/message_thread.py`
 
 Stores the conversation in OpenAI chat completion format:
 
@@ -1046,12 +1053,12 @@ Stores the conversation in OpenAI chat completion format:
 graph LR
     subgraph MessageThread
         SP[System Prompt]
-        U1[User: "Fix the login bug"]
-        A1[Assistant: "I'll check the auth module..."<br/>tool_calls: ReadFile]
-        T1[Tool: ReadFile result]
-        A2[Assistant: "Found the issue..."<br/>tool_calls: WriteFile]
-        T2[Tool: WriteFile result]
-        A3[Assistant: "Done! The bug was in..."]
+        U1["User: Fix the login bug"]
+        A1["Assistant: I'll check the auth module...<br/>tool_calls: ReadFile"]
+        T1["Tool: ReadFile result"]
+        A2["Assistant: Found the issue...<br/>tool_calls: WriteFile"]
+        T2["Tool: WriteFile result"]
+        A3["Assistant: Done! The bug was in..."]
     end
 
     SP --> U1 --> A1 --> T1 --> A2 --> T2 --> A3
@@ -1065,7 +1072,7 @@ Messages are stored as dicts matching OpenAI's format:
 
 ### Context Compaction
 
-**File:** `agent_host/thread/compactor.py`
+**File:** `agent_sdk/thread/compactor.py`
 
 When the conversation exceeds 90% of `max_context_tokens`, the `DropOldestCompactor` trims it:
 
@@ -1110,7 +1117,7 @@ graph LR
 
 ## 14. Error Recovery
 
-**File:** `agent_host/loop/error_recovery.py`
+**File:** `agent_sdk/loop/error_recovery.py`
 
 Detects when the agent is stuck and injects prompts to help it recover.
 
@@ -1122,11 +1129,11 @@ stateDiagram-v2
     ConsecutiveFailures --> ConsecutiveFailures: Another failure
     ConsecutiveFailures --> Normal: Tool success (reset)
 
-    ConsecutiveFailures --> ReflectionInjected: failures >= 3
-    Note right of ReflectionInjected: Injects reflection prompt:<br/>"Stop and think about<br/>what went wrong"
+    ConsecutiveFailures --> ReflectionInjected: failures at least 3
+    Note right of ReflectionInjected: Injects reflection prompt
 
-    Normal --> LoopDetected: Same tool+args >= 3 times
-    Note right of LoopDetected: Injects loop-break prompt:<br/>"You MUST try a<br/>different approach"
+    Normal --> LoopDetected: Same tool and args at least 3 times
+    Note right of LoopDetected: Injects loop-break prompt
 ```
 
 ### Two Mechanisms
@@ -1182,11 +1189,11 @@ Events are emitted through two channels simultaneously:
 ```mermaid
 graph LR
     EE[EventEmitter] -->|structlog| Stderr[stderr<br/>structured JSON logs]
-    EE -->|JSON-RPC notification| Stdout[stdout<br/>→ Desktop App]
+    EE -->|JSON-RPC notification| Stdout["stdout<br/>to Desktop App"]
 
-    subgraph Event Envelope
+    subgraph "Event Envelope"
         ET[event_type]
-        Comp[component: LOCAL_AGENT_HOST]
+        Comp["component: LOCAL_AGENT_HOST"]
         IDs[tenant_id, user_id,<br/>session_id, workspace_id]
         TID[task_id]
         Sev[severity]
@@ -1219,18 +1226,18 @@ All emission is **fire-and-forget** — errors are logged but never propagated.
 
 ## 16. Token Budget
 
-**File:** `agent_host/budget/token_budget.py`
+**File:** `agent_sdk/budget/token_budget.py`
 
 Session-level cumulative token tracking against a budget from the policy bundle.
 
 ```mermaid
 graph LR
-    subgraph Each Step
+    subgraph "Each Step"
         PreCheck[pre_check<br/>budget exhausted?] -->|OK| LLMCall[LLM Call]
         LLMCall --> Record[record_usage<br/>input + output tokens]
     end
 
-    subgraph TokenBudget State
+    subgraph "TokenBudget State"
         Input[input_tokens_used]
         Output[output_tokens_used]
         Max[max_session_tokens<br/>from policyBundle.llmPolicy]
@@ -1254,7 +1261,7 @@ graph LR
 
 ## 17. Crash Recovery (Checkpoints)
 
-**Files:** `agent_host/session/checkpoint_manager.py`, `agent_host/loop/loop_runtime.py`, `agent_host/session/session_manager.py`
+**Files:** `agent_sdk/checkpoint/checkpoint_manager.py`, `agent_host/loop/loop_runtime.py`, `agent_host/session/session_manager.py`
 
 Atomic JSON file checkpoints enable crash recovery. Checkpoints are written **after each completed step** (not just at task end), and periodic workspace syncs provide machine-level durability.
 
@@ -1274,8 +1281,8 @@ sequenceDiagram
         LR->>SM: checkpoint callback(task_id, step)
         SM->>CM: save(checkpoint with active task state)
         CM->>FS: Write to tempfile
-        CM->>FS: os.replace → atomic swap
-        Note over FS: cowork_{session_id}.json
+        CM->>FS: os.replace atomic swap
+        Note over FS: cowork_session_id.json
 
         alt Every N steps (workspace_sync_interval)
             SM->>WS: upload_session_history (best-effort)
@@ -1284,7 +1291,7 @@ sequenceDiagram
     end
 
     RL->>SM: Task completes (finally block)
-    SM->>CM: save(checkpoint with active_task_id=None)
+    SM->>CM: save checkpoint with active_task_id=None
 
     Note over SM: On next session creation...
     SM->>CM: load(session_id)
@@ -1295,10 +1302,10 @@ sequenceDiagram
         SM->>SM: Restore message thread
         SM->>SM: Restore working memory
         SM->>SM: Restore session messages
-        SM->>SM: Detect incomplete task (if active_task_id set)
-    else No checkpoint (corrupt/missing)
-        SM->>WS: get_session_history (fallback)
-        WS-->>SM: ConversationMessages (best-effort)
+        SM->>SM: Detect incomplete task if active_task_id set
+    else No checkpoint, corrupt or missing
+        SM->>WS: get_session_history fallback
+        WS-->>SM: ConversationMessages best-effort
     end
 
     Note over SM: On clean shutdown...
@@ -1440,17 +1447,17 @@ sequenceDiagram
     participant PE as PythonExecutor
     participant Proc as Python Subprocess
 
-    LLM->>AL: tool_call: ExecuteCode({code, description})
+    LLM->>AL: tool_call ExecuteCode with code, description
     AL->>TE: execute_tool_calls([call])
     TE->>TE: Policy check (Code.Execute capability)
     TE->>TE: Approval gate (if required)
     TE->>TR: execute(ToolRequest, ExecutionContext)
     TR->>ECT: execute(arguments, context)
 
-    ECT->>PE: execute(code, working_directory, timeout)
-    PE->>PE: Create temp dir /tmp/cowork-code-{uuid}/
+    ECT->>PE: execute code, working_directory, timeout
+    PE->>PE: Create temp dir /tmp/cowork-code-uuid/
     PE->>PE: Write preamble + code → script.py
-    PE->>Proc: spawn python3 script.py<br/>env: MPLBACKEND=Agg, COWORK_OUTPUT_DIR
+    PE->>Proc: spawn python3 script.py with MPLBACKEND=Agg
     Proc->>Proc: Execute script (preamble hooks plt.show)
 
     alt Success
@@ -1458,8 +1465,8 @@ sequenceDiagram
     else Error
         Proc-->>PE: stderr with traceback + exit_code=1
     else Timeout
-        PE->>Proc: SIGTERM → 5s → SIGKILL (process group)
-        PE-->>ECT: CodeExecutionResult(timed_out=True)
+        PE->>Proc: SIGTERM then 5s then SIGKILL process group
+        PE-->>ECT: CodeExecutionResult timed_out=True
     end
 
     PE->>PE: Collect images from output dir
@@ -1470,7 +1477,7 @@ sequenceDiagram
     ECT->>ECT: Attach first image as ImageContent
     ECT-->>TR: RawToolOutput
     TR-->>TE: ToolExecutionResult
-    TE-->>AL: ToolCallResult (with image_url if present)
+    TE-->>AL: ToolCallResult with image_url if present
 ```
 
 ### PythonExecutor
@@ -1560,12 +1567,12 @@ The persistent memory system provides cross-session knowledge that survives betw
 
 ```mermaid
 graph TD
-    subgraph "Tier 1: Project Instructions (Human-Written)"
+    subgraph "Tier 1 - Project Instructions"
         CW[COWORK.md<br/>Team-shared, version-controlled]
         CWL[COWORK.local.md<br/>Personal, gitignored]
     end
 
-    subgraph "Tier 2: Auto Memory (AI-Written)"
+    subgraph "Tier 2 - Auto Memory"
         MEM[MEMORY.md<br/>Concise index, 200 lines max]
         TF1[debugging.md]
         TF2[patterns.md]
@@ -1641,12 +1648,12 @@ sequenceDiagram
 
     SM->>MM: MemoryManager(workspace_dir)
     SM->>MM: load_all()
-    MM->>PIL: load(workspace_dir)
+    MM->>PIL: load workspace_dir
     PIL->>PIL: Walk directory tree
     PIL-->>MM: Concatenated COWORK.md content
-    MM->>PM: load_index(max_lines=200)
-    PM-->>MM: MEMORY.md content (≤200 lines)
-    SM->>SPB: build_static_prompt(project_instructions=..., has_persistent_memory=True)
+    MM->>PM: load_index max_lines=200
+    PM-->>MM: MEMORY.md content, max 200 lines
+    SM->>SPB: build_static_prompt with project_instructions, has_persistent_memory=True
     SPB-->>SM: System prompt with instructions + memory guidance
 ```
 
@@ -1656,8 +1663,12 @@ sequenceDiagram
 
 ```mermaid
 graph TD
+    subgraph agent_sdk
+        SDK["Agent SDK modules<br/>loop, thread, memory, policy, llm, budget, etc."]
+    end
+
     subgraph agent_host
-        AH[Agent Host modules]
+        AH["Agent Host modules<br/>transport, server, session, loop, events, sandbox"]
     end
 
     subgraph tool_runtime
@@ -1668,20 +1679,28 @@ graph TD
         CP[Contracts + SDK]
     end
 
+    SDK -->|imports| CP
+    AH -->|imports| SDK
     AH -->|imports| CP
     TRT -->|imports| CP
     AH -->|ToolRouter interface only| TRT
     TRT -.->|NEVER imports| AH
+    SDK -.->|NEVER imports| AH
+    SDK -.->|NEVER imports| TRT
 
+    style SDK fill:#f3e5f5
     style AH fill:#e8f5e9
     style TRT fill:#e3f2fd
     style CP fill:#fff3e0
 ```
 
+**Dependency chain:** `cowork-platform` <- `cowork-agent-sdk` <- `cowork-agent-runtime`
+
 **Strict rules:**
+- `agent_sdk` must **NOT** import `agent_host` or `tool_runtime` (enforced by repo separation)
 - `agent_host/` and `tool_runtime/` must **NOT** cross-import
-- The only interface between them is: `ToolRouter`, `ExecutionContext`, `ToolExecutionResult`
-- Both packages depend on `cowork-platform` for shared contracts (ToolRequest, ToolResult, ToolDefinition, PolicyBundle, etc.)
+- The only interface between `agent_host` and `tool_runtime` is: `ToolRouter`, `ExecutionContext`, `ToolExecutionResult`
+- All three packages depend on `cowork-platform` for shared contracts
 
 ---
 

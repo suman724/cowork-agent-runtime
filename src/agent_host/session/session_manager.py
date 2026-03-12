@@ -9,6 +9,27 @@ import platform
 from typing import TYPE_CHECKING, Any
 
 import structlog
+from agent_sdk.approval.approval_gate import ApprovalGate
+from agent_sdk.budget.token_budget import TokenBudget
+from agent_sdk.checkpoint.checkpoint_manager import CheckpointManager, SessionCheckpoint
+from agent_sdk.exceptions import (
+    CheckpointError,
+    NoActiveTaskError,
+    PolicyExpiredError,
+    SessionNotFoundError,
+)
+from agent_sdk.llm.client import LLMClient
+from agent_sdk.loop.react_loop import ReactLoop
+from agent_sdk.loop.system_prompt import SystemPromptBuilder
+from agent_sdk.loop.verification import VerificationConfig
+from agent_sdk.memory.memory_manager import MemoryManager
+from agent_sdk.memory.working_memory import WorkingMemory
+from agent_sdk.models import SessionContext
+from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.skills.skill_loader import SkillLoader
+from agent_sdk.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
+from agent_sdk.thread.message_thread import MessageThread
+from agent_sdk.tracking.file_change_tracker import FileChangeTracker
 from cowork_platform.conversation_message import ConversationMessage
 from cowork_platform.policy_bundle import PolicyBundle
 from cowork_platform.session_cancel_request import SessionCancelRequest
@@ -20,41 +41,21 @@ from cowork_platform.session_create_request import (
 from cowork_platform.session_create_response import SessionCreateResponse  # noqa: TC002
 from cowork_platform_sdk import CapabilityName
 
-from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.approval.approval_client import ApprovalClient
-from agent_host.approval.approval_gate import ApprovalGate
-from agent_host.budget.token_budget import TokenBudget
-from agent_host.exceptions import (
-    CheckpointError,
-    NoActiveTaskError,
-    PolicyExpiredError,
-    SessionNotFoundError,
-)
-from agent_host.llm.client import LLMClient
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.loop_runtime import LoopRuntime
-from agent_host.loop.react_loop import ReactLoop
-from agent_host.loop.system_prompt import SystemPromptBuilder
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
-from agent_host.loop.verification import VerificationConfig
-from agent_host.memory.memory_manager import MemoryManager
-from agent_host.memory.working_memory import WorkingMemory
-from agent_host.models import SessionContext
-from agent_host.policy.policy_enforcer import PolicyEnforcer
-from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
-from agent_host.skills.skill_loader import SkillLoader
-from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
-from agent_host.thread.message_thread import MessageThread
 from tool_runtime.models import ExecutionContext
 
 if TYPE_CHECKING:
+    from agent_sdk.skills.models import SkillDefinition
+
     from agent_host.config import AgentHostConfig
+    from agent_host.events.event_buffer import EventBuffer
     from agent_host.events.event_emitter import EventEmitter
-    from agent_host.server.event_buffer import EventBuffer
-    from agent_host.server.transport import Transport
-    from agent_host.skills.models import SkillDefinition
+    from agent_host.transport.transport import Transport
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -425,7 +426,7 @@ class SessionManager:
         concern — we enrich the bundle here so that the agent can read/write files
         inside the user's workspace without the backend needing to know local paths.
         """
-        from agent_host.policy.path_matcher import resolve_path
+        from agent_sdk.policy.path_matcher import resolve_path
 
         resolved_ws = resolve_path(workspace_dir)
         path_capabilities = {"File.Read", "File.Write", "File.Delete"}
@@ -690,7 +691,7 @@ class SessionManager:
                 # Classify LLM errors for structured event payload.
                 # Always classify — covers raw transient errors, wrapped
                 # LLMGatewayError (retry-exhausted), and unknown errors.
-                from agent_host.llm.error_classifier import classify_llm_error
+                from agent_sdk.llm.error_classifier import classify_llm_error
 
                 error_info = classify_llm_error(exc)
                 logger.exception(

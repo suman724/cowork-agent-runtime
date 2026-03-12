@@ -8,26 +8,26 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
-
-from agent_host.loop.error_recovery import ErrorRecovery
+from agent_sdk.loop.error_recovery import ErrorRecovery
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agent_host.budget.token_budget import TokenBudget
+    from agent_sdk.budget.token_budget import TokenBudget
+    from agent_sdk.llm.client import LLMClient
+    from agent_sdk.llm.models import LLMResponse, ToolCallMessage
+    from agent_sdk.loop.models import ToolCallResult
+    from agent_sdk.loop.strategy import LoopStrategy
+    from agent_sdk.memory.memory_manager import MemoryManager
+    from agent_sdk.memory.working_memory import WorkingMemory
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.skills.models import SkillDefinition
+    from agent_sdk.thread.compactor import ContextCompactor
+    from agent_sdk.thread.message_thread import MessageThread
+
     from agent_host.events.event_emitter import EventEmitter
-    from agent_host.llm.client import LLMClient
-    from agent_host.llm.models import LLMResponse, ToolCallMessage
     from agent_host.loop.agent_tools import AgentToolHandler
-    from agent_host.loop.models import ToolCallResult
-    from agent_host.loop.strategy import LoopStrategy
     from agent_host.loop.tool_executor import ToolExecutor
-    from agent_host.memory.memory_manager import MemoryManager
-    from agent_host.memory.working_memory import WorkingMemory
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
-    from agent_host.skills.models import SkillDefinition
-    from agent_host.thread.compactor import ContextCompactor
-    from agent_host.thread.message_thread import MessageThread
 
 logger = structlog.get_logger()
 
@@ -314,8 +314,8 @@ class LoopRuntime:
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None,
     ) -> dict[str, Any]:
         """Run a sub-agent with isolated context."""
-        from agent_host.thread.compactor import DropOldestCompactor
-        from agent_host.thread.message_thread import MessageThread
+        from agent_sdk.thread.compactor import DropOldestCompactor
+        from agent_sdk.thread.message_thread import MessageThread
 
         sub_task_id = f"{parent_task_id}-sub"
 
@@ -358,7 +358,7 @@ class LoopRuntime:
                 strategy = factory(child_harness)
             else:
                 # Late import to avoid circular dependency
-                from agent_host.loop.react_loop import ReactLoop
+                from agent_sdk.loop.react_loop import ReactLoop
 
                 strategy = ReactLoop(child_harness, max_steps=max_steps)
 
@@ -406,9 +406,9 @@ class LoopRuntime:
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None = None,
     ) -> dict[str, Any]:
         """Execute a skill as a focused sub-conversation."""
-        from agent_host.skills.skill_loader import SkillLoader, substitute_arguments
-        from agent_host.thread.compactor import DropOldestCompactor
-        from agent_host.thread.message_thread import MessageThread
+        from agent_sdk.skills.skill_loader import SkillLoader, substitute_arguments
+        from agent_sdk.thread.compactor import DropOldestCompactor
+        from agent_sdk.thread.message_thread import MessageThread
 
         task_id = f"{parent_task_id}-skill-{skill.name}"
 
@@ -458,7 +458,7 @@ class LoopRuntime:
             if factory:
                 strategy = factory(child_harness)
             else:
-                from agent_host.loop.react_loop import ReactLoop
+                from agent_sdk.loop.react_loop import ReactLoop
 
                 strategy = ReactLoop(child_harness, max_steps=skill.max_steps)
 
@@ -539,6 +539,11 @@ class LoopRuntime:
     def max_context_tokens(self) -> int:
         """Maximum context window size."""
         return self._max_context_tokens
+
+    @property
+    def has_event_emitter(self) -> bool:
+        """Whether an event emitter is configured."""
+        return self._event_emitter is not None
 
     @property
     def policy_enforcer(self) -> PolicyEnforcer:

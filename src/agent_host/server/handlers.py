@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from agent_host.server.method_dispatcher import MethodDispatcher
     from agent_host.session.session_manager import SessionManager
+    from agent_host.transport.method_dispatcher import MethodDispatcher
 
 
 class Handlers:

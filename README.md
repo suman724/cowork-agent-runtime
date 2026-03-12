@@ -186,18 +186,27 @@ Custom agent loop with production-grade harness:
 
 | Module | Purpose |
 |--------|---------|
-| `server/` | Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay) |
-| `loop/` | Core agent loop, tool executor, agent-internal tools, error recovery, sub-agents |
-| `llm/` | LLM Gateway streaming client (openai SDK), response models, error classifier |
-| `thread/` | Message thread management, context compaction, token counting |
-| `memory/` | Working memory: task tracker, plan, notes (injected per-turn) |
-| `skills/` | Skill definitions, loader (built-in/user/workspace/policy), executor |
-| `session/` | Session/Workspace HTTP clients, checkpoint manager, SessionManager |
-| `policy/` | Policy enforcer, path/command/domain matchers, risk assessor |
-| `budget/` | Session token budget tracking |
-| `approval/` | Approval gate (asyncio Futures for user approval flow) |
-| `events/` | Event emitter (JSON-RPC notifications + structlog) |
+| `transport/` | Transport protocol, StdioTransport, HttpTransport, JSON-RPC 2.0, MethodDispatcher |
+| `server/` | JSON-RPC method handlers (thin delegation to SessionManager) |
+| `loop/` | LoopRuntime (implements LoopContext), tool executor, agent-internal tools, sub-agents |
+| `session/` | Session/Workspace HTTP clients, SessionManager |
+| `approval/` | ApprovalClient (HTTP to Approval Service) |
+| `events/` | EventEmitter, EventBuffer (SSE replay ring buffer) |
 | `sandbox/` | Sandbox mode: self-registration (startup.py), workspace file sync (workspace_sync.py) |
+
+Reusable agent primitives live in `cowork-agent-sdk` (external dependency):
+
+| SDK Module | Purpose |
+|------------|---------|
+| `agent_sdk/loop/` | LoopContext protocol, LoopStrategy protocol, ReactLoop, error recovery, verification |
+| `agent_sdk/thread/` | MessageThread, context compaction, token counting |
+| `agent_sdk/memory/` | WorkingMemory, MemoryManager, persistent memory, plan, task tracker |
+| `agent_sdk/policy/` | PolicyEnforcer (pure capability validation) |
+| `agent_sdk/llm/` | LLM Gateway streaming client, response models, error classifier |
+| `agent_sdk/budget/` | TokenBudget tracking |
+| `agent_sdk/skills/` | SkillLoader, SkillDefinition |
+| `agent_sdk/checkpoint/` | CheckpointManager (crash recovery) |
+| `agent_sdk/tracking/` | FileChangeTracker (patch preview) |
 
 ### tool_runtime/
 

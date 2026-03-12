@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from agent_sdk.memory.working_memory import WorkingMemory
+
 from agent_host.loop.agent_tools import AgentToolHandler
-from agent_host.memory.working_memory import WorkingMemory
 
 
 class TestAgentToolHandlerRouting:

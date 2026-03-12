@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_host.budget.token_budget import TokenBudget
-from agent_host.llm.models import LLMResponse
+from agent_sdk.budget.token_budget import TokenBudget
+from agent_sdk.llm.models import LLMResponse
+from agent_sdk.loop.models import ToolCallResult
+from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.skills.models import SkillDefinition
+
 from agent_host.loop.loop_runtime import LoopRuntime
-from agent_host.loop.models import ToolCallResult
-from agent_host.policy.policy_enforcer import PolicyEnforcer
-from agent_host.skills.models import SkillDefinition
 from tests.fixtures.mock_llm import MockLLMClient
 from tests.fixtures.policy_bundles import make_policy_bundle
 
@@ -46,8 +47,8 @@ def _make_loop_runtime(
         mock_llm = MockLLMClient()
         mock_llm.enqueue_text("Skill completed successfully.")
 
-    from agent_host.thread.compactor import DropOldestCompactor
-    from agent_host.thread.message_thread import MessageThread
+    from agent_sdk.thread.compactor import DropOldestCompactor
+    from agent_sdk.thread.message_thread import MessageThread
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)

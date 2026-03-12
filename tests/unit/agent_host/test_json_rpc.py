@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from agent_host.server.json_rpc import (
+from agent_host.transport.json_rpc import (
     INVALID_PARAMS,
     INVALID_REQUEST,
     PARSE_ERROR,

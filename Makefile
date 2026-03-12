@@ -4,7 +4,7 @@ help: ## Show available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
 install: ## Install all dependencies
-	pip install -e ".[dev]" -e "../cowork-platform[sdk]"
+	pip install -e "../cowork-platform[sdk]" -e "../cowork-agent-sdk" -e ".[dev]"
 
 run: ## Run the agent-runtime in stdio mode (sources .env)
 	set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main

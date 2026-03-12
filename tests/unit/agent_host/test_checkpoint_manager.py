@@ -6,8 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-
-from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
+from agent_sdk.checkpoint.checkpoint_manager import CheckpointManager, SessionCheckpoint
 
 
 @pytest.fixture
@@ -116,8 +115,8 @@ class TestCheckpointManagerThread:
 class TestCheckpointManagerThreadRoundTrip:
     def test_thread_restored_matches_original(self, manager: CheckpointManager) -> None:
         """Thread data should survive checkpoint round-trip exactly."""
-        from agent_host.llm.models import ToolCallMessage
-        from agent_host.thread.message_thread import MessageThread
+        from agent_sdk.llm.models import ToolCallMessage
+        from agent_sdk.thread.message_thread import MessageThread
 
         # Build a realistic thread
         thread = MessageThread(system_prompt="You are helpful.")

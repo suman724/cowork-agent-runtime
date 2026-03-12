@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from agent_sdk.memory.memory_manager import MemoryManager
+from agent_sdk.memory.working_memory import WorkingMemory
+
 from agent_host.loop.agent_tools import AgentToolHandler
-from agent_host.memory.memory_manager import MemoryManager
-from agent_host.memory.working_memory import WorkingMemory
 
 
 class TestMemoryToolsRouting:

@@ -20,8 +20,7 @@ from pathlib import Path
 
 import httpx
 import structlog
-
-from agent_host.exceptions import WorkspaceSyncError
+from agent_sdk.exceptions import WorkspaceSyncError
 
 logger = structlog.get_logger()
 

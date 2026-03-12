@@ -6,7 +6,7 @@ from collections import deque
 from collections.abc import Callable
 from typing import Any
 
-from agent_host.llm.models import LLMResponse, ToolCallMessage
+from agent_sdk.llm.models import LLMResponse, ToolCallMessage
 
 
 class MockLLMClient:

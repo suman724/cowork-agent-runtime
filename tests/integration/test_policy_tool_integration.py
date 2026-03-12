@@ -7,13 +7,13 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from agent_sdk.approval.approval_gate import ApprovalGate
+from agent_sdk.llm.models import ToolCallMessage
+from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 from cowork_platform.tool_definition import ToolDefinition
 from cowork_platform.tool_result import ToolResult
 
-from agent_host.approval.approval_gate import ApprovalGate
-from agent_host.llm.models import ToolCallMessage
 from agent_host.loop.tool_executor import ToolExecutor
-from agent_host.policy.policy_enforcer import PolicyEnforcer
 from tests.fixtures.policy_bundles import make_policy_bundle, make_restrictive_bundle
 from tool_runtime.models import ToolExecutionResult
 

@@ -7,7 +7,7 @@ from io import StringIO
 
 import pytest
 
-from agent_host.server.stdio_transport import StdioTransport
+from agent_host.transport.stdio_transport import StdioTransport
 
 
 class TestStdioTransport:

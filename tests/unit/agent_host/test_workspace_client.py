@@ -46,7 +46,7 @@ class TestWorkspaceClient:
     @pytest.mark.asyncio
     async def test_upload_artifact_invalid_json(self) -> None:
         """Raises AgentHostError on malformed JSON response from artifact upload."""
-        from agent_host.exceptions import AgentHostError
+        from agent_sdk.exceptions import AgentHostError
 
         mock_response = httpx.Response(
             200,

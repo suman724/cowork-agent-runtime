@@ -28,8 +28,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from agent_host.server.event_buffer import EventBuffer
-from agent_host.server.json_rpc import (
+from agent_host.events.event_buffer import EventBuffer
+from agent_host.transport.json_rpc import (
     JsonRpcError,
     JsonRpcResponse,
     parse_request,
@@ -405,7 +405,8 @@ class HttpTransport:
             failed: list of paths that failed
             direction: echo of the requested direction
         """
-        from agent_host.exceptions import WorkspaceSyncError
+        from agent_sdk.exceptions import WorkspaceSyncError
+
         from agent_host.sandbox.workspace_sync import (
             download_files,
             download_workspace,
