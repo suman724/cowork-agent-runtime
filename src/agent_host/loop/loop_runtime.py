@@ -358,7 +358,7 @@ class LoopRuntime:
                 strategy = factory(child_harness)
             else:
                 # Late import to avoid circular dependency
-                from agent_host.loop.react_loop import ReactLoop
+                from agent_sdk.loop.react_loop import ReactLoop
 
                 strategy = ReactLoop(child_harness, max_steps=max_steps)
 
@@ -459,7 +459,7 @@ class LoopRuntime:
             if factory:
                 strategy = factory(child_harness)
             else:
-                from agent_host.loop.react_loop import ReactLoop
+                from agent_sdk.loop.react_loop import ReactLoop
 
                 strategy = ReactLoop(child_harness, max_steps=skill.max_steps)
 
