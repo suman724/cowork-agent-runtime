@@ -9,9 +9,9 @@ from agent_sdk.budget.token_budget import TokenBudget
 from agent_sdk.llm.models import LLMResponse
 from agent_sdk.loop.models import ToolCallResult
 from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.skills.models import SkillDefinition
 
 from agent_host.loop.loop_runtime import LoopRuntime
-from agent_host.skills.models import SkillDefinition
 from tests.fixtures.mock_llm import MockLLMClient
 from tests.fixtures.policy_bundles import make_policy_bundle
 

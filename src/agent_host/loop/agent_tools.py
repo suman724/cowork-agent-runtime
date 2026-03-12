@@ -9,8 +9,7 @@ if TYPE_CHECKING:
 
     from agent_sdk.memory.memory_manager import MemoryManager
     from agent_sdk.memory.working_memory import WorkingMemory
-
-    from agent_host.skills.models import SkillDefinition
+    from agent_sdk.skills.models import SkillDefinition
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
 AGENT_TOOL_NAMES = {

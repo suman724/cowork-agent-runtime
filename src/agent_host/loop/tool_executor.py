@@ -15,8 +15,8 @@ if TYPE_CHECKING:
     from agent_sdk.approval.approval_gate import ApprovalGate
     from agent_sdk.llm.models import ToolCallMessage
     from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.tracking.file_change_tracker import FileChangeTracker
 
-    from agent_host.agent.file_change_tracker import FileChangeTracker
     from agent_host.approval.approval_client import ApprovalClient
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.session.workspace_client import WorkspaceClient

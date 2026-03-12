@@ -6,8 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
-
-from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
+from agent_sdk.checkpoint.checkpoint_manager import CheckpointManager, SessionCheckpoint
 
 
 @pytest.fixture

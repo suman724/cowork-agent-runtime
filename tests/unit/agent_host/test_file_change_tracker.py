@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_host.agent.file_change_tracker import FileChangeTracker
+from agent_sdk.tracking.file_change_tracker import FileChangeTracker
 
 
 class TestFileChangeTracker:

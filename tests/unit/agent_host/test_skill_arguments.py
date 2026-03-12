@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from agent_host.skills.skill_loader import substitute_arguments
+from agent_sdk.skills.skill_loader import substitute_arguments
 
 
 class TestSubstituteArguments:

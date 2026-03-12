@@ -21,13 +21,13 @@ if TYPE_CHECKING:
     from agent_sdk.memory.memory_manager import MemoryManager
     from agent_sdk.memory.working_memory import WorkingMemory
     from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.skills.models import SkillDefinition
     from agent_sdk.thread.compactor import ContextCompactor
     from agent_sdk.thread.message_thread import MessageThread
 
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.loop.agent_tools import AgentToolHandler
     from agent_host.loop.tool_executor import ToolExecutor
-    from agent_host.skills.models import SkillDefinition
 
 logger = structlog.get_logger()
 
@@ -406,10 +406,9 @@ class LoopRuntime:
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None = None,
     ) -> dict[str, Any]:
         """Execute a skill as a focused sub-conversation."""
+        from agent_sdk.skills.skill_loader import SkillLoader, substitute_arguments
         from agent_sdk.thread.compactor import DropOldestCompactor
         from agent_sdk.thread.message_thread import MessageThread
-
-        from agent_host.skills.skill_loader import SkillLoader, substitute_arguments
 
         task_id = f"{parent_task_id}-skill-{skill.name}"
 

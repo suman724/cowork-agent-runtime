@@ -5,8 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from agent_host.skills.models import SkillDefinition
-from agent_host.skills.skill_loader import (
+from agent_sdk.skills.models import SkillDefinition
+from agent_sdk.skills.skill_loader import (
     SkillLoader,
     _collect_scripts,
     _resolve_script_dirs,

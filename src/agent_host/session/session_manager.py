@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from agent_sdk.approval.approval_gate import ApprovalGate
 from agent_sdk.budget.token_budget import TokenBudget
+from agent_sdk.checkpoint.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_sdk.exceptions import (
     CheckpointError,
     NoActiveTaskError,
@@ -25,8 +26,10 @@ from agent_sdk.memory.memory_manager import MemoryManager
 from agent_sdk.memory.working_memory import WorkingMemory
 from agent_sdk.models import SessionContext
 from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.skills.skill_loader import SkillLoader
 from agent_sdk.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
 from agent_sdk.thread.message_thread import MessageThread
+from agent_sdk.tracking.file_change_tracker import FileChangeTracker
 from cowork_platform.conversation_message import ConversationMessage
 from cowork_platform.policy_bundle import PolicyBundle
 from cowork_platform.session_cancel_request import SessionCancelRequest
@@ -38,23 +41,21 @@ from cowork_platform.session_create_request import (
 from cowork_platform.session_create_response import SessionCreateResponse  # noqa: TC002
 from cowork_platform_sdk import CapabilityName
 
-from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.approval.approval_client import ApprovalClient
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.tool_executor import TOOL_CAPABILITY_MAP, ToolExecutor
-from agent_host.session.checkpoint_manager import CheckpointManager, SessionCheckpoint
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
-from agent_host.skills.skill_loader import SkillLoader
 from tool_runtime.models import ExecutionContext
 
 if TYPE_CHECKING:
+    from agent_sdk.skills.models import SkillDefinition
+
     from agent_host.config import AgentHostConfig
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.server.event_buffer import EventBuffer
     from agent_host.server.transport import Transport
-    from agent_host.skills.models import SkillDefinition
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()

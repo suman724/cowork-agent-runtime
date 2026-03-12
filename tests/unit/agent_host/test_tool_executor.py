@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 from agent_sdk.approval.approval_gate import ApprovalGate
 from agent_sdk.llm.models import ToolCallMessage
 from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.tracking.file_change_tracker import FileChangeTracker
 
-from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.loop.tool_executor import ToolExecutor
 from tests.fixtures.policy_bundles import make_policy_bundle, make_restrictive_bundle
 
