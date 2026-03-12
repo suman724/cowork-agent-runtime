@@ -508,7 +508,7 @@ sequenceDiagram
 
 ## 6. Policy Enforcement
 
-**File:** `agent_host/policy/policy_enforcer.py`
+**File:** `agent_sdk/policy/policy_enforcer.py`
 
 The `PolicyEnforcer` is **stateless and pure** — no I/O, no side effects. It receives a `PolicyBundle` at init and validates tool calls against it.
 
@@ -551,7 +551,7 @@ The `check_llm_call()` method verifies the `LLM.Call` capability is granted and 
 
 ### Risk Assessment
 
-**File:** `agent_host/policy/risk_assessor.py`
+**File:** `agent_sdk/policy/risk_assessor.py`
 
 When a capability has `requiresApproval: true`, the `assess_risk()` function determines the risk level sent with the approval request:
 
@@ -572,7 +572,7 @@ When a capability has `requiresApproval: true`, the `assess_risk()` function det
 
 ## 7. Approval Gate
 
-**File:** `agent_host/approval/approval_gate.py`
+**File:** `agent_sdk/approval/approval_gate.py`
 
 When a tool call requires user approval, the system uses asyncio Futures to block execution until the user decides.
 
@@ -618,7 +618,7 @@ Key points:
 
 ## 8. Working Memory
 
-**File:** `agent_host/memory/working_memory.py`
+**File:** `agent_sdk/memory/working_memory.py`
 
 Working memory is **structured agent state** injected into every LLM call after the system prompt. It prevents goal drift during long multi-step tasks.
 
@@ -818,7 +818,7 @@ flowchart TB
 
 ## 11. Skills
 
-**Files:** `agent_host/skills/models.py`, `agent_host/skills/skill_loader.py`, `agent_host/skills/skill_executor.py` (constants only), `agent_host/loop/loop_runtime.py` (`execute_skill()`)
+**Files:** `agent_sdk/skills/models.py`, `agent_sdk/skills/skill_loader.py`, `agent_host/loop/loop_runtime.py` (`execute_skill()`)
 
 Skills are **formalized multi-step workflows** — reusable sub-conversations with custom system prompts and optional tool restrictions. Skills use **directory-based Markdown format** with progressive disclosure.
 
@@ -962,7 +962,7 @@ Skills run as focused sub-conversations via `LoopRuntime.execute_skill()`, simil
 
 ## 12. LLM Client
 
-**File:** `agent_host/llm/client.py`
+**File:** `agent_sdk/llm/client.py`
 
 The `LLMClient` wraps the OpenAI SDK to stream chat completions from an OpenAI-compatible LLM Gateway.
 
@@ -1011,7 +1011,7 @@ sequenceDiagram
 
 ### Error Classification
 
-**File:** `agent_host/llm/error_classifier.py`
+**File:** `agent_sdk/llm/error_classifier.py`
 
 - **Transient (retried):** Connection errors (`httpx.ConnectError`, `httpx.ReadError`), timeouts, rate limits (429), server errors (502, 503, 504), and SDK exceptions (`RateLimitError`, `ServiceUnavailableError`, `APIConnectionError`, `APITimeoutError`)
 - **Permanent (not retried):** `LLMBudgetExceededError`, `LLMGuardrailBlockedError`, `PolicyExpiredError`, auth errors, invalid requests
@@ -1038,7 +1038,7 @@ When the API doesn't return usage data (e.g., Anthropic's OpenAI-compatible endp
 
 ### MessageThread
 
-**File:** `agent_host/thread/message_thread.py`
+**File:** `agent_sdk/thread/message_thread.py`
 
 Stores the conversation in OpenAI chat completion format:
 
@@ -1065,7 +1065,7 @@ Messages are stored as dicts matching OpenAI's format:
 
 ### Context Compaction
 
-**File:** `agent_host/thread/compactor.py`
+**File:** `agent_sdk/thread/compactor.py`
 
 When the conversation exceeds 90% of `max_context_tokens`, the `DropOldestCompactor` trims it:
 
@@ -1219,7 +1219,7 @@ All emission is **fire-and-forget** — errors are logged but never propagated.
 
 ## 16. Token Budget
 
-**File:** `agent_host/budget/token_budget.py`
+**File:** `agent_sdk/budget/token_budget.py`
 
 Session-level cumulative token tracking against a budget from the policy bundle.
 

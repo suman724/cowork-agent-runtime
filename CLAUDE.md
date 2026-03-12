@@ -10,21 +10,19 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Architecture
 
-Two top-level packages with a **strict boundary** — no cross-imports allowed:
+Three packages: `agent_host/` and `tool_runtime/` (strict boundary, no cross-imports), plus `cowork-agent-sdk` (external dependency providing reusable agent primitives).
 
 ```
-agent_host/     ← Local Agent Host (custom agent loop)
-  server/       — Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay)
-  session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
-  loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
-  skills/       — Skill definitions, loader (built-in/user/workspace/policy); execution via LoopRuntime
-  policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
-  budget/       — Token budget tracking (pre-check + record_usage)
-  approval/     — Approval gate (asyncio Futures for user approval flow)
-  events/       — Event emitter: SessionEvent notifications + structured logging
+agent_host/     ← Local Agent Host (cowork application layer)
+  transport/    — Transport protocol, StdioTransport, HttpTransport, JSON-RPC 2.0, MethodDispatcher
+  server/       — JSON-RPC method handlers (thin delegation to SessionManager)
+  session/      — Session/Workspace HTTP clients (tenacity retry), SessionManager
+  loop/         — LoopRuntime (infrastructure facade), tool executor, agent-internal tools, sub-agents
+  approval/     — ApprovalClient (HTTP client to Approval Service)
+  events/       — EventEmitter, EventBuffer (SSE replay ring buffer)
   sandbox/      — Sandbox mode: self-registration (startup.py), workspace file sync (workspace_sync.py)
 
-tool_runtime/   ← Local Tool Runtime (tool execution)
+tool_runtime/   ← Local Tool Runtime (tool execution, unchanged)
   router/       — ToolRouter implementation, tool registry, dispatch
   tools/
     file/       — ReadFile, WriteFile, DeleteFile, EditFile, MultiEdit, CreateDirectory, MoveFile, ListDirectory, FindFiles, GrepFiles, ViewImage
@@ -35,6 +33,19 @@ tool_runtime/   ← Local Tool Runtime (tool execution)
   platform/     — OS abstraction (path handling, shell resolution, encoding) for macOS/Windows
   mcp/          — MCP client: discovery, connection, manifest translation (Phase 2+)
   output/       — Output formatting, truncation, artifact extraction
+
+# External dependency (pip-installed from cowork-agent-sdk repo):
+agent_sdk/      ← Reusable agent building blocks
+  loop/         — LoopContext protocol, LoopStrategy protocol, ReactLoop, error recovery, verification
+  thread/       — MessageThread, context compaction (DropOldest, Hybrid), token counting
+  memory/       — WorkingMemory, MemoryManager, persistent memory, plan, task tracker
+  policy/       — PolicyEnforcer (pure, no I/O): capability validation, path/command/domain matchers
+  llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
+  budget/       — TokenBudget tracking (pre-check + record_usage)
+  approval/     — ApprovalGate mechanism (asyncio Futures)
+  skills/       — SkillLoader, SkillDefinition (discovery & loading)
+  checkpoint/   — CheckpointManager (crash recovery persistence)
+  tracking/     — FileChangeTracker (file mutation tracking for patch preview)
 ```
 
 **Communication boundary:** `agent_host/` calls `tool_runtime/` only through `ToolRouter` and `ExecutionContext`:
@@ -48,30 +59,31 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 
 - **Three-layer agent loop architecture** — `SessionManager` (session lifecycle) → `LoopRuntime` (per-task infrastructure) → `LoopStrategy` (orchestration + context assembly). See `cowork-infra/docs/components/loop-strategy.md`.
   - `LoopRuntime` (`loop/loop_runtime.py`) — infrastructure primitives facade. Provides `call_llm()`, `execute_external_tools()`, `execute_agent_tool()`, `spawn_sub_agent()`, `execute_skill()`, event emission, checkpoint callbacks, token budget. Owns all backend service coupling.
-  - `LoopStrategy` protocol (`loop/strategy.py`) — single method `async def run(task_id) -> LoopResult`. Strategies compose LoopRuntime primitives.
-  - `ReactLoop` (`loop/react_loop.py`) — default strategy (linear ReAct). Owns context assembly (memory injection, working memory, compaction, error recovery) and tool routing (agent-internal vs external).
+  - `LoopContext` protocol (`agent_sdk/loop/context.py`) — defines the interface between loop strategies and `LoopRuntime`. `LoopRuntime` implements `LoopContext`.
+  - `LoopStrategy` protocol (`agent_sdk/loop/strategy.py`) — single method `async def run(task_id) -> LoopResult`. Strategies compose LoopContext primitives.
+  - `ReactLoop` (`agent_sdk/loop/react_loop.py`) — default strategy (linear ReAct). Owns context assembly (memory injection, working memory, compaction, error recovery) and tool routing (agent-internal vs external). Depends on `LoopContext`, not concrete `LoopRuntime`.
   - `AgentLoop` (`loop/agent_loop.py`) — thin alias for `ReactLoop` (backward compat).
 - **OpenAI SDK** (`openai.AsyncOpenAI`) for streaming to LLM Gateway's OpenAI-compatible endpoint.
 - **Infrastructure layers inside LoopRuntime:**
   - `ToolExecutor` — policy check → approval gate → file change tracking → ToolRouter dispatch → artifact upload. Supports **parallel tool execution** via `asyncio.gather()` with intelligent grouping (read-only tools batched, writes serialized per path, shell commands always serial). Also enforces **plan mode** restrictions (filters tool definitions, denies blocked tools with `PLAN_MODE_RESTRICTED`).
   - `AgentToolHandler` — routes agent-internal tools (TaskTracker, CreatePlan, **UpdatePlanStep**, SpawnAgent, memory, skills, **EnterPlanMode**, **ExitPlanMode**) without going through PolicyEnforcer. Uses callbacks to LoopRuntime for sub-agent/skill execution. `UpdatePlanStep` marks plan steps as `in_progress`/`completed`/`skipped` and triggers the `plan_updated` event via `_notify_plan_updated()` → `SessionManager._on_plan_updated()` → `EventEmitter.emit_plan_updated()`.
-  - `ErrorRecovery` — consecutive failure tracking, loop detection (same tool+args 3+ times), reflection/loop-break prompt injection
-  - `WorkingMemory` — task tracker + plan + notes, injected as system message every turn (by ReactLoop)
-  - `VerificationConfig` (`loop/verification.py`) — post-completion self-verification. Injects verification prompt when agent first signals done, extends step budget by `max_verify_steps`, emits `verification_started`/`verification_completed` events.
+  - `ErrorRecovery` (`agent_sdk/loop/error_recovery.py`) — consecutive failure tracking, loop detection (same tool+args 3+ times), reflection/loop-break prompt injection
+  - `WorkingMemory` (`agent_sdk/memory/working_memory.py`) — task tracker + plan + notes, injected as system message every turn (by ReactLoop)
+  - `VerificationConfig` (`agent_sdk/loop/verification.py`) — post-completion self-verification. Injects verification prompt when agent first signals done, extends step budget by `max_verify_steps`, emits `verification_started`/`verification_completed` events.
   - Sub-agent spawning — `LoopRuntime.spawn_sub_agent()` creates child LoopRuntime + ReactLoop with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
   - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
 - **Context compaction** (in `agent_sdk.thread.compactor`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
 - **Prompt caching optimization** — `ReactLoop._build_messages()` orders context for LLM provider cache efficiency: stable prefix (system prompt → persistent memory → conversation history) then volatile suffix (working memory → error recovery).
-- **Transport protocol** (`server/transport.py`) — `Transport` protocol with `start()`, `send_event()`, `shutdown()`. Two implementations:
-  - `StdioTransport` — JSON-RPC over stdin/stdout with write lock (desktop mode)
-  - `HttpTransport` — Starlette/uvicorn ASGI server (sandbox/web mode): `POST /rpc`, `GET /events` (SSE with replay), `GET /health`, `GET /ready`, `POST /upload`, `GET /files/{path}`, `GET /files`
-- **Shared EventBuffer** (`server/event_buffer.py`) — bounded ring buffer (default 10K events) with monotonic IDs. Owned by `EventEmitter`, shared with both transports. Enables:
+- **Transport protocol** (`transport/transport.py`) — `Transport` protocol with `start()`, `send_event()`, `shutdown()`. Two implementations:
+  - `StdioTransport` (`transport/stdio_transport.py`) — JSON-RPC over stdin/stdout with write lock (desktop mode)
+  - `HttpTransport` (`transport/http_transport.py`) — Starlette/uvicorn ASGI server (sandbox/web mode): `POST /rpc`, `GET /events` (SSE with replay), `GET /health`, `GET /ready`, `POST /upload`, `GET /files/{path}`, `GET /files`
+- **Shared EventBuffer** (`events/event_buffer.py`) — bounded ring buffer (default 10K events) with monotonic IDs. Owned by `EventEmitter`, shared with both transports. Enables:
   - SSE replay via `?since={id}` for HttpTransport
   - `GetEvents` JSON-RPC method for Desktop App event replay after view navigation
   - All `SessionEvent` notifications include `eventId` for client-side tracking
-- **Custom JSON-RPC 2.0 protocol** (~200 lines). Shared by both transports via `MethodDispatcher`.
-- **CheckpointManager** — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
-- **Policy Enforcer** is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
+- **Custom JSON-RPC 2.0 protocol** (`transport/json_rpc.py`, ~200 lines). Shared by both transports via `MethodDispatcher` (`transport/method_dispatcher.py`).
+- **CheckpointManager** (`agent_sdk/checkpoint/`) — atomic JSON file writes (tempfile + os.replace) for crash recovery. Persists thread, token budget, working memory.
+- **PolicyEnforcer** (`agent_sdk/policy/`) is pure — no I/O, no async. Receives `PolicyBundle` at init, indexes capabilities by name.
 - **Pydantic models** from `cowork-platform` for all data contracts.
 - **httpx** with `tenacity` retry for async HTTP to backend services.
 - **structlog** to stderr for structured logging; stdout reserved for JSON-RPC.
@@ -165,20 +177,16 @@ cowork-agent-runtime/
   .env.example
   src/
     agent_host/
-      __init__.py
-      exceptions.py           # AgentHostError hierarchy → JSON-RPC error codes
-      models.py               # SessionContext, PolicyCheckResult
+      __init__.py             # Re-exports AgentHostError, SessionContext, PolicyCheckResult from agent_sdk
       config.py               # AgentHostConfig from env vars
       main.py                 # Process entry point
-      server/                 # JSON-RPC 2.0 server (parse, transport, dispatch, handlers)
-      session/                # Session/Workspace clients, checkpoint manager, SessionManager
-      loop/                   # Agent loop, tool executor, agent tools, error recovery, sub-agents
-      skills/                 # Skill definitions, loader, executor
+      transport/              # Transport protocol, StdioTransport, HttpTransport, JSON-RPC, MethodDispatcher
+      server/                 # JSON-RPC method handlers (thin delegation to SessionManager)
+      session/                # Session/Workspace HTTP clients, SessionManager
+      loop/                   # LoopRuntime (implements LoopContext), tool executor, agent tools, sub-agents
+      approval/               # ApprovalClient (HTTP to Approval Service)
+      events/                 # EventEmitter, EventBuffer (SSE replay)
       sandbox/                # Sandbox startup (self-registration), workspace file sync
-      policy/                 # Policy enforcer, path/command/domain matchers, risk assessor
-      budget/                 # Token budget tracking
-      approval/               # Approval gate (asyncio Futures)
-      events/                 # Event emitter
     tool_runtime/
       __init__.py
       router/                 # ToolRouter implementation
