@@ -7,8 +7,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agent_host.memory.memory_manager import MemoryManager
-    from agent_host.memory.working_memory import WorkingMemory
+    from agent_sdk.memory.memory_manager import MemoryManager
+    from agent_sdk.memory.working_memory import WorkingMemory
+
     from agent_host.skills.models import SkillDefinition
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
@@ -383,7 +384,7 @@ class AgentToolHandler:
 
     def _handle_create_plan(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle CreatePlan tool calls."""
-        from agent_host.memory.plan import Plan, PlanStep
+        from agent_sdk.memory.plan import Plan, PlanStep
 
         goal = arguments.get("goal", "")
         step_descriptions = arguments.get("steps", [])

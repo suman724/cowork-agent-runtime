@@ -17,6 +17,8 @@ if TYPE_CHECKING:
     from agent_sdk.budget.token_budget import TokenBudget
     from agent_sdk.llm.models import LLMResponse, ToolCallMessage
     from agent_sdk.loop.models import ToolCallResult
+    from agent_sdk.memory.memory_manager import MemoryManager
+    from agent_sdk.memory.working_memory import WorkingMemory
     from agent_sdk.policy.policy_enforcer import PolicyEnforcer
     from agent_sdk.thread.compactor import ContextCompactor
     from agent_sdk.thread.message_thread import MessageThread
@@ -26,8 +28,6 @@ if TYPE_CHECKING:
     from agent_host.loop.agent_tools import AgentToolHandler
     from agent_host.loop.strategy import LoopStrategy
     from agent_host.loop.tool_executor import ToolExecutor
-    from agent_host.memory.memory_manager import MemoryManager
-    from agent_host.memory.working_memory import WorkingMemory
     from agent_host.skills.models import SkillDefinition
 
 logger = structlog.get_logger()

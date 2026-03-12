@@ -6,10 +6,10 @@ import json
 from unittest.mock import AsyncMock, MagicMock
 
 from agent_sdk.llm.models import ToolCallMessage
+from agent_sdk.memory.working_memory import WorkingMemory
 
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.tool_executor import ToolExecutor
-from agent_host.memory.working_memory import WorkingMemory
 from tests.fixtures.policy_bundles import make_policy_bundle
 
 
