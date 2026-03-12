@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING
 
 import httpx
 import structlog
+from agent_sdk.exceptions import AgentHostError
 from cowork_platform.artifact import Artifact
 from cowork_platform.artifact_upload_request import ArtifactUploadRequest
 from cowork_platform_sdk import CoworkAPIError, create_http_client, raise_for_status
 from pydantic import ValidationError
 from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
-
-from agent_host.exceptions import AgentHostError
 
 
 def _is_retryable(exc: BaseException) -> bool:

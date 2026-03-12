@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
-from agent_host.budget.token_budget import TokenBudget
+from agent_sdk.budget.token_budget import TokenBudget
+from agent_sdk.loop.models import ToolCallResult
+
 from agent_host.loop.loop_runtime import LoopRuntime
-from agent_host.loop.models import ToolCallResult
 from agent_host.loop.react_loop import ReactLoop
 from agent_host.loop.verification import VerificationConfig
 from agent_host.thread.compactor import DropOldestCompactor
@@ -23,7 +24,7 @@ def _make_loop(
     verification: VerificationConfig | None = None,
     event_emitter: MagicMock | None = None,
 ) -> ReactLoop:
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)

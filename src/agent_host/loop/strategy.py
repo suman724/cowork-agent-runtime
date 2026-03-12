@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
-    from agent_host.loop.models import LoopResult
+    from agent_sdk.loop.models import LoopResult
 
 
 @runtime_checkable

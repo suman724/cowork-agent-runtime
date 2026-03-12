@@ -126,7 +126,7 @@ class TestLongThreadCompaction:
 
     def test_token_budget_respected(self) -> None:
         """Result should fit within token budget."""
-        from agent_host.thread.token_counter import estimate_message_tokens
+        from agent_sdk.thread.token_counter import estimate_message_tokens
 
         compactor = DropOldestCompactor(recency_window=5)
         messages = [_make_msg("system", "s" * 100)]

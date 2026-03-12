@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import structlog
+from agent_sdk.exceptions import AgentHostError
 from cowork_platform.session_cancel_request import SessionCancelRequest  # noqa: TC002
 from cowork_platform.session_create_request import SessionCreateRequest  # noqa: TC002
 from cowork_platform.session_create_response import SessionCreateResponse
@@ -17,8 +18,6 @@ from tenacity import (
     stop_after_attempt,
     wait_exponential,
 )
-
-from agent_host.exceptions import AgentHostError
 
 
 def _is_retryable(exc: BaseException) -> bool:

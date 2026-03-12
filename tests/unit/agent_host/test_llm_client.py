@@ -6,10 +6,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+from agent_sdk.exceptions import LLMGatewayError
+from agent_sdk.llm.models import LLMResponse
 
-from agent_host.exceptions import LLMGatewayError
 from agent_host.llm.client import LLMClient
-from agent_host.llm.models import LLMResponse
 
 
 class TestLLMClientRetry:
@@ -44,7 +44,7 @@ class TestLLMClientRetry:
 
     async def test_raises_on_permanent_error(self, client: LLMClient) -> None:
         """Should not retry permanent errors."""
-        from agent_host.exceptions import LLMBudgetExceededError
+        from agent_sdk.exceptions import LLMBudgetExceededError
 
         async def mock_do_stream(messages, tools, on_text_chunk):
             raise LLMBudgetExceededError("budget exhausted")

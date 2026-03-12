@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 from unittest.mock import MagicMock
 
-from agent_host.budget.token_budget import TokenBudget
-from agent_host.llm.models import LLMResponse
+from agent_sdk.budget.token_budget import TokenBudget
+from agent_sdk.llm.models import LLMResponse
+from agent_sdk.loop.models import ToolCallResult
+
 from agent_host.loop.loop_runtime import LoopRuntime
-from agent_host.loop.models import ToolCallResult
 from agent_host.loop.react_loop import ReactLoop
 from agent_host.thread.compactor import DropOldestCompactor
 from agent_host.thread.message_thread import MessageThread
@@ -27,7 +28,7 @@ def _make_loop(
     working_memory: MagicMock | None = None,
 ) -> ReactLoop:
     """Helper to build a LoopRuntime + ReactLoop with test components."""
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)

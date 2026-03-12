@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
-from agent_host.thread.token_counter import estimate_message_tokens
+from agent_sdk.thread.token_counter import estimate_message_tokens
 
 if TYPE_CHECKING:
-    from agent_host.llm.models import ToolCallMessage
+    from agent_sdk.llm.models import ToolCallMessage
+
     from agent_host.thread.compactor import ContextCompactor
 
 

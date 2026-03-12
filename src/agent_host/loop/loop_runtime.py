@@ -14,17 +14,18 @@ from agent_host.loop.error_recovery import ErrorRecovery
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agent_host.budget.token_budget import TokenBudget
+    from agent_sdk.budget.token_budget import TokenBudget
+    from agent_sdk.llm.models import LLMResponse, ToolCallMessage
+    from agent_sdk.loop.models import ToolCallResult
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
-    from agent_host.llm.models import LLMResponse, ToolCallMessage
     from agent_host.loop.agent_tools import AgentToolHandler
-    from agent_host.loop.models import ToolCallResult
     from agent_host.loop.strategy import LoopStrategy
     from agent_host.loop.tool_executor import ToolExecutor
     from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
     from agent_host.skills.models import SkillDefinition
     from agent_host.thread.compactor import ContextCompactor
     from agent_host.thread.message_thread import MessageThread
@@ -539,6 +540,11 @@ class LoopRuntime:
     def max_context_tokens(self) -> int:
         """Maximum context window size."""
         return self._max_context_tokens
+
+    @property
+    def has_event_emitter(self) -> bool:
+        """Whether an event emitter is configured."""
+        return self._event_emitter is not None
 
     @property
     def policy_enforcer(self) -> PolicyEnforcer:

@@ -7,8 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 import structlog
-
-from agent_host.thread.token_counter import estimate_message_tokens
+from agent_sdk.thread.token_counter import estimate_message_tokens
 
 if TYPE_CHECKING:
     from agent_host.llm.client import LLMClient

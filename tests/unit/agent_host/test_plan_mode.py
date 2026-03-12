@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_host.llm.models import ToolCallMessage
+from agent_sdk.llm.models import ToolCallMessage
+
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.tool_executor import ToolExecutor
 from agent_host.memory.working_memory import WorkingMemory
@@ -38,7 +39,7 @@ def _make_tool_router_mock() -> MagicMock:
 class TestPlanModeToolFiltering:
     def test_plan_mode_filters_tool_definitions(self) -> None:
         """In plan mode, only read-only tools should be returned."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
@@ -58,7 +59,7 @@ class TestPlanModeToolFiltering:
 
     def test_normal_mode_returns_all_tools(self) -> None:
         """Without plan mode, all tools should be returned."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
@@ -78,7 +79,7 @@ class TestPlanModeToolFiltering:
 class TestPlanModeEnforcement:
     async def test_blocked_tool_returns_denial(self) -> None:
         """Calling a write tool in plan mode should return PLAN_MODE_RESTRICTED."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
@@ -100,7 +101,7 @@ class TestPlanModeEnforcement:
 
     async def test_allowed_tool_executes_in_plan_mode(self) -> None:
         """Calling a read tool in plan mode should succeed."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
@@ -120,7 +121,7 @@ class TestPlanModeEnforcement:
 class TestPlanModeProperty:
     def test_plan_mode_setter_when_not_locked(self) -> None:
         """plan_mode setter should work when not locked."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)
@@ -131,7 +132,7 @@ class TestPlanModeProperty:
 
     def test_plan_mode_setter_ignored_when_locked(self) -> None:
         """plan_mode setter should be no-op when locked."""
-        from agent_host.policy.policy_enforcer import PolicyEnforcer
+        from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
         bundle = make_policy_bundle()
         enforcer = PolicyEnforcer(bundle)

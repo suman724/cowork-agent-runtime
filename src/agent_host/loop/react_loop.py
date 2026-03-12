@@ -7,12 +7,12 @@ import math
 from typing import TYPE_CHECKING
 
 import structlog
-
-from agent_host.loop.models import LoopResult
-from agent_host.thread.token_counter import estimate_message_tokens
+from agent_sdk.loop.models import LoopResult
+from agent_sdk.thread.token_counter import estimate_message_tokens
 
 if TYPE_CHECKING:
-    from agent_host.llm.models import ToolCallMessage
+    from agent_sdk.llm.models import ToolCallMessage
+
     from agent_host.loop.loop_runtime import LoopRuntime
     from agent_host.loop.verification import VerificationConfig
 
@@ -77,7 +77,7 @@ class ReactLoop:
                 tools,
                 task_id,
                 step_id,
-                on_text_chunk=_on_chunk if self._h._event_emitter else None,
+                on_text_chunk=_on_chunk if self._h.has_event_emitter else None,
             )
 
             # 4. Record assistant message in thread

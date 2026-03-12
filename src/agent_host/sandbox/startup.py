@@ -8,8 +8,7 @@ from typing import TYPE_CHECKING, Any
 
 import httpx
 import structlog
-
-from agent_host.exceptions import SandboxStartupError
+from agent_sdk.exceptions import SandboxStartupError
 
 if TYPE_CHECKING:
     from agent_host.config import AgentHostConfig

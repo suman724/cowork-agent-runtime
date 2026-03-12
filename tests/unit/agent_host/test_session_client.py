@@ -93,7 +93,7 @@ class TestSessionClient:
     @pytest.mark.asyncio
     async def test_create_session_invalid_json(self) -> None:
         """Raises AgentHostError on malformed JSON response."""
-        from agent_host.exceptions import AgentHostError
+        from agent_sdk.exceptions import AgentHostError
 
         mock_response = httpx.Response(
             200,
@@ -111,7 +111,7 @@ class TestSessionClient:
     @pytest.mark.asyncio
     async def test_create_session_invalid_schema(self) -> None:
         """Raises AgentHostError on response that doesn't match schema."""
-        from agent_host.exceptions import AgentHostError
+        from agent_sdk.exceptions import AgentHostError
 
         mock_response = httpx.Response(
             200,

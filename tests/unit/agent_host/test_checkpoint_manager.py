@@ -116,7 +116,8 @@ class TestCheckpointManagerThread:
 class TestCheckpointManagerThreadRoundTrip:
     def test_thread_restored_matches_original(self, manager: CheckpointManager) -> None:
         """Thread data should survive checkpoint round-trip exactly."""
-        from agent_host.llm.models import ToolCallMessage
+        from agent_sdk.llm.models import ToolCallMessage
+
         from agent_host.thread.message_thread import MessageThread
 
         # Build a realistic thread

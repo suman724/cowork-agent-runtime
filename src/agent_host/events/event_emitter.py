@@ -14,7 +14,8 @@ from cowork_platform_sdk import Component, EventType, build_event
 from agent_host.server.event_buffer import EventBuffer
 
 if TYPE_CHECKING:
-    from agent_host.models import SessionContext
+    from agent_sdk.models import SessionContext
+
     from agent_host.server.transport import Transport
 
 logger = structlog.get_logger()

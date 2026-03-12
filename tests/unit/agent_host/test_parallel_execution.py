@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock
 
-from agent_host.llm.models import ToolCallMessage
+from agent_sdk.llm.models import ToolCallMessage
+
 from agent_host.loop.tool_executor import ToolExecutor
 from tests.fixtures.policy_bundles import make_policy_bundle
 
@@ -29,7 +30,7 @@ def _make_tool_router_mock() -> MagicMock:
 
 
 def _make_executor(router: MagicMock | None = None) -> ToolExecutor:
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)

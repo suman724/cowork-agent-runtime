@@ -405,7 +405,8 @@ class HttpTransport:
             failed: list of paths that failed
             direction: echo of the requested direction
         """
-        from agent_host.exceptions import WorkspaceSyncError
+        from agent_sdk.exceptions import WorkspaceSyncError
+
         from agent_host.sandbox.workspace_sync import (
             download_files,
             download_workspace,

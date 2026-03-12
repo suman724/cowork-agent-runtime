@@ -124,7 +124,8 @@ class TestMethodDispatcher:
     @pytest.mark.asyncio
     async def test_dispatch_agent_host_error(self) -> None:
         """AgentHostError maps to JSON-RPC error code."""
-        from agent_host.exceptions import SessionNotFoundError
+        from agent_sdk.exceptions import SessionNotFoundError
+
         from agent_host.server.json_rpc import JsonRpcRequest
 
         dispatcher = MethodDispatcher()

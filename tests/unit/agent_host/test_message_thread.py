@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from agent_host.llm.models import ToolCallMessage
+from agent_sdk.llm.models import ToolCallMessage
+
 from agent_host.thread.message_thread import MessageThread
 
 

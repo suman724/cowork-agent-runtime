@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
 import pytest
+from agent_sdk.exceptions import WorkspaceSyncError
 
-from agent_host.exceptions import WorkspaceSyncError
 from agent_host.sandbox.workspace_sync import (
     download_files,
     download_workspace,

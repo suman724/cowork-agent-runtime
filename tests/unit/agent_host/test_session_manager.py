@@ -6,10 +6,10 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from agent_sdk.exceptions import CheckpointError, PolicyExpiredError
+from agent_sdk.models import SessionContext
 
 from agent_host.events.event_emitter import EventEmitter
-from agent_host.exceptions import CheckpointError, PolicyExpiredError
-from agent_host.models import SessionContext
 from agent_host.session.checkpoint_manager import SessionCheckpoint
 from agent_host.session.session_manager import SessionManager
 

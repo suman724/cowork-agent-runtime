@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from agent_host.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.policy.policy_enforcer import PolicyEnforcer
 
 # Base system prompt — same as the prior SYSTEM_PROMPT from agent_factory.py
 _BASE_SYSTEM_PROMPT = """You are Cowork, a capable AI assistant running on the user's desktop.

@@ -6,11 +6,12 @@ import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
+from agent_sdk.approval.approval_gate import ApprovalGate
+from agent_sdk.llm.models import ToolCallMessage
+from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+
 from agent_host.agent.file_change_tracker import FileChangeTracker
-from agent_host.approval.approval_gate import ApprovalGate
-from agent_host.llm.models import ToolCallMessage
 from agent_host.loop.tool_executor import ToolExecutor
-from agent_host.policy.policy_enforcer import PolicyEnforcer
 from tests.fixtures.policy_bundles import make_policy_bundle, make_restrictive_bundle
 
 

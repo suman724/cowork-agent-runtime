@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from agent_sdk.exceptions import SandboxStartupError
 
 from agent_host.config import AgentHostConfig
-from agent_host.exceptions import SandboxStartupError
 from agent_host.sandbox.startup import (
     EcsMetadata,
     RegistrationResult,
