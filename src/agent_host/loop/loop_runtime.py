@@ -8,8 +8,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
-
-from agent_host.loop.error_recovery import ErrorRecovery
+from agent_sdk.loop.error_recovery import ErrorRecovery
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -18,6 +17,7 @@ if TYPE_CHECKING:
     from agent_sdk.llm.client import LLMClient
     from agent_sdk.llm.models import LLMResponse, ToolCallMessage
     from agent_sdk.loop.models import ToolCallResult
+    from agent_sdk.loop.strategy import LoopStrategy
     from agent_sdk.memory.memory_manager import MemoryManager
     from agent_sdk.memory.working_memory import WorkingMemory
     from agent_sdk.policy.policy_enforcer import PolicyEnforcer
@@ -26,7 +26,6 @@ if TYPE_CHECKING:
 
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.loop.agent_tools import AgentToolHandler
-    from agent_host.loop.strategy import LoopStrategy
     from agent_host.loop.tool_executor import ToolExecutor
     from agent_host.skills.models import SkillDefinition
 

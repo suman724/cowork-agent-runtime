@@ -12,9 +12,9 @@ from agent_sdk.thread.token_counter import estimate_message_tokens
 
 if TYPE_CHECKING:
     from agent_sdk.llm.models import ToolCallMessage
+    from agent_sdk.loop.verification import VerificationConfig
 
     from agent_host.loop.loop_runtime import LoopRuntime
-    from agent_host.loop.verification import VerificationConfig
 
 logger = structlog.get_logger()
 
