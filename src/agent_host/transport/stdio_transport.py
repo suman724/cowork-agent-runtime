@@ -14,7 +14,7 @@ from typing import Any, TextIO
 
 import structlog
 
-from agent_host.server.json_rpc import serialize_notification
+from agent_host.transport.json_rpc import serialize_notification
 
 logger = structlog.get_logger()
 

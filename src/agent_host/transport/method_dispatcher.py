@@ -8,7 +8,7 @@ from typing import Any
 import structlog
 from agent_sdk.exceptions import AgentHostError
 
-from agent_host.server.json_rpc import (
+from agent_host.transport.json_rpc import (
     INTERNAL_ERROR,
     METHOD_NOT_FOUND,
     JsonRpcRequest,

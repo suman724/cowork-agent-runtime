@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from agent_host.server.event_buffer import EventBuffer
+from agent_host.events.event_buffer import EventBuffer
 
 
 class TestEventBuffer:

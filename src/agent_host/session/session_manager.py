@@ -53,9 +53,9 @@ if TYPE_CHECKING:
     from agent_sdk.skills.models import SkillDefinition
 
     from agent_host.config import AgentHostConfig
+    from agent_host.events.event_buffer import EventBuffer
     from agent_host.events.event_emitter import EventEmitter
-    from agent_host.server.event_buffer import EventBuffer
-    from agent_host.server.transport import Transport
+    from agent_host.transport.transport import Transport
     from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from agent_host.server.handlers import Handlers
-from agent_host.server.method_dispatcher import MethodDispatcher
+from agent_host.transport.method_dispatcher import MethodDispatcher
 
 
 @pytest.fixture
@@ -99,7 +99,7 @@ class TestMethodDispatcher:
     @pytest.mark.asyncio
     async def test_dispatch_success(self, mock_session_manager: MagicMock) -> None:
         """Dispatcher routes to correct handler."""
-        from agent_host.server.json_rpc import JsonRpcRequest
+        from agent_host.transport.json_rpc import JsonRpcRequest
 
         handlers = Handlers(mock_session_manager)
         dispatcher = MethodDispatcher()
@@ -113,7 +113,7 @@ class TestMethodDispatcher:
     @pytest.mark.asyncio
     async def test_dispatch_method_not_found(self) -> None:
         """Dispatcher returns error for unknown method."""
-        from agent_host.server.json_rpc import JsonRpcRequest
+        from agent_host.transport.json_rpc import JsonRpcRequest
 
         dispatcher = MethodDispatcher()
         request = JsonRpcRequest(method="UnknownMethod", params={}, id=1)
@@ -126,7 +126,7 @@ class TestMethodDispatcher:
         """AgentHostError maps to JSON-RPC error code."""
         from agent_sdk.exceptions import SessionNotFoundError
 
-        from agent_host.server.json_rpc import JsonRpcRequest
+        from agent_host.transport.json_rpc import JsonRpcRequest
 
         dispatcher = MethodDispatcher()
 
@@ -142,7 +142,7 @@ class TestMethodDispatcher:
     @pytest.mark.asyncio
     async def test_dispatch_unexpected_error(self) -> None:
         """Unexpected errors become internal error."""
-        from agent_host.server.json_rpc import JsonRpcRequest
+        from agent_host.transport.json_rpc import JsonRpcRequest
 
         dispatcher = MethodDispatcher()
 

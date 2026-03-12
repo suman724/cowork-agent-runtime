@@ -11,12 +11,12 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from cowork_platform_sdk import Component, EventType, build_event
 
-from agent_host.server.event_buffer import EventBuffer
+from agent_host.events.event_buffer import EventBuffer
 
 if TYPE_CHECKING:
     from agent_sdk.models import SessionContext
 
-    from agent_host.server.transport import Transport
+    from agent_host.transport.transport import Transport
 
 logger = structlog.get_logger()
 

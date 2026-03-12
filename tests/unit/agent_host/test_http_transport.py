@@ -11,8 +11,8 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from starlette.testclient import TestClient
 
-from agent_host.server.http_transport import HttpTransport
-from agent_host.server.method_dispatcher import MethodDispatcher
+from agent_host.transport.http_transport import HttpTransport
+from agent_host.transport.method_dispatcher import MethodDispatcher
 
 
 @pytest.fixture

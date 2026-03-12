@@ -20,14 +20,14 @@ import structlog
 from agent_host.config import AgentHostConfig
 from agent_host.logging import configure_logging
 from agent_host.server.handlers import Handlers
-from agent_host.server.json_rpc import (
+from agent_host.session.session_manager import SessionManager
+from agent_host.transport.json_rpc import (
     JsonRpcError,
     JsonRpcResponse,
     parse_request,
     serialize_response,
 )
-from agent_host.server.method_dispatcher import MethodDispatcher
-from agent_host.session.session_manager import SessionManager
+from agent_host.transport.method_dispatcher import MethodDispatcher
 from tool_runtime import ToolRouter
 
 logger = structlog.get_logger()
@@ -63,7 +63,7 @@ def parse_args() -> argparse.Namespace:
 
 async def run_stdio(config: AgentHostConfig, args: argparse.Namespace) -> None:  # noqa: ARG001
     """Run the agent host with stdio transport (desktop mode)."""
-    from agent_host.server.stdio_transport import StdioTransport
+    from agent_host.transport.stdio_transport import StdioTransport
 
     # Initialize stdin reader
     reader = asyncio.StreamReader()
@@ -135,8 +135,8 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     Service, syncs workspace files, then serves HTTP.  On shutdown, syncs
     workspace back before exiting.
     """
-    from agent_host.server.event_buffer import EventBuffer
-    from agent_host.server.http_transport import HttpTransport
+    from agent_host.events.event_buffer import EventBuffer
+    from agent_host.transport.http_transport import HttpTransport
 
     # Shared event buffer — owned by EventEmitter, read by HttpTransport for SSE
     event_buffer = EventBuffer()

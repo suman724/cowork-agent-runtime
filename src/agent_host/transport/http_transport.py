@@ -28,8 +28,8 @@ from starlette.applications import Starlette
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from agent_host.server.event_buffer import EventBuffer
-from agent_host.server.json_rpc import (
+from agent_host.events.event_buffer import EventBuffer
+from agent_host.transport.json_rpc import (
     JsonRpcError,
     JsonRpcResponse,
     parse_request,
