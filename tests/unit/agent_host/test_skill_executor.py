@@ -47,8 +47,8 @@ def _make_loop_runtime(
         mock_llm = MockLLMClient()
         mock_llm.enqueue_text("Skill completed successfully.")
 
-    from agent_host.thread.compactor import DropOldestCompactor
-    from agent_host.thread.message_thread import MessageThread
+    from agent_sdk.thread.compactor import DropOldestCompactor
+    from agent_sdk.thread.message_thread import MessageThread
 
     bundle = make_policy_bundle()
     enforcer = PolicyEnforcer(bundle)

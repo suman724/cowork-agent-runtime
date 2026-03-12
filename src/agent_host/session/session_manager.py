@@ -19,6 +19,8 @@ from agent_sdk.exceptions import (
 )
 from agent_sdk.models import SessionContext
 from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+from agent_sdk.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
+from agent_sdk.thread.message_thread import MessageThread
 from cowork_platform.conversation_message import ConversationMessage
 from cowork_platform.policy_bundle import PolicyBundle
 from cowork_platform.session_cancel_request import SessionCancelRequest
@@ -45,8 +47,6 @@ from agent_host.session.checkpoint_manager import CheckpointManager, SessionChec
 from agent_host.session.session_client import SessionClient
 from agent_host.session.workspace_client import WorkspaceClient
 from agent_host.skills.skill_loader import SkillLoader
-from agent_host.thread.compactor import ContextCompactor, DropOldestCompactor, HybridCompactor
-from agent_host.thread.message_thread import MessageThread
 from tool_runtime.models import ExecutionContext
 
 if TYPE_CHECKING:

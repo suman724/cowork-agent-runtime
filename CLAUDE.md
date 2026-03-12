@@ -18,7 +18,6 @@ agent_host/     ← Local Agent Host (custom agent loop)
   session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
   loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
   llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
-  thread/       — Message thread management, context compaction, token counting
   memory/       — Working memory: task tracker, plan, notes (injected per-turn)
   skills/       — Skill definitions, loader (built-in/user/workspace/policy); execution via LoopRuntime
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
@@ -63,7 +62,7 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
   - `VerificationConfig` (`loop/verification.py`) — post-completion self-verification. Injects verification prompt when agent first signals done, extends step budget by `max_verify_steps`, emits `verification_started`/`verification_completed` events.
   - Sub-agent spawning — `LoopRuntime.spawn_sub_agent()` creates child LoopRuntime + ReactLoop with isolated MessageThread, shared TokenBudget, Semaphore(5) concurrency
   - Skill execution — `LoopRuntime.execute_skill()` runs skills as focused sub-conversations with child LoopRuntime + ReactLoop
-- **Context compaction** (`thread/compactor.py`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
+- **Context compaction** (in `agent_sdk.thread.compactor`) — two strategies: `DropOldestCompactor` (simple drop with recency window) and `HybridCompactor` (observation masking + optional LLM summarization). Default: `hybrid`. Triggered at 90% of max_context_tokens.
 - **Prompt caching optimization** — `ReactLoop._build_messages()` orders context for LLM provider cache efficiency: stable prefix (system prompt → persistent memory → conversation history) then volatile suffix (working memory → error recovery).
 - **Transport protocol** (`server/transport.py`) — `Transport` protocol with `start()`, `send_event()`, `shutdown()`. Two implementations:
   - `StdioTransport` — JSON-RPC over stdin/stdout with write lock (desktop mode)
@@ -177,7 +176,6 @@ cowork-agent-runtime/
       session/                # Session/Workspace clients, checkpoint manager, SessionManager
       loop/                   # Agent loop, tool executor, agent tools, error recovery, sub-agents
       llm/                    # LLM Gateway streaming client, response models, error classifier
-      thread/                 # Message thread, context compaction, token counting
       memory/                 # Working memory: task tracker, plan, notes
       skills/                 # Skill definitions, loader, executor
       sandbox/                # Sandbox startup (self-registration), workspace file sync

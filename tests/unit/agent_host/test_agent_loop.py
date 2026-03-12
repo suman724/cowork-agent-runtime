@@ -8,11 +8,11 @@ from unittest.mock import MagicMock
 from agent_sdk.budget.token_budget import TokenBudget
 from agent_sdk.llm.models import LLMResponse
 from agent_sdk.loop.models import ToolCallResult
+from agent_sdk.thread.compactor import DropOldestCompactor
+from agent_sdk.thread.message_thread import MessageThread
 
 from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.react_loop import ReactLoop
-from agent_host.thread.compactor import DropOldestCompactor
-from agent_host.thread.message_thread import MessageThread
 from tests.fixtures.mock_llm import MockLLMClient
 from tests.fixtures.policy_bundles import make_policy_bundle
 

@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from agent_sdk.llm.models import LLMResponse, ToolCallMessage
     from agent_sdk.loop.models import ToolCallResult
     from agent_sdk.policy.policy_enforcer import PolicyEnforcer
+    from agent_sdk.thread.compactor import ContextCompactor
+    from agent_sdk.thread.message_thread import MessageThread
 
     from agent_host.events.event_emitter import EventEmitter
     from agent_host.llm.client import LLMClient
@@ -27,8 +29,6 @@ if TYPE_CHECKING:
     from agent_host.memory.memory_manager import MemoryManager
     from agent_host.memory.working_memory import WorkingMemory
     from agent_host.skills.models import SkillDefinition
-    from agent_host.thread.compactor import ContextCompactor
-    from agent_host.thread.message_thread import MessageThread
 
 logger = structlog.get_logger()
 
@@ -315,8 +315,8 @@ class LoopRuntime:
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None,
     ) -> dict[str, Any]:
         """Run a sub-agent with isolated context."""
-        from agent_host.thread.compactor import DropOldestCompactor
-        from agent_host.thread.message_thread import MessageThread
+        from agent_sdk.thread.compactor import DropOldestCompactor
+        from agent_sdk.thread.message_thread import MessageThread
 
         sub_task_id = f"{parent_task_id}-sub"
 
@@ -407,9 +407,10 @@ class LoopRuntime:
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None = None,
     ) -> dict[str, Any]:
         """Execute a skill as a focused sub-conversation."""
+        from agent_sdk.thread.compactor import DropOldestCompactor
+        from agent_sdk.thread.message_thread import MessageThread
+
         from agent_host.skills.skill_loader import SkillLoader, substitute_arguments
-        from agent_host.thread.compactor import DropOldestCompactor
-        from agent_host.thread.message_thread import MessageThread
 
         task_id = f"{parent_task_id}-skill-{skill.name}"
 
