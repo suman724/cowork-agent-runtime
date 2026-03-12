@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agent_sdk.budget.token_budget import TokenBudget
+    from agent_sdk.llm.client import LLMClient
     from agent_sdk.llm.models import LLMResponse, ToolCallMessage
     from agent_sdk.loop.models import ToolCallResult
     from agent_sdk.memory.memory_manager import MemoryManager
@@ -24,7 +25,6 @@ if TYPE_CHECKING:
     from agent_sdk.thread.message_thread import MessageThread
 
     from agent_host.events.event_emitter import EventEmitter
-    from agent_host.llm.client import LLMClient
     from agent_host.loop.agent_tools import AgentToolHandler
     from agent_host.loop.strategy import LoopStrategy
     from agent_host.loop.tool_executor import ToolExecutor

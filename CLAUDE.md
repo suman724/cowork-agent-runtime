@@ -17,7 +17,6 @@ agent_host/     ← Local Agent Host (custom agent loop)
   server/       — Transport layer (Transport protocol, StdioTransport, HttpTransport), JSON-RPC 2.0 (parse, serialize, dispatch, handlers), EventBuffer (SSE replay)
   session/      — Session/Workspace HTTP clients (tenacity retry), checkpoint manager, SessionManager
   loop/         — LoopRuntime (infrastructure), LoopStrategy protocol, ReactLoop (default strategy), tool executor, agent-internal tools, error recovery
-  llm/          — LLM Gateway streaming client (openai SDK), response models, error classifier
   skills/       — Skill definitions, loader (built-in/user/workspace/policy); execution via LoopRuntime
   policy/       — Policy Enforcer: capability validation, path/command/domain matchers, risk assessor
   budget/       — Token budget tracking (pre-check + record_usage)
@@ -174,7 +173,6 @@ cowork-agent-runtime/
       server/                 # JSON-RPC 2.0 server (parse, transport, dispatch, handlers)
       session/                # Session/Workspace clients, checkpoint manager, SessionManager
       loop/                   # Agent loop, tool executor, agent tools, error recovery, sub-agents
-      llm/                    # LLM Gateway streaming client, response models, error classifier
       skills/                 # Skill definitions, loader, executor
       sandbox/                # Sandbox startup (self-registration), workspace file sync
       policy/                 # Policy enforcer, path/command/domain matchers, risk assessor

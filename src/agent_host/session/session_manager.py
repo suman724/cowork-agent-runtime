@@ -17,6 +17,7 @@ from agent_sdk.exceptions import (
     PolicyExpiredError,
     SessionNotFoundError,
 )
+from agent_sdk.llm.client import LLMClient
 from agent_sdk.memory.memory_manager import MemoryManager
 from agent_sdk.memory.working_memory import WorkingMemory
 from agent_sdk.models import SessionContext
@@ -36,7 +37,6 @@ from cowork_platform_sdk import CapabilityName
 
 from agent_host.agent.file_change_tracker import FileChangeTracker
 from agent_host.approval.approval_client import ApprovalClient
-from agent_host.llm.client import LLMClient
 from agent_host.loop.agent_tools import AgentToolHandler
 from agent_host.loop.loop_runtime import LoopRuntime
 from agent_host.loop.react_loop import ReactLoop
