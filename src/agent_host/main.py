@@ -15,6 +15,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 import structlog
 
@@ -182,13 +183,13 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     sqs_mode = bool(config.sqs_queue_url)
     sandbox_mode = sqs_mode or bool(config.session_id)
     registration_result = None
-    metrics_publisher = None
-    cw_client = None  # CloudWatch client (SQS mode only, cleaned up on shutdown)
+    metrics_publisher: Any = None
+    cw_client: Any = None  # CloudWatch client (SQS mode only, cleaned up on shutdown)
 
     if sqs_mode:
         import dataclasses
 
-        import aioboto3
+        import aioboto3  # type: ignore[import-untyped]
 
         from agent_host.sandbox.metrics import NoOpMetricsPublisher, TaskUtilizationPublisher
         from agent_host.sandbox.sqs_consumer import delete_message, poll_for_session
