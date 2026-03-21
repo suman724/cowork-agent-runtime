@@ -250,6 +250,11 @@ class SessionManager:
         Used in sandbox/HTTP mode — the session already exists on the backend,
         so we skip create_session() and initialize directly from the registration
         response data (session context + policy bundle).
+
+        Always attempts to load prior session history from Workspace Service.
+        For new sessions this returns nothing (no-op). For resumed sessions
+        (dispatched via SQS after POST /sessions/{id}/resume), this restores
+        the full conversation thread so the LLM has context.
         """
         self._workspace_dir = workspace_dir
 
@@ -260,6 +265,23 @@ class SessionManager:
             user_id="",
         )
         self._activate_session(context, policy_bundle_data)
+
+        # Load prior session history (no-op for new sessions, restores thread
+        # for resumed sessions). Same pattern as resume_session().
+        try:
+            prior_messages = await self._workspace_client.get_session_history(
+                workspace_id=workspace_id,
+                session_id=session_id,
+            )
+            if prior_messages:
+                self._session_messages = prior_messages
+                logger.info(
+                    "session_history_restored",
+                    session_id=session_id,
+                    message_count=len(prior_messages),
+                )
+        except Exception:
+            logger.warning("session_history_load_failed", session_id=session_id, exc_info=True)
 
         logger.info(
             "session_initialized_from_registration",
