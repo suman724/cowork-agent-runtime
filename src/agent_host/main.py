@@ -174,11 +174,84 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     transport.set_dispatcher(dispatcher)
 
     # Sandbox startup: register + sync workspace BEFORE serving HTTP
-    sandbox_mode = bool(config.session_id)
+    #
+    # Two modes for obtaining session config:
+    #   1. SQS mode (SQS_QUEUE_URL set): poll SQS for session config, then register
+    #   2. Env var mode (SESSION_ID set): read from env vars, then register (legacy/debug)
+    sqs_mode = bool(config.sqs_queue_url)
+    sandbox_mode = sqs_mode or bool(config.session_id)
     registration_result = None
-    if sandbox_mode:
+    metrics_publisher = None
+
+    if sqs_mode:
+        import aioboto3
+
+        from agent_host.sandbox.metrics import NoOpMetricsPublisher, TaskUtilizationPublisher
+        from agent_host.sandbox.sqs_consumer import delete_message, poll_for_session
         from agent_host.sandbox.startup import run_sandbox_startup
         from agent_host.sandbox.workspace_sync import download_workspace
+        from agent_host.session.session_client import SessionClient
+
+        # Set up CloudWatch metrics (best-effort)
+        boto_session = aioboto3.Session()
+        boto_kwargs: dict[str, str] = {}
+        if config.aws_endpoint_url:
+            boto_kwargs["endpoint_url"] = config.aws_endpoint_url
+
+        try:
+            cw_client = await boto_session.client("cloudwatch", **boto_kwargs).__aenter__()
+            metrics_publisher = TaskUtilizationPublisher(
+                cw_client,
+                service_name=config.sandbox_service_name,
+                environment=config.environment,
+            )
+        except Exception:
+            logger.warning("cloudwatch_client_init_failed", exc_info=True)
+            metrics_publisher = NoOpMetricsPublisher()
+
+        # Report idle while polling
+        await metrics_publisher.report_idle()
+
+        # Poll SQS for session config
+        sqs_client = await boto_session.client("sqs", **boto_kwargs).__aenter__()
+        try:
+            sqs_config = await poll_for_session(sqs_client, config.sqs_queue_url)
+
+            # Delete message immediately — before registration
+            await delete_message(sqs_client, config.sqs_queue_url, sqs_config.receipt_handle)
+        finally:
+            await sqs_client.__aexit__(None, None, None)
+
+        # Report busy — now serving a session
+        await metrics_publisher.report_busy()
+
+        # Override config with SQS message values
+        config = AgentHostConfig(
+            **{
+                **{f.name: getattr(config, f.name) for f in config.__dataclass_fields__.values()},
+                "session_id": sqs_config.session_id,
+                "registration_token": sqs_config.registration_token,
+                "session_service_url": sqs_config.session_service_url or config.session_service_url,
+                "workspace_service_url": (
+                    sqs_config.workspace_service_url or config.workspace_service_url
+                ),
+            }
+        )
+
+        # Register with Session Service
+        session_client = SessionClient(config.session_service_url)
+        try:
+            registration_result = await run_sandbox_startup(
+                config,
+                session_client,
+                port=args.port,
+            )
+        finally:
+            await session_client.close()
+
+    elif sandbox_mode:
+        # Legacy env var mode (SESSION_ID set directly)
+        from agent_host.sandbox.startup import run_sandbox_startup
         from agent_host.session.session_client import SessionClient
 
         session_client = SessionClient(config.session_service_url)
@@ -190,6 +263,10 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
             )
         finally:
             await session_client.close()
+
+    # Post-registration setup (common to both SQS and legacy modes)
+    if sandbox_mode and registration_result:
+        from agent_host.sandbox.workspace_sync import download_workspace
 
         # Wire workspace sync context into transport (for workspace.sync RPC)
         ws_url = registration_result.workspace_service_url
@@ -252,7 +329,11 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     try:
         await stop_event.wait()
     finally:
-        logger.info("agent_host_shutting_down")
+        logger.info("agent_host_shutting_down", sqs_mode=sqs_mode)
+
+        # Report idle metric before shutdown (so auto-scaling sees reduced utilization)
+        if metrics_publisher:
+            await metrics_publisher.report_idle()
 
         # Sandbox shutdown: sync workspace back BEFORE session cancellation
         # (session_manager.shutdown() may cancel the session on the backend,
