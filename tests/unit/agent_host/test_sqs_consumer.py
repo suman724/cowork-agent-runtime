@@ -9,7 +9,6 @@ import pytest
 from agent_sdk.exceptions import SandboxStartupError
 
 from agent_host.sandbox.sqs_consumer import (
-    SqsSessionConfig,
     _parse_message,
     delete_message,
     poll_for_session,
@@ -51,7 +50,7 @@ class TestParseMessage:
         config = _parse_message(msg, "receipt-abc")
 
         assert config.session_id == "sess-001"
-        assert config.registration_token == "tok-abc"
+        assert config.registration_token == "tok-abc"  # noqa: S105
         assert config.session_service_url == "http://session:8000"
         assert config.workspace_service_url == "http://workspace:8002"
         assert config.receipt_handle == "receipt-abc"
@@ -101,7 +100,7 @@ class TestPollForSession:
         config = await poll_for_session(sqs, QUEUE_URL)
 
         assert config.session_id == "sess-001"
-        assert config.registration_token == "tok-abc"
+        assert config.registration_token == "tok-abc"  # noqa: S105
         sqs.receive_message.assert_called_once()
 
     async def test_skips_empty_polls(self) -> None:

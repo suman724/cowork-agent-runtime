@@ -1,0 +1,1 @@
+set -a && [ -f .env ] && . .env; set +a && .venv/bin/python -m agent_host.main --transport http --port 8080 --workspace-dir ./workspace

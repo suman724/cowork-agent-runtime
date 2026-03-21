@@ -583,7 +583,6 @@ class SessionManager:
             task_options_keys=list(task_options.keys()),
         )
 
-        assistant_text = ""
         result = None  # LoopResult — set on successful completion
         try:
             # Build execution context with workspace working directory
@@ -691,7 +690,6 @@ class SessionManager:
 
             # Track step count for get_session_state
             self._current_step_count = result.step_count
-            assistant_text = result.text
 
             # Emit task_completed for successful completion
             if result.reason == "completed" and self._event_emitter:

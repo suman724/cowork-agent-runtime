@@ -186,6 +186,8 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     cw_client = None  # CloudWatch client (SQS mode only, cleaned up on shutdown)
 
     if sqs_mode:
+        import dataclasses
+
         import aioboto3
 
         from agent_host.sandbox.metrics import NoOpMetricsPublisher, TaskUtilizationPublisher
@@ -193,8 +195,6 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         from agent_host.sandbox.startup import run_sandbox_startup
         from agent_host.sandbox.workspace_sync import download_workspace
         from agent_host.session.session_client import SessionClient
-
-        import dataclasses
 
         # Set up boto session for AWS clients
         aws_region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
@@ -215,10 +215,10 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         except Exception:
             logger.warning("cloudwatch_client_init_failed", exc_info=True)
             if cw_client is not None:
-                try:
+                try:  # noqa: SIM105
                     await cw_client.__aexit__(None, None, None)
-                except Exception:
-                    pass
+                except Exception:  # noqa: S110
+                    pass  # Best-effort cleanup of partially-created client
                 cw_client = None
             metrics_publisher = NoOpMetricsPublisher()
 
@@ -369,10 +369,10 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
 
         # Clean up CloudWatch client (SQS mode only)
         if cw_client is not None:
-            try:
+            try:  # noqa: SIM105
                 await cw_client.__aexit__(None, None, None)
-            except Exception:
-                pass
+            except Exception:  # noqa: S110
+                pass  # Best-effort cleanup
 
     logger.info("agent_host_exiting")
 
