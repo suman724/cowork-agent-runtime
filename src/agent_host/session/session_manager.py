@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import platform
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -455,7 +456,7 @@ class SessionManager:
         if not self._session_context or not self._llm_client:
             raise SessionNotFoundError("No active session")
 
-        task_id = params.get("taskId", "")
+        task_id = params.get("taskId") or str(uuid.uuid4())
         prompt = params.get("prompt", "")
 
         # Parse taskOptions - extract maxSteps (clamped 1-200)

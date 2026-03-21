@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -182,6 +183,7 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
     sandbox_mode = sqs_mode or bool(config.session_id)
     registration_result = None
     metrics_publisher = None
+    cw_client = None  # CloudWatch client (SQS mode only, cleaned up on shutdown)
 
     if sqs_mode:
         import aioboto3
@@ -195,7 +197,8 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         import dataclasses
 
         # Set up boto session for AWS clients
-        boto_session = aioboto3.Session()
+        aws_region = os.environ.get("AWS_REGION", os.environ.get("AWS_DEFAULT_REGION", "us-east-1"))
+        boto_session = aioboto3.Session(region_name=aws_region)
         boto_kwargs: dict[str, str] = {}
         if config.aws_endpoint_url:
             boto_kwargs["endpoint_url"] = config.aws_endpoint_url
