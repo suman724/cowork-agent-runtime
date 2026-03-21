@@ -33,9 +33,10 @@ class ExecuteCodeTool(BaseTool):
     def description(self) -> str:
         return (
             "Execute a Python script and return its stdout, stderr, and exit code. "
+            "Use when the task requires running code. If you can answer directly, "
+            "do not use this tool. "
             "Each execution is independent — write complete, self-contained scripts. "
-            "Matplotlib plots are captured automatically (plt.show() saves images). "
-            "Use for: calculations, data analysis, testing code, prototyping."
+            "Matplotlib plots are captured automatically (plt.show() saves images)."
         )
 
     @property
