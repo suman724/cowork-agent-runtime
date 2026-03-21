@@ -192,12 +192,16 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         from agent_host.sandbox.workspace_sync import download_workspace
         from agent_host.session.session_client import SessionClient
 
-        # Set up CloudWatch metrics (best-effort)
+        import dataclasses
+
+        # Set up boto session for AWS clients
         boto_session = aioboto3.Session()
         boto_kwargs: dict[str, str] = {}
         if config.aws_endpoint_url:
             boto_kwargs["endpoint_url"] = config.aws_endpoint_url
 
+        # Set up CloudWatch metrics (best-effort — no-op if unavailable)
+        cw_client = None
         try:
             cw_client = await boto_session.client("cloudwatch", **boto_kwargs).__aenter__()
             metrics_publisher = TaskUtilizationPublisher(
@@ -207,6 +211,12 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
             )
         except Exception:
             logger.warning("cloudwatch_client_init_failed", exc_info=True)
+            if cw_client is not None:
+                try:
+                    await cw_client.__aexit__(None, None, None)
+                except Exception:
+                    pass
+                cw_client = None
             metrics_publisher = NoOpMetricsPublisher()
 
         # Report idle while polling
@@ -226,16 +236,12 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         await metrics_publisher.report_busy()
 
         # Override config with SQS message values
-        config = AgentHostConfig(
-            **{
-                **{f.name: getattr(config, f.name) for f in config.__dataclass_fields__.values()},
-                "session_id": sqs_config.session_id,
-                "registration_token": sqs_config.registration_token,
-                "session_service_url": sqs_config.session_service_url or config.session_service_url,
-                "workspace_service_url": (
-                    sqs_config.workspace_service_url or config.workspace_service_url
-                ),
-            }
+        config = dataclasses.replace(
+            config,
+            session_id=sqs_config.session_id,
+            registration_token=sqs_config.registration_token,
+            session_service_url=sqs_config.session_service_url or config.session_service_url,
+            workspace_service_url=sqs_config.workspace_service_url or config.workspace_service_url,
         )
 
         # Register with Session Service
@@ -284,6 +290,8 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
                     registration_result.workspace_id,
                     workspace_dir,
                 )
+            except Exception:
+                logger.warning("workspace_download_failed", exc_info=True)
             finally:
                 # Always mark complete — even on failure — so workspace.sync
                 # RPCs don't hang forever waiting on the gate.
@@ -355,6 +363,13 @@ async def run_http(config: AgentHostConfig, args: argparse.Namespace) -> None:
         except Exception:
             logger.warning("emergency_shutdown_failed", exc_info=True)
         await transport.shutdown()
+
+        # Clean up CloudWatch client (SQS mode only)
+        if cw_client is not None:
+            try:
+                await cw_client.__aexit__(None, None, None)
+            except Exception:
+                pass
 
     logger.info("agent_host_exiting")
 

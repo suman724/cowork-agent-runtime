@@ -11,6 +11,7 @@ startup.py. See docs/design/sqs-sandbox-dispatch.md for the full design.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -64,6 +65,7 @@ async def poll_for_session(
         SandboxStartupError: If the message body is malformed.
     """
     logger.info("sqs_polling_started", queue_url=queue_url)
+    consecutive_errors = 0
 
     while True:
         try:
@@ -73,9 +75,18 @@ async def poll_for_session(
                 WaitTimeSeconds=_SQS_WAIT_TIME_SECONDS,
                 VisibilityTimeout=_SQS_VISIBILITY_TIMEOUT,
             )
+            consecutive_errors = 0
         except Exception as exc:
-            # Log and retry — transient SQS errors should not crash the worker
-            logger.warning("sqs_receive_error", error=str(exc))
+            # Exponential backoff on consecutive errors (capped at 30s)
+            consecutive_errors += 1
+            backoff = min(2**consecutive_errors, 30)
+            logger.warning(
+                "sqs_receive_error",
+                error=str(exc),
+                consecutive_errors=consecutive_errors,
+                backoff_seconds=backoff,
+            )
+            await asyncio.sleep(backoff)
             continue
 
         messages = response.get("Messages", [])
@@ -85,6 +96,9 @@ async def poll_for_session(
 
         message = messages[0]
         receipt_handle = message.get("ReceiptHandle", "")
+        if not receipt_handle:
+            logger.error("sqs_message_missing_receipt_handle", message_id=message.get("MessageId"))
+            continue  # Can't delete without receipt handle — SQS will redeliver after timeout
 
         try:
             config = _parse_message(message, receipt_handle)

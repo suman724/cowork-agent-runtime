@@ -136,6 +136,8 @@ async def run_sandbox_startup(
         raise SandboxStartupError("Registration response missing policyBundle")
 
     workspace_id: str = result.get("workspaceId", "")
+    if not workspace_id:
+        raise SandboxStartupError("Registration response missing workspaceId")
     workspace_service_url: str = result.get("workspaceServiceUrl", "")
 
     logger.info(

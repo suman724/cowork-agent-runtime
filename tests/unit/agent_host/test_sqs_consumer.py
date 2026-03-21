@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from agent_sdk.exceptions import SandboxStartupError
@@ -118,7 +118,8 @@ class TestPollForSession:
         assert config.session_id == "sess-001"
         assert sqs.receive_message.call_count == 3
 
-    async def test_retries_on_receive_error(self) -> None:
+    @patch("agent_host.sandbox.sqs_consumer.asyncio.sleep", new_callable=AsyncMock)
+    async def test_retries_on_receive_error(self, mock_sleep: AsyncMock) -> None:
         sqs = AsyncMock()
         # One error, then success
         sqs.receive_message.side_effect = [
@@ -130,6 +131,8 @@ class TestPollForSession:
 
         assert config.session_id == "sess-001"
         assert sqs.receive_message.call_count == 2
+        # Verify backoff was applied (2^1 = 2 seconds for first error)
+        mock_sleep.assert_called_once_with(2)
 
     async def test_deletes_malformed_message_and_continues(self) -> None:
         sqs = AsyncMock()
