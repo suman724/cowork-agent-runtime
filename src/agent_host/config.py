@@ -72,10 +72,14 @@ class AgentHostConfig:
     compaction_llm_summary: bool = True  # enable LLM summarization phase
 
     # Sandbox mode (set when running inside a sandbox container)
-    session_id: str = ""  # Pre-assigned session ID (sandbox only)
-    registration_token: str = ""  # Token for sandbox self-registration
+    session_id: str = ""  # Pre-assigned session ID (sandbox only, legacy env var mode)
+    registration_token: str = ""  # Token for sandbox self-registration (legacy env var mode)
     sandbox_local_mode: bool = False  # Skip ECS metadata, use localhost endpoint
     skills_dir: str = ""  # Override user skills directory (default: ~/.cowork/skills/)
+    sqs_queue_url: str = ""  # SQS queue for session dispatch (SQS mode, overrides session_id)
+    aws_endpoint_url: str = ""  # AWS endpoint override (LocalStack: http://localhost:4566)
+    sandbox_service_name: str = "sandbox-workers"  # CloudWatch metric dimension
+    environment: str = "dev"  # Environment name for CloudWatch metrics
 
     @classmethod
     def from_env(cls) -> AgentHostConfig:
@@ -133,6 +137,10 @@ class AgentHostConfig:
             sandbox_local_mode=os.environ.get("SANDBOX_LOCAL_MODE", "false").lower()
             in ("true", "1", "yes"),
             skills_dir=os.environ.get("SKILLS_DIR", ""),
+            sqs_queue_url=os.environ.get("SQS_QUEUE_URL", ""),
+            aws_endpoint_url=os.environ.get("AWS_ENDPOINT_URL", ""),
+            sandbox_service_name=os.environ.get("SANDBOX_SERVICE_NAME", "sandbox-workers"),
+            environment=os.environ.get("ENVIRONMENT", "dev"),
         )
 
 

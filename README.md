@@ -91,14 +91,25 @@ make docker-build    # Builds cowork-agent-runtime:latest
 # Using .env file (must contain LLM_GATEWAY_ENDPOINT, LLM_GATEWAY_AUTH_TOKEN, etc.)
 make docker-run
 
-# Or manually with explicit env vars
+# SQS mode (production — polls SQS queue for sessions):
+docker run --rm -p 8080:8080 \
+  -e SQS_QUEUE_URL=http://localhost:4566/000000000000/dev-sandbox-requests \
+  -e AWS_ENDPOINT_URL=http://host.docker.internal:4566 \
+  -e LLM_GATEWAY_ENDPOINT=https://llm.example.com \
+  -e LLM_GATEWAY_AUTH_TOKEN=secret \
+  -e SESSION_SERVICE_URL=http://host.docker.internal:8000 \
+  -e WORKSPACE_SERVICE_URL=http://host.docker.internal:8002 \
+  -e SANDBOX_LOCAL_MODE=true \
+  cowork-agent-runtime:latest
+
+# Legacy env var mode (debugging — explicit session ID):
 docker run --rm -p 8080:8080 \
   -e SESSION_ID=sess_123 \
   -e REGISTRATION_TOKEN=tok_abc \
   -e LLM_GATEWAY_ENDPOINT=https://llm.example.com \
   -e LLM_GATEWAY_AUTH_TOKEN=secret \
-  -e SESSION_SERVICE_URL=https://api.example.com \
-  -e WORKSPACE_SERVICE_URL=https://api.example.com \
+  -e SESSION_SERVICE_URL=http://host.docker.internal:8000 \
+  -e WORKSPACE_SERVICE_URL=http://host.docker.internal:8002 \
   -e SANDBOX_LOCAL_MODE=true \
   cowork-agent-runtime:latest
 ```
@@ -172,8 +183,12 @@ The test script lives in `cowork-session-service/scripts/test-web-sandbox.py` an
 | `LOG_LEVEL` | `info` | Structured logging level (debug, info, warning, error) |
 | `LLM_MODEL` | `gpt-4o` | LLM model identifier for OpenAI-compatible gateway |
 | `SKILLS_DIR` | `~/.cowork/skills/` | Override user skills directory |
-| `SESSION_ID` | — | Pre-assigned session ID (sandbox mode — triggers self-registration) |
-| `REGISTRATION_TOKEN` | — | Token for sandbox self-registration with Session Service |
+| `SQS_QUEUE_URL` | — | SQS queue URL for session dispatch (production sandbox mode) |
+| `AWS_ENDPOINT_URL` | — | AWS endpoint override for LocalStack (`http://localhost:4566`) |
+| `ENVIRONMENT` | `dev` | Environment name for CloudWatch metrics |
+| `SANDBOX_SERVICE_NAME` | `sandbox-workers` | CloudWatch metric dimension |
+| `SESSION_ID` | — | Pre-assigned session ID (legacy sandbox mode — triggers self-registration) |
+| `REGISTRATION_TOKEN` | — | Token for sandbox self-registration (legacy sandbox mode) |
 | `SANDBOX_LOCAL_MODE` | `false` | Skip ECS metadata, use localhost (sandbox local dev) |
 
 ## Architecture
@@ -235,3 +250,4 @@ Local tool execution engine:
 | `starlette` | ASGI framework for HttpTransport (web/sandbox mode) |
 | `uvicorn` | ASGI server for HttpTransport |
 | `python-multipart` | Multipart form parsing for file upload |
+| `aioboto3` | Async AWS SDK for SQS polling and CloudWatch metrics (sandbox mode) |

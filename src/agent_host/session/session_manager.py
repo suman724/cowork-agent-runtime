@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import platform
+import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
@@ -249,6 +250,11 @@ class SessionManager:
         Used in sandbox/HTTP mode — the session already exists on the backend,
         so we skip create_session() and initialize directly from the registration
         response data (session context + policy bundle).
+
+        Always attempts to load prior session history from Workspace Service.
+        For new sessions this returns nothing (no-op). For resumed sessions
+        (dispatched via SQS after POST /sessions/{id}/resume), this restores
+        the full conversation thread so the LLM has context.
         """
         self._workspace_dir = workspace_dir
 
@@ -259,6 +265,23 @@ class SessionManager:
             user_id="",
         )
         self._activate_session(context, policy_bundle_data)
+
+        # Load prior session history (no-op for new sessions, restores thread
+        # for resumed sessions). Same pattern as resume_session().
+        try:
+            prior_messages = await self._workspace_client.get_session_history(
+                workspace_id=workspace_id,
+                session_id=session_id,
+            )
+            if prior_messages:
+                self._session_messages = prior_messages
+                logger.info(
+                    "session_history_restored",
+                    session_id=session_id,
+                    message_count=len(prior_messages),
+                )
+        except Exception:
+            logger.warning("session_history_load_failed", session_id=session_id, exc_info=True)
 
         logger.info(
             "session_initialized_from_registration",
@@ -455,7 +478,7 @@ class SessionManager:
         if not self._session_context or not self._llm_client:
             raise SessionNotFoundError("No active session")
 
-        task_id = params.get("taskId", "")
+        task_id = params.get("taskId") or str(uuid.uuid4())
         prompt = params.get("prompt", "")
 
         # Parse taskOptions - extract maxSteps (clamped 1-200)
@@ -561,6 +584,7 @@ class SessionManager:
         )
 
         assistant_text = ""
+        result = None  # LoopResult — set on successful completion
         try:
             # Build execution context with workspace working directory
             exec_context: ExecutionContext | None = None
@@ -715,13 +739,25 @@ class SessionManager:
                     )
 
         finally:
-            # Report task completion to session service (best-effort)
-            if self._session_context and not isinstance(assistant_text, type(None)):
-                completion_status = "completed" if assistant_text else "failed"
-                reason = "completed"
-                if self._current_step_count >= max_steps:
+            # Report task completion to session service (best-effort).
+            # Use result.reason (from LoopResult) to determine status — not
+            # assistant_text, which can be empty even on successful completion
+            # (e.g., verification step produces no text output).
+            if self._session_context:
+                if result is not None:
+                    if result.reason == "completed":
+                        completion_status = "completed"
+                        reason = "completed"
+                    elif result.reason == "max_steps_exceeded":
+                        completion_status = "failed"
+                        reason = "max_steps_exceeded"
+                    else:
+                        completion_status = "failed"
+                        reason = result.reason
+                else:
+                    # Exception before LoopResult was produced
                     completion_status = "failed"
-                    reason = "max_steps_exceeded"
+                    reason = "error"
                 await self._report_task_completed(
                     task_id, completion_status, self._current_step_count, reason
                 )

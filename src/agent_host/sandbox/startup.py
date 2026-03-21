@@ -108,12 +108,10 @@ async def run_sandbox_startup(
     # Resolve container endpoint
     if config.sandbox_local_mode:
         container_ip = "127.0.0.1"
-        task_arn = f"local:{os.getpid()}"
         logger.info("sandbox_startup_local_mode", session_id=session_id)
     else:
         ecs = await _fetch_ecs_metadata()
         container_ip = ecs.container_ip
-        task_arn = ecs.task_arn
 
     sandbox_endpoint = f"http://{container_ip}:{port}"
 
@@ -121,7 +119,6 @@ async def run_sandbox_startup(
         "sandbox_registering",
         session_id=session_id,
         sandbox_endpoint=sandbox_endpoint,
-        task_arn=task_arn,
     )
 
     # Register with Session Service (uses SessionClient with retry + error handling)
@@ -129,7 +126,6 @@ async def run_sandbox_startup(
         result = await session_client.register_sandbox(
             session_id,
             sandbox_endpoint=sandbox_endpoint,
-            task_arn=task_arn,
             registration_token=config.registration_token or None,
         )
     except Exception as exc:
@@ -140,6 +136,8 @@ async def run_sandbox_startup(
         raise SandboxStartupError("Registration response missing policyBundle")
 
     workspace_id: str = result.get("workspaceId", "")
+    if not workspace_id:
+        raise SandboxStartupError("Registration response missing workspaceId")
     workspace_service_url: str = result.get("workspaceServiceUrl", "")
 
     logger.info(

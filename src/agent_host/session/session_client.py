@@ -164,7 +164,6 @@ class SessionClient:
         session_id: str,
         *,
         sandbox_endpoint: str,
-        task_arn: str,
         registration_token: str | None = None,
     ) -> dict[str, Any]:
         """Register sandbox container via POST /sessions/{id}/register.
@@ -179,7 +178,6 @@ class SessionClient:
         )
         body: dict[str, Any] = {
             "sandboxEndpoint": sandbox_endpoint,
-            "taskArn": task_arn,
         }
         if registration_token:
             body["registrationToken"] = registration_token
