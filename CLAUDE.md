@@ -121,14 +121,23 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 - `LLM_MODEL` — LLM model identifier (default: openai/gpt-4o)
 - `TAVILY_API_KEY` — Tavily API key (optional, required for WebSearch tool)
 - `WORKSPACE_SYNC_INTERVAL` — Sync checkpoint to workspace every N steps (default: 5, 0 = disabled)
-- `SESSION_ID` — Pre-assigned session ID (sandbox mode only, triggers self-registration)
-- `REGISTRATION_TOKEN` — Token for sandbox self-registration (sandbox mode only)
+- `SESSION_ID` — Pre-assigned session ID (legacy sandbox mode, triggers self-registration)
+- `REGISTRATION_TOKEN` — Token for sandbox self-registration (legacy sandbox mode)
 - `SANDBOX_LOCAL_MODE` — Skip ECS metadata, use localhost endpoint (sandbox local dev)
 - `SKILLS_DIR` — Override user skills directory (default: `~/.cowork/skills/`)
+- `SQS_QUEUE_URL` — SQS queue for session dispatch (SQS sandbox mode, overrides SESSION_ID)
+- `AWS_ENDPOINT_URL` — AWS endpoint override for LocalStack (e.g., `http://localhost:4566`)
+- `SANDBOX_SERVICE_NAME` — CloudWatch metric dimension (default: `sandbox-workers`)
+- `ENVIRONMENT` — Environment name for CloudWatch metrics (default: `dev`)
 
 ## Sandbox Mode
 
-When `SESSION_ID` is set and `--transport http` is used, the agent runtime runs in **sandbox mode**:
+The agent runtime supports two sandbox config sources with `--transport http`:
+
+1. **SQS mode** (`SQS_QUEUE_URL` set): Polls SQS for session config, picks up a session, serves it, then exits. Used in production ECS Service worker pool. See `cowork-infra/docs/design/sqs-sandbox-dispatch.md`.
+2. **Legacy env var mode** (`SESSION_ID` set, no `SQS_QUEUE_URL`): Reads session config from environment variables. Useful for debugging and manual sandbox start.
+
+In either mode, the sandbox startup flow is:
 
 1. **Self-registration**: Reads container IP from ECS metadata (or localhost in `SANDBOX_LOCAL_MODE`), calls `POST /sessions/{sessionId}/register` on Session Service
 2. **Workspace sync**: Downloads workspace files from Workspace Service to `--workspace-dir` before serving HTTP. Sets the startup sync gate (`asyncio.Event`) after completion.
@@ -136,6 +145,8 @@ When `SESSION_ID` is set and `--transport http` is used, the agent runtime runs 
 4. **Skills**: Loads from `{workspace}/.cowork/skills/` (project-level) in addition to built-in skills. No home directory needed. `SKILLS_DIR` env var overrides the user skills path.
 5. **Graceful shutdown**: On SIGTERM, uploads workspace files back to Workspace Service before exiting
 6. **`workspace.sync` RPC** (HTTP transport only): Session Service can trigger targeted file sync via `POST /rpc` with method `workspace.sync`. Supports `direction` (`pull`/`push`) and optional `paths` list. Serialized via `asyncio.Lock`, gated behind startup sync completion (30s timeout). See `workspace-file-sync.md` design doc.
+7. **CloudWatch metrics** (SQS mode only): Publishes `TaskUtilization` metric (1.0 = busy, 0.0 = idle) to `Cowork/Sandbox` namespace. Used for ECS auto-scaling. Best-effort — no-op if CloudWatch unavailable.
+8. **Process exit** (SQS mode only): After session ends and workspace sync completes, the process exits. ECS replaces it with a fresh container.
 
 Stdio mode is completely unaffected by sandbox-related code.
 
