@@ -76,9 +76,7 @@ class TestParseMessage:
             _parse_message(msg, "receipt")
 
     def test_optional_urls_default_to_empty(self) -> None:
-        msg = _make_sqs_message(
-            body={"sessionId": "s1", "registrationToken": "t1"}
-        )
+        msg = _make_sqs_message(body={"sessionId": "s1", "registrationToken": "t1"})
         config = _parse_message(msg, "receipt")
         assert config.session_service_url == ""
         assert config.workspace_service_url == ""

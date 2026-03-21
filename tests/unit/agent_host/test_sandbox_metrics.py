@@ -57,9 +57,7 @@ class TestTaskUtilizationPublisher:
         dims = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
         assert dims == {"ServiceName": "test-workers", "Environment": "test"}
 
-    async def test_cloudwatch_error_does_not_raise(
-        self, mock_cw: AsyncMock
-    ) -> None:
+    async def test_cloudwatch_error_does_not_raise(self, mock_cw: AsyncMock) -> None:
         mock_cw.put_metric_data.side_effect = Exception("CloudWatch unavailable")
         publisher = TaskUtilizationPublisher(mock_cw, environment="test")
 
