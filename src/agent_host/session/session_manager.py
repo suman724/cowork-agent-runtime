@@ -562,6 +562,7 @@ class SessionManager:
         )
 
         assistant_text = ""
+        result = None  # LoopResult — set on successful completion
         try:
             # Build execution context with workspace working directory
             exec_context: ExecutionContext | None = None
@@ -716,13 +717,25 @@ class SessionManager:
                     )
 
         finally:
-            # Report task completion to session service (best-effort)
-            if self._session_context and not isinstance(assistant_text, type(None)):
-                completion_status = "completed" if assistant_text else "failed"
-                reason = "completed"
-                if self._current_step_count >= max_steps:
+            # Report task completion to session service (best-effort).
+            # Use result.reason (from LoopResult) to determine status — not
+            # assistant_text, which can be empty even on successful completion
+            # (e.g., verification step produces no text output).
+            if self._session_context:
+                if result is not None:
+                    if result.reason == "completed":
+                        completion_status = "completed"
+                        reason = "completed"
+                    elif result.reason == "max_steps_exceeded":
+                        completion_status = "failed"
+                        reason = "max_steps_exceeded"
+                    else:
+                        completion_status = "failed"
+                        reason = result.reason
+                else:
+                    # Exception before LoopResult was produced
                     completion_status = "failed"
-                    reason = "max_steps_exceeded"
+                    reason = "error"
                 await self._report_task_completed(
                     task_id, completion_status, self._current_step_count, reason
                 )
