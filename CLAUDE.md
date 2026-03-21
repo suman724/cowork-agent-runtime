@@ -141,7 +141,7 @@ In either mode, the sandbox startup flow is:
 
 1. **Self-registration**: Reads container IP from ECS metadata (or localhost in `SANDBOX_LOCAL_MODE`), calls `POST /sessions/{sessionId}/register` on Session Service
 2. **Workspace sync**: Downloads workspace files from Workspace Service to `--workspace-dir` before serving HTTP. Sets the startup sync gate (`asyncio.Event`) after completion.
-3. **Session initialization**: Initializes from registration response (policy bundle, workspace ID) — skips `CreateSession` RPC
+3. **Session initialization**: Initializes from registration response (policy bundle, workspace ID) — skips `CreateSession` RPC. Loads prior session history from Workspace Service (no-op for new sessions, restores full conversation thread for resumed sessions).
 4. **Skills**: Loads from `{workspace}/.cowork/skills/` (project-level) in addition to built-in skills. No home directory needed. `SKILLS_DIR` env var overrides the user skills path.
 5. **Graceful shutdown**: On SIGTERM, uploads workspace files back to Workspace Service before exiting
 6. **`workspace.sync` RPC** (HTTP transport only): Session Service can trigger targeted file sync via `POST /rpc` with method `workspace.sync`. Supports `direction` (`pull`/`push`) and optional `paths` list. Serialized via `asyncio.Lock`, gated behind startup sync completion (30s timeout). See `workspace-file-sync.md` design doc.
