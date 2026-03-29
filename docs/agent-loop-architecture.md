@@ -553,6 +553,11 @@ flowchart TD
 | `Network.Http` | **DomainMatcher** | `allowedDomains`, `blockedDomains` (includes subdomains) |
 | `Search.Web` | — | No scope constraints; allowed if capability is granted |
 | `Code.Execute` | — | Language allowlist check (`allowedLanguages`); allowed if capability is granted |
+| `Browser.Navigate` | **DomainMatcher** + SSRF check | `allowedDomains`, `blockedDomains`; blocks local/private IPs; Tier 1 domain approval |
+| `Browser.Interact` | **SensitiveDetector** | Tier 2: password fields, payment fields, destructive buttons |
+| `Browser.Extract` | — | Read-only; no scope constraints |
+| `Browser.Submit` | — | Tier 3: always requires approval (unconditional) |
+| `Browser.Download` | **PathMatcher** | `allowedPaths`, `maxFileSizeBytes`; always requires approval |
 
 The `check_llm_call()` method verifies the `LLM.Call` capability is granted and the policy is not expired.
 
