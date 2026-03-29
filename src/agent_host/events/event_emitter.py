@@ -189,6 +189,24 @@ class EventEmitter:
             payload["error"] = error
         self.emit(EventType.TOOL_COMPLETED, payload=payload)
 
+    def emit_tool_output_chunk(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        content: str,
+        task_id: str = "",
+    ) -> None:
+        """Emit tool_output_chunk event for streaming tool output to frontend."""
+        self.emit(
+            "tool_output_chunk",
+            task_id=task_id,
+            payload={
+                "toolCallId": tool_call_id,
+                "toolName": tool_name,
+                "content": content,
+            },
+        )
+
     def emit_approval_requested(
         self,
         approval_id: str,

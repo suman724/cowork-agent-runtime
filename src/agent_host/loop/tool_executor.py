@@ -67,6 +67,32 @@ _PARALLELIZABLE_TOOLS = {
 # File.Write tools that are parallelizable if targeting different paths
 _PARALLEL_IF_DIFFERENT_PATH = {"WriteFile", "EditFile", "MultiEdit"}
 
+# A7: Per-tool hard timeout (seconds). Tools not listed here and not in
+# _NO_TIMEOUT_TOOLS get _DEFAULT_TOOL_TIMEOUT.
+_TOOL_TIMEOUTS: dict[str, int] = {
+    "RunCommand": 300,  # 5 minutes (existing default)
+    "ExecuteCode": 30,  # 30 seconds
+    "HttpRequest": 30,  # 30 seconds
+    "FetchUrl": 30,  # 30 seconds
+    "WebSearch": 15,  # 15 seconds
+}
+_DEFAULT_TOOL_TIMEOUT = 60  # 1 minute for unrecognized tools
+
+# File tools — local I/O, always fast, no timeout wrapper needed
+_NO_TIMEOUT_TOOLS = {
+    "ReadFile",
+    "WriteFile",
+    "DeleteFile",
+    "EditFile",
+    "MultiEdit",
+    "CreateDirectory",
+    "MoveFile",
+    "ListDirectory",
+    "FindFiles",
+    "GrepFiles",
+    "ViewImage",
+}
+
 # Tools allowed in plan mode (read-only exploration)
 PLAN_MODE_ALLOWED_TOOLS = {
     "ReadFile",
@@ -301,6 +327,8 @@ class ToolExecutor:
 
         # 5. Execute via ToolRouter
         try:
+            from dataclasses import replace
+
             from cowork_platform.tool_request import ToolRequest
 
             request = ToolRequest(
@@ -311,7 +339,31 @@ class ToolExecutor:
                 stepId=step_id,
                 capability=capability_name or None,
             )
-            exec_result = await self._tool_router.execute(request, self._execution_context)
+
+            # A6: Create per-call context with output chunk callback
+            call_context = self._execution_context
+            if call_context is not None and self._event_emitter:
+
+                def _on_chunk(content: str) -> None:
+                    if self._event_emitter:
+                        self._event_emitter.emit_tool_output_chunk(
+                            tool_name=tool_name,
+                            tool_call_id=call.id,
+                            content=content,
+                            task_id=task_id,
+                        )
+
+                call_context = replace(call_context, on_output_chunk=_on_chunk)
+
+            # A7: Per-tool hard timeout
+            tool_timeout = _TOOL_TIMEOUTS.get(tool_name, _DEFAULT_TOOL_TIMEOUT)
+            if tool_name in _NO_TIMEOUT_TOOLS:
+                exec_result = await self._tool_router.execute(request, call_context)
+            else:
+                exec_result = await asyncio.wait_for(
+                    self._tool_router.execute(request, call_context),
+                    timeout=tool_timeout,
+                )
 
             # Record file changes AFTER execution
             self._record_file_changes(tool_name, task_id, file_path_arg, old_content, arguments)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import sys
 from typing import TYPE_CHECKING, Any
@@ -18,7 +19,11 @@ from tool_runtime.tools.base import BaseTool
 from tool_runtime.validation import validate_absolute_path
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from tool_runtime.platform.base import PlatformAdapter
+
+_KILL_GRACE_SECONDS = 5
 
 
 class RunCommandTool(BaseTool):
@@ -26,6 +31,51 @@ class RunCommandTool(BaseTool):
 
     def __init__(self, platform: PlatformAdapter) -> None:
         self._platform = platform
+
+    async def _kill_process(self, process: asyncio.subprocess.Process) -> None:
+        """SIGTERM → grace period → SIGKILL if still alive."""
+        with contextlib.suppress(ProcessLookupError):
+            await self._platform.kill_process_tree(process.pid)
+        try:
+            await asyncio.wait_for(process.wait(), timeout=_KILL_GRACE_SECONDS)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+
+    async def _stream_output(
+        self,
+        process: asyncio.subprocess.Process,
+        timeout: int,
+        on_output_chunk: Callable[[str], None] | None,
+    ) -> tuple[str, str]:
+        """Stream stdout line-by-line, calling on_output_chunk per line.
+
+        Returns (stdout, stderr) after process completes.
+        """
+
+        async def _read_and_stream() -> tuple[str, str]:
+            stdout_lines: list[str] = []
+            assert process.stdout is not None  # noqa: S101
+            async for raw_line in process.stdout:
+                decoded = raw_line.decode("utf-8", errors="replace")
+                stdout_lines.append(decoded)
+                if on_output_chunk:
+                    on_output_chunk(decoded)
+
+            # Read stderr after stdout is done
+            stderr_bytes = b""
+            if process.stderr is not None:
+                stderr_bytes = await process.stderr.read()
+
+            await process.wait()
+
+            stdout = self._platform.normalize_line_endings("".join(stdout_lines))
+            stderr = self._platform.normalize_line_endings(
+                stderr_bytes.decode("utf-8", errors="replace")
+            )
+            return stdout, stderr
+
+        return await asyncio.wait_for(_read_and_stream(), timeout=timeout)
 
     @property
     def name(self) -> str:
@@ -115,21 +165,30 @@ class RunCommandTool(BaseTool):
             raise ToolExecutionError(f"Failed to start process: {e}") from e
 
         try:
-            stdin_bytes = stdin_data.encode("utf-8") if stdin_data else None
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                process.communicate(input=stdin_bytes),
-                timeout=timeout,
-            )
+            if stdin_data:
+                # With stdin, use communicate() (no streaming)
+                stdin_bytes = stdin_data.encode("utf-8")
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    process.communicate(input=stdin_bytes),
+                    timeout=timeout,
+                )
+                stdout = self._platform.normalize_line_endings(
+                    stdout_bytes.decode("utf-8", errors="replace")
+                )
+                stderr = self._platform.normalize_line_endings(
+                    stderr_bytes.decode("utf-8", errors="replace")
+                )
+            else:
+                # A6: Stream stdout line-by-line for live output chunks
+                stdout, stderr = await self._stream_output(
+                    process, timeout, context.on_output_chunk
+                )
         except TimeoutError as e:
-            await self._platform.kill_process_tree(process.pid)
+            await self._kill_process(process)
             raise ToolTimeoutError(f"Command timed out after {timeout}s: {command}") from e
-
-        stdout = self._platform.normalize_line_endings(
-            stdout_bytes.decode("utf-8", errors="replace")
-        )
-        stderr = self._platform.normalize_line_endings(
-            stderr_bytes.decode("utf-8", errors="replace")
-        )
+        except asyncio.CancelledError:
+            await self._kill_process(process)
+            raise
 
         exit_code = process.returncode if process.returncode is not None else 0
         output_text = f"# {description}\n{_format_output(exit_code, stdout, stderr)}"
