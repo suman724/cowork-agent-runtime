@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -14,6 +15,8 @@ from tool_runtime.tools.browser.browser_manager import (
     BrowserManager,
     BrowserState,
 )
+
+_has_playwright = importlib.util.find_spec("playwright") is not None
 
 
 def _make_manager(
@@ -45,6 +48,7 @@ def _mock_playwright_context() -> tuple[AsyncMock, AsyncMock, MagicMock]:
     return mock_pw, mock_context, mock_page
 
 
+@pytest.mark.skipif(not _has_playwright, reason="playwright not installed")
 class TestBrowserManagerLifecycle:
     def test_initial_state_is_idle(self) -> None:
         mgr = _make_manager()
@@ -123,6 +127,7 @@ class TestBrowserManagerLifecycle:
         await mgr.close()
 
 
+@pytest.mark.skipif(not _has_playwright, reason="playwright not installed")
 class TestBrowserManagerCrashDetection:
     def test_crash_transitions_to_suspended(self) -> None:
         mgr = _make_manager()
@@ -174,6 +179,7 @@ class TestBrowserManagerCrashDetection:
         await mgr.close()
 
 
+@pytest.mark.skipif(not _has_playwright, reason="playwright not installed")
 class TestBrowserManagerPauseResume:
     @patch("playwright.async_api.async_playwright")
     async def test_pause_blocks_get_page(self, mock_async_pw: MagicMock) -> None:
