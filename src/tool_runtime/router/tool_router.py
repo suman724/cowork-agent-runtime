@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from cowork_platform.tool_definition import ToolDefinition
@@ -48,11 +48,10 @@ class ToolRouter:
         self,
         platform: PlatformAdapter | None = None,
         http_client: httpx.AsyncClient | None = None,
-        browser_enabled: bool = False,
-        workspace_dir: str | None = None,
     ) -> None:
         self._platform = platform or get_platform()
         self._tools: dict[str, BaseTool] = {}
+        self._browser_manager: Any = None
 
         # Register built-in tools
         self._register(ReadFileTool(self._platform))
@@ -72,14 +71,10 @@ class ToolRouter:
         self._register(FetchUrlTool(http_client))
         self._register(WebSearchTool(http_client))
 
-        # Conditionally register browser tools
-        if browser_enabled and workspace_dir:
-            self._register_browser_tools(workspace_dir)
-
     def _register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
 
-    def _register_browser_tools(self, workspace_dir: str) -> None:
+    def register_browser_tools(self, workspace_dir: str) -> None:
         """Register browser tools. Only called when browser_enabled=True."""
         try:
             from tool_runtime.tools.browser.back import BrowserBackTool

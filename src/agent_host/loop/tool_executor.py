@@ -190,6 +190,11 @@ class ToolExecutor:
         self._approval_timeout = approval_timeout
         self._plan_mode = plan_mode
         self._plan_mode_locked = plan_mode_locked
+        self._browser_enabled = False
+
+    def set_browser_enabled(self, enabled: bool) -> None:
+        """Set browser tools availability for the current task."""
+        self._browser_enabled = enabled
 
     @property
     def plan_mode(self) -> bool:
@@ -789,9 +794,12 @@ class ToolExecutor:
                 )
 
     def get_tool_definitions(self) -> list[dict[str, Any]]:
-        """Return OpenAI-format tool definitions, filtered for plan mode if active."""
+        """Return OpenAI-format tool definitions, filtered for plan mode and browser toggle."""
         tool_defs: list[dict[str, Any]] = []
         for tool_def in self._tool_router.get_available_tools():
+            # Filter out browser tools when browser is not enabled for this task
+            if not self._browser_enabled and tool_def.toolName in _BROWSER_TOOLS:
+                continue
             # Filter out write/exec tools in plan mode
             if self._plan_mode and tool_def.toolName not in PLAN_MODE_ALLOWED_TOOLS:
                 continue
