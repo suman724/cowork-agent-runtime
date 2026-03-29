@@ -11,6 +11,19 @@ from typing import TYPE_CHECKING, Any
 import structlog
 from agent_sdk.loop.models import ToolCallResult
 
+from tool_runtime.exceptions import (
+    BrowserDomainApprovalRequiredError,
+    BrowserSensitiveApprovalRequiredError,
+    BrowserSubmitApprovalRequiredError,
+)
+
+# Tuple of browser approval exceptions for except clause
+_BrowserApprovalErrors = (
+    BrowserDomainApprovalRequiredError,
+    BrowserSensitiveApprovalRequiredError,
+    BrowserSubmitApprovalRequiredError,
+)
+
 if TYPE_CHECKING:
     from agent_sdk.approval.approval_gate import ApprovalGate
     from agent_sdk.llm.models import ToolCallMessage
@@ -43,6 +56,18 @@ TOOL_CAPABILITY_MAP: dict[str, str] = {
     "FetchUrl": "Network.Http",
     "WebSearch": "Search.Web",
     "ExecuteCode": "Code.Execute",
+    # Browser tools
+    "BrowserNavigate": "Browser.Navigate",
+    "BrowserClick": "Browser.Interact",
+    "BrowserType": "Browser.Interact",
+    "BrowserSelect": "Browser.Interact",
+    "BrowserScroll": "Browser.Navigate",
+    "BrowserBack": "Browser.Navigate",
+    "BrowserExtract": "Browser.Extract",
+    "BrowserScreenshot": "Browser.Extract",
+    "BrowserSubmit": "Browser.Submit",
+    "BrowserDownload": "Browser.Download",
+    "BrowserWait": "Browser.Navigate",
 }
 
 # Tools that mutate files
@@ -75,6 +100,9 @@ _TOOL_TIMEOUTS: dict[str, int] = {
     "HttpRequest": 30,  # 30 seconds
     "FetchUrl": 30,  # 30 seconds
     "WebSearch": 15,  # 15 seconds
+    # Browser tools — network-bound
+    "BrowserNavigate": 60,  # 1 minute (page load)
+    "BrowserDownload": 120,  # 2 minutes (file download)
 }
 _DEFAULT_TOOL_TIMEOUT = 60  # 1 minute for unrecognized tools
 
@@ -102,6 +130,24 @@ PLAN_MODE_ALLOWED_TOOLS = {
     "ViewImage",
     "FetchUrl",
     "WebSearch",
+    # Browser read-only tools (only if browser already open)
+    "BrowserExtract",
+    "BrowserScreenshot",
+}
+
+# Browser tools never parallelize with each other (shared page state)
+_BROWSER_TOOLS = {
+    "BrowserNavigate",
+    "BrowserClick",
+    "BrowserType",
+    "BrowserSelect",
+    "BrowserScroll",
+    "BrowserBack",
+    "BrowserExtract",
+    "BrowserScreenshot",
+    "BrowserSubmit",
+    "BrowserDownload",
+    "BrowserWait",
 }
 
 
@@ -405,6 +451,13 @@ class ToolExecutor:
                 image_url=image_url,
             )
 
+        except _BrowserApprovalErrors as exc:
+            # Browser tools raise approval-required exceptions as internal signals.
+            # Route through the existing ApprovalGate, then retry the tool.
+            return await self._handle_browser_approval(
+                exc, call, task_id, tool_name, arguments, step_id
+            )
+
         except Exception as exc:
             logger.warning(
                 "tool_execution_failed",
@@ -503,6 +556,111 @@ class ToolExecutor:
             )
 
         return None  # Approved — continue with execution
+
+    async def _handle_browser_approval(
+        self,
+        exc: BrowserDomainApprovalRequiredError
+        | BrowserSensitiveApprovalRequiredError
+        | BrowserSubmitApprovalRequiredError,
+        call: ToolCallMessage,
+        task_id: str,
+        tool_name: str,
+        arguments: dict[str, Any],
+        step_id: str,
+    ) -> ToolCallResult:
+        """Handle browser-specific approval requests.
+
+        Browser tools raise approval-required exceptions as internal signals.
+        This method routes them through the existing ApprovalGate infrastructure.
+        If approved, returns a re-execution result. If denied, returns an error.
+        """
+        if not self._approval_gate or not self._event_emitter:
+            # No approval gate — deny by default for safety
+            error_text = json.dumps(
+                {
+                    "status": "denied",
+                    "error": {"code": exc.code, "message": str(exc)},
+                }
+            )
+            return ToolCallResult(
+                tool_call_id=call.id,
+                tool_name=tool_name,
+                status="denied",
+                result_text=error_text,
+                arguments=arguments,
+            )
+
+        # Determine risk level and action summary based on exception type
+        if isinstance(exc, BrowserDomainApprovalRequiredError):
+            risk_level = "low"
+            action_summary = f"Allow agent to browse {exc.domain}"
+            title = "Allow Domain Access"
+        elif isinstance(exc, BrowserSensitiveApprovalRequiredError):
+            risk_level = "medium"
+            action_summary = exc.action_summary
+            title = "Sensitive Action"
+        else:  # BrowserSubmitApprovalRequiredError
+            risk_level = "high"
+            action_summary = exc.description
+            title = "Form Submission"
+
+        approval_id = str(uuid.uuid4())
+
+        self._event_emitter.emit_approval_requested(
+            approval_id=approval_id,
+            risk_level=risk_level,
+            tool_name=tool_name,
+            action_summary=action_summary,
+            session_id=self._session_id,
+            task_id=task_id,
+            title=title,
+        )
+
+        decision = await self._approval_gate.request_approval(
+            approval_id, timeout=self._approval_timeout
+        )
+
+        self._persist_approval_decision(
+            approval_id=approval_id,
+            session_id=self._session_id,
+            task_id=task_id,
+            decision=decision,
+            action_summary=action_summary,
+            risk_level=risk_level,
+        )
+
+        if decision != "approved":
+            # Map to appropriate browser denial error code
+            if isinstance(exc, BrowserDomainApprovalRequiredError):
+                error_code = "BROWSER_DOMAIN_DENIED"
+            elif isinstance(exc, BrowserSensitiveApprovalRequiredError):
+                error_code = "BROWSER_SENSITIVE_DENIED"
+            else:
+                error_code = "BROWSER_SUBMIT_DENIED"
+
+            error_text = json.dumps(
+                {
+                    "status": "denied",
+                    "error": {"code": error_code, "message": f"User denied: {action_summary}"},
+                }
+            )
+            return ToolCallResult(
+                tool_call_id=call.id,
+                tool_name=tool_name,
+                status="denied",
+                result_text=error_text,
+                arguments=arguments,
+            )
+
+        # Approved — record domain approval and re-execute
+        if isinstance(exc, BrowserDomainApprovalRequiredError):
+            # Add to session-approved domains so future visits skip approval
+            browser_mgr = getattr(self._tool_router, "_browser_manager", None)
+            if browser_mgr is not None:
+                browser_mgr.approved_domains.add(exc.domain)
+
+        # Re-execute the tool (approval exceptions won't re-fire for approved items)
+        return await self._execute_single(call, task_id, step_id=step_id)
 
     def _persist_approval_decision(
         self,

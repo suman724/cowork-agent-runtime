@@ -48,6 +48,8 @@ class ToolRouter:
         self,
         platform: PlatformAdapter | None = None,
         http_client: httpx.AsyncClient | None = None,
+        browser_enabled: bool = False,
+        workspace_dir: str | None = None,
     ) -> None:
         self._platform = platform or get_platform()
         self._tools: dict[str, BaseTool] = {}
@@ -70,8 +72,52 @@ class ToolRouter:
         self._register(FetchUrlTool(http_client))
         self._register(WebSearchTool(http_client))
 
+        # Conditionally register browser tools
+        if browser_enabled and workspace_dir:
+            self._register_browser_tools(workspace_dir)
+
     def _register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
+
+    def _register_browser_tools(self, workspace_dir: str) -> None:
+        """Register browser tools. Only called when browser_enabled=True."""
+        try:
+            from tool_runtime.tools.browser.back import BrowserBackTool
+            from tool_runtime.tools.browser.browser_manager import BrowserManager
+            from tool_runtime.tools.browser.click import BrowserClickTool
+            from tool_runtime.tools.browser.download import BrowserDownloadTool
+            from tool_runtime.tools.browser.extract import BrowserExtractTool
+            from tool_runtime.tools.browser.navigate import BrowserNavigateTool
+            from tool_runtime.tools.browser.screenshot import BrowserScreenshotTool
+            from tool_runtime.tools.browser.scroll import BrowserScrollTool
+            from tool_runtime.tools.browser.select import BrowserSelectTool
+            from tool_runtime.tools.browser.submit import BrowserSubmitTool
+            from tool_runtime.tools.browser.type_text import BrowserTypeTool
+            from tool_runtime.tools.browser.wait import BrowserWaitTool
+        except ImportError:
+            logger.warning(
+                "browser_tools_unavailable",
+                reason="playwright not installed — install with: "
+                "pip install cowork-agent-runtime[browser]",
+            )
+            return
+
+        mgr = BrowserManager(workspace_dir=workspace_dir)
+        self._browser_manager = mgr
+
+        self._register(BrowserNavigateTool(mgr))
+        self._register(BrowserClickTool(mgr))
+        self._register(BrowserTypeTool(mgr))
+        self._register(BrowserSelectTool(mgr))
+        self._register(BrowserScrollTool(mgr))
+        self._register(BrowserBackTool(mgr))
+        self._register(BrowserExtractTool(mgr))
+        self._register(BrowserScreenshotTool(mgr))
+        self._register(BrowserSubmitTool(mgr))
+        self._register(BrowserDownloadTool(mgr))
+        self._register(BrowserWaitTool(mgr))
+
+        logger.info("browser_tools_registered", tool_count=11)
 
     async def execute(
         self,
