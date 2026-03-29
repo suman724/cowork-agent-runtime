@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from cowork_platform.tool_result import ToolResult
 
 # --- Constants ---
@@ -22,7 +24,7 @@ DEFAULT_HTTP_TIMEOUT_SECONDS: int = 30
 DEFAULT_MAX_RESPONSE_BYTES: int = 10 * 1024 * 1024  # 10 MB
 
 
-@dataclass(frozen=True)
+@dataclass
 class ExecutionContext:
     """Carries optional capability constraints from agent_host.
 
@@ -41,6 +43,7 @@ class ExecutionContext:
     working_directory: str | None = None
     allow_code_network: bool = False
     max_execution_time_seconds: int | None = None
+    on_output_chunk: Callable[[str], None] | None = None
 
 
 @dataclass

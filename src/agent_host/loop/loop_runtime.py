@@ -34,7 +34,7 @@ logger = structlog.get_logger()
 # Sub-agent defaults
 _SUB_AGENT_MAX_STEPS = 10
 _SUB_AGENT_RECENCY_WINDOW = 10
-_RESULT_MAX_CHARS = 2000
+_RESULT_MAX_CHARS = 8000
 
 # Skill defaults
 _SKILL_RECENCY_WINDOW = 10
@@ -291,6 +291,7 @@ class LoopRuntime:
         parent_task_id: str,
         max_steps: int = _SUB_AGENT_MAX_STEPS,
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None = None,
+        plan_step_index: int | None = None,
     ) -> dict[str, Any]:
         """Spawn a sub-agent with an isolated thread but shared token budget.
 
@@ -302,8 +303,58 @@ class LoopRuntime:
         """
         async with self._sub_agent_semaphore:
             return await self._run_sub_agent(
-                task, context, parent_task_id, max_steps, strategy_factory
+                task,
+                context,
+                parent_task_id,
+                max_steps,
+                strategy_factory,
+                plan_step_index,
             )
+
+    def _build_working_memory_snapshot(self) -> str:
+        """Build a read-only summary of parent working memory for sub-agent context.
+
+        Includes task tracker and notes. Excludes plan (handled separately
+        by plan_context.build_sub_agent_plan_context).
+        """
+        if not self._working_memory:
+            return ""
+
+        parts: list[str] = []
+
+        # Task tracker
+        task_text = self._working_memory.task_tracker.render()
+        if task_text:
+            parts.append(task_text)
+
+        # Notes
+        if self._working_memory.notes:
+            note_lines = ["## Parent Notes"]
+            for note in self._working_memory.notes:
+                note_lines.append(f"- {note}")
+            parts.append("\n".join(note_lines))
+
+        return "\n\n".join(parts)
+
+    def _write_result_to_file(self, sub_task_id: str, result_text: str) -> str | None:
+        """Write large sub-agent result to workspace file. Returns path or None."""
+        if not self._workspace_dir:
+            return None
+        from pathlib import Path
+
+        result_dir = Path(self._workspace_dir) / ".cowork" / "sub-agent-results"
+        result_path = result_dir / f"{sub_task_id}.md"
+        try:
+            result_dir.mkdir(parents=True, exist_ok=True)
+            result_path.write_text(result_text, encoding="utf-8")
+            return str(result_path)
+        except OSError:
+            logger.warning(
+                "sub_agent_result_file_write_failed",
+                path=str(result_path),
+                exc_info=True,
+            )
+            return None
 
     async def _run_sub_agent(
         self,
@@ -312,10 +363,13 @@ class LoopRuntime:
         parent_task_id: str,
         max_steps: int,
         strategy_factory: Callable[[LoopRuntime], LoopStrategy] | None,
+        plan_step_index: int | None = None,
     ) -> dict[str, Any]:
         """Run a sub-agent with isolated context."""
         from agent_sdk.thread.compactor import DropOldestCompactor
         from agent_sdk.thread.message_thread import MessageThread
+
+        from agent_host.loop.plan_context import build_sub_agent_plan_context
 
         sub_task_id = f"{parent_task_id}-sub"
 
@@ -327,6 +381,18 @@ class LoopRuntime:
         if self._workspace_dir:
             system_prompt += f"Workspace directory: {self._workspace_dir}\n"
             system_prompt += "Use absolute paths for all file operations.\n\n"
+
+        # A2: Inject plan context if parent has a plan
+        if self._working_memory and self._working_memory.plan:
+            plan_ctx = build_sub_agent_plan_context(self._working_memory.plan, plan_step_index)
+            if plan_ctx:
+                system_prompt += f"{plan_ctx}\n\n"
+
+        # A5: Inject working memory snapshot (tasks + notes)
+        wm_snapshot = self._build_working_memory_snapshot()
+        if wm_snapshot:
+            system_prompt += f"{wm_snapshot}\n\n"
+
         if context:
             system_prompt += f"Context from parent agent:\n{context}\n\n"
         system_prompt += "Focus on the assigned task. Do not deviate."
@@ -364,10 +430,13 @@ class LoopRuntime:
 
             result = await strategy.run(sub_task_id)
 
-            # Truncate result text
+            # A4: Handle large results — write to file if oversized
             result_text = result.text
             if len(result_text) > _RESULT_MAX_CHARS:
+                file_path = self._write_result_to_file(sub_task_id, result_text)
                 result_text = result_text[:_RESULT_MAX_CHARS] + "... [truncated]"
+                if file_path:
+                    result_text += f"\n\n[Full result saved to {file_path}]"
 
             logger.info(
                 "sub_agent_completed",

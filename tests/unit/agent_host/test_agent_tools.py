@@ -266,8 +266,177 @@ class TestUpdatePlanStepTool:
             "in_progress",
             "completed",
             "skipped",
+            "failed",
         ]
 
     def test_is_agent_tool_includes_update_plan_step(self) -> None:
         handler = AgentToolHandler(WorkingMemory())
         assert handler.is_agent_tool("UpdatePlanStep")
+
+    # --- A1: Failed status ---
+
+    async def test_update_step_to_failed(self) -> None:
+        wm = WorkingMemory()
+        handler = AgentToolHandler(wm)
+        await handler.execute("CreatePlan", {"goal": "Goal", "steps": ["A", "B"]})
+
+        result = await handler.execute("UpdatePlanStep", {"stepIndex": 0, "status": "failed"})
+        assert result["status"] == "success"
+        assert result["newStatus"] == "failed"
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "failed"
+
+
+class TestSpawnAgentPlanIntegration:
+    """Tests for A2/A3: SpawnAgent with planStepIndex auto-updates."""
+
+    async def test_spawn_agent_marks_step_in_progress(self) -> None:
+        wm = WorkingMemory()
+        calls: list[tuple[str, list[dict[str, Any]]]] = []
+        spawned = False
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            nonlocal spawned
+            spawned = True
+            # At this point step should already be in_progress
+            assert wm.plan is not None
+            assert wm.plan.steps[0].status == "in_progress"
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(
+            wm,
+            spawn_sub_agent=mock_spawn,
+            on_plan_updated=lambda goal, steps: calls.append((goal, steps)),
+        )
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A", "Step B"]})
+        calls.clear()
+
+        result = await handler.execute("SpawnAgent", {"task": "do step A", "planStepIndex": 0})
+        assert spawned
+        assert result["status"] == "completed"
+
+    async def test_spawn_agent_completed_marks_step_completed(self) -> None:
+        wm = WorkingMemory()
+        calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(
+            wm,
+            spawn_sub_agent=mock_spawn,
+            on_plan_updated=lambda goal, steps: calls.append((goal, steps)),
+        )
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A"]})
+        calls.clear()
+
+        await handler.execute("SpawnAgent", {"task": "do step A", "planStepIndex": 0})
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "completed"
+        # Should have emitted plan_updated at least twice (in_progress + completed)
+        assert len(calls) >= 2
+
+    async def test_spawn_agent_error_marks_step_failed(self) -> None:
+        wm = WorkingMemory()
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "error", "result": "Sub-agent failed", "steps": 0}
+
+        handler = AgentToolHandler(
+            wm,
+            spawn_sub_agent=mock_spawn,
+        )
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A"]})
+
+        await handler.execute("SpawnAgent", {"task": "do step A", "planStepIndex": 0})
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "failed"
+
+    async def test_spawn_agent_max_steps_marks_step_failed(self) -> None:
+        wm = WorkingMemory()
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "max_steps", "result": "Ran out of steps", "steps": 10}
+
+        handler = AgentToolHandler(
+            wm,
+            spawn_sub_agent=mock_spawn,
+        )
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A"]})
+
+        await handler.execute("SpawnAgent", {"task": "do step A", "planStepIndex": 0})
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "failed"
+
+    async def test_spawn_agent_invalid_step_index_no_crash(self) -> None:
+        wm = WorkingMemory()
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(wm, spawn_sub_agent=mock_spawn)
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A"]})
+
+        # Out-of-range index — should not crash
+        result = await handler.execute("SpawnAgent", {"task": "do it", "planStepIndex": 99})
+        assert result["status"] == "completed"
+        # Step should remain unchanged
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "pending"
+
+    async def test_spawn_agent_no_plan_with_step_index_no_crash(self) -> None:
+        """planStepIndex with no plan should not crash."""
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(WorkingMemory(), spawn_sub_agent=mock_spawn)
+        result = await handler.execute("SpawnAgent", {"task": "do it", "planStepIndex": 0})
+        assert result["status"] == "completed"
+
+    async def test_spawn_agent_no_plan_step_index_unchanged(self) -> None:
+        """Without planStepIndex, no auto-update should happen."""
+        wm = WorkingMemory()
+
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(wm, spawn_sub_agent=mock_spawn)
+        await handler.execute("CreatePlan", {"goal": "Build", "steps": ["Step A"]})
+
+        await handler.execute("SpawnAgent", {"task": "do it"})
+        assert wm.plan is not None
+        assert wm.plan.steps[0].status == "pending"  # Unchanged
+
+
+class TestEnterPlanModeDescription:
+    """Test that EnterPlanMode description accurately lists available tools."""
+
+    def test_description_mentions_spawn_agent(self) -> None:
+        handler = AgentToolHandler(WorkingMemory())
+        defs = handler.get_tool_definitions()
+        enter_def = next(d for d in defs if d["function"]["name"] == "EnterPlanMode")
+        desc = enter_def["function"]["description"]
+        assert "SpawnAgent" in desc
+
+    def test_description_mentions_read_only_external(self) -> None:
+        handler = AgentToolHandler(WorkingMemory())
+        defs = handler.get_tool_definitions()
+        enter_def = next(d for d in defs if d["function"]["name"] == "EnterPlanMode")
+        desc = enter_def["function"]["description"]
+        assert "read-only external" in desc
+
+
+class TestSpawnAgentToolDefinition:
+    """Test that SpawnAgent tool definition includes planStepIndex."""
+
+    def test_has_plan_step_index_parameter(self) -> None:
+        async def mock_spawn(**kwargs: Any) -> dict[str, Any]:
+            return {"status": "completed", "result": "done", "steps": 1}
+
+        handler = AgentToolHandler(WorkingMemory(), spawn_sub_agent=mock_spawn)
+        defs = handler.get_tool_definitions()
+        spawn_def = next(d for d in defs if d["function"]["name"] == "SpawnAgent")
+        props = spawn_def["function"]["parameters"]["properties"]
+        assert "planStepIndex" in props
+        assert props["planStepIndex"]["type"] == "integer"

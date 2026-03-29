@@ -104,16 +104,17 @@ class TestSubAgentSpawn:
         assert result["steps"] == 2
 
     async def test_result_truncation(self) -> None:
-        """Results longer than 2K chars should be truncated."""
+        """Results longer than 8K chars should be truncated."""
         mock = MockLLMClient()
-        mock.enqueue_text("x" * 5000)
+        mock.enqueue_text("x" * 10000)
         runtime = _make_loop_runtime(mock)
 
         result = await runtime.spawn_sub_agent(
             task="Generate long text", context="", parent_task_id="task-1"
         )
-        assert len(result["result"]) <= 2100  # 2000 + "[truncated]" overhead
-        assert result["result"].endswith("... [truncated]")
+        # 8000 chars + "... [truncated]" overhead (no workspace dir → inline only)
+        assert len(result["result"]) <= 8100
+        assert "... [truncated]" in result["result"]
 
     async def test_error_handling(self) -> None:
         """Sub-agent should handle errors gracefully."""
@@ -162,7 +163,15 @@ class TestSubAgentConcurrency:
 
         original_run = LoopRuntime._run_sub_agent
 
-        async def tracking_run(self, task, context, parent_task_id, max_steps, strategy_factory):
+        async def tracking_run(
+            self,
+            task,
+            context,
+            parent_task_id,
+            max_steps,
+            strategy_factory,
+            plan_step_index=None,
+        ):
             nonlocal active_count, max_active
             active_count += 1
             max_active = max(max_active, active_count)
