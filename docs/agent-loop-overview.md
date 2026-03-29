@@ -160,9 +160,27 @@ The agent has **16 built-in tools** organized into four categories:
 |------|-------------|
 | **ExecuteCode** | Run a Python script in a sandboxed subprocess with image/chart output support |
 
+### Browser Tools (11) — Desktop-only, opt-in
+
+| Tool | What it does |
+|------|-------------|
+| **BrowserNavigate** | Navigate to a URL with SSRF prevention and domain approval |
+| **BrowserClick** | Click an interactive element by index with sensitive detection |
+| **BrowserType** | Type into an input field by index with sensitive field detection |
+| **BrowserSelect** | Select dropdown option, checkbox, or radio button |
+| **BrowserScroll** | Scroll page with lazy-load wait |
+| **BrowserBack** | Navigate browser history back |
+| **BrowserExtract** | Read page content as markdown/text/HTML |
+| **BrowserScreenshot** | Capture viewport/full-page/element screenshot |
+| **BrowserSubmit** | Submit form with mandatory approval checkpoint |
+| **BrowserDownload** | Download file to workspace with approval |
+| **BrowserWait** | Wait for element, navigation, or network idle |
+
+Browser tools require the `Browser.*` capabilities in the policy bundle and the user must enable the browser toggle per-session. Playwright launches lazily on first use. Desktop-only — excluded from web sandbox sessions.
+
 ### Agent-Internal Tools
 
-In addition to the 16 external tools, the agent has **internal tools** that manage its own state. These bypass policy enforcement because they don't interact with the user's system:
+In addition to the external tools, the agent has **internal tools** that manage its own state. These bypass policy enforcement because they don't interact with the user's system:
 
 | Tool | What it does |
 |------|-------------|

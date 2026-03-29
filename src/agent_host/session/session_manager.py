@@ -177,6 +177,10 @@ class SessionManager:
         if workspace_hint and workspace_hint.localPaths:
             self._workspace_dir = workspace_hint.localPaths[0]
 
+        # Register browser tools now that workspace_dir is known
+        if self._workspace_dir:
+            self._tool_router.register_browser_tools(self._workspace_dir)
+
         # Derive capabilities from actual tools available in the router
         available_tools = self._tool_router.get_available_tools()
         capability_set: set[str] = set()
@@ -576,6 +580,7 @@ class SessionManager:
 
         task_options = task_options or {}
         plan_only = bool(task_options.get("planOnly", False))
+        browser_enabled = bool(task_options.get("browserEnabled", False))
         logger.info(
             "run_task_plan_mode",
             task_id=task_id,
@@ -586,6 +591,10 @@ class SessionManager:
         result = None  # LoopResult — set on successful completion
         try:
             # Build execution context with workspace working directory
+            # TODO(Phase B): Extract allowed_domains/blocked_domains from
+            # Browser.Navigate capability scope and pass to ExecutionContext.
+            # Currently domain enforcement is handled by PolicyEnforcer at
+            # tool_executor level + BrowserNavigate's own domain checks.
             exec_context: ExecutionContext | None = None
             if self._workspace_dir:
                 exec_context = ExecutionContext(working_directory=self._workspace_dir)
@@ -608,6 +617,7 @@ class SessionManager:
                 plan_mode=plan_only,
                 plan_mode_locked=plan_only,
             )
+            tool_executor.set_browser_enabled(browser_enabled)
 
             # Build compactor (hybrid or drop-oldest based on config)
             compactor: ContextCompactor
@@ -1306,6 +1316,14 @@ class SessionManager:
         # Emit session_completed before cleanup
         if self._event_emitter:
             self._event_emitter.emit_session_completed()
+
+        # Close browser manager (if browser tools were registered)
+        browser_mgr = getattr(self._tool_router, "_browser_manager", None)
+        if browser_mgr is not None:
+            try:
+                await browser_mgr.close()
+            except Exception:
+                logger.warning("browser_manager_close_failed", exc_info=True)
 
         # Close LLM client
         if self._llm_client:

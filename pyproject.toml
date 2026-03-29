@@ -76,6 +76,15 @@ module = ["markdownify", "markdownify.*"]
 ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
+module = ["playwright", "playwright.*"]
+ignore_missing_imports = true
+follow_untyped_imports = true
+
+[[tool.mypy.overrides]]
+module = ["tool_runtime.tools.browser.*"]
+warn_unused_ignores = false
+
+[[tool.mypy.overrides]]
 module = ["starlette", "starlette.*", "uvicorn", "uvicorn.*"]
 ignore_missing_imports = true
 follow_untyped_imports = true

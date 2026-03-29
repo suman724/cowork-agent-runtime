@@ -29,6 +29,7 @@ tool_runtime/   ← Local Tool Runtime (tool execution, unchanged)
     shell/      — RunCommand
     network/    — HttpRequest, FetchUrl, WebSearch
     code/       — ExecuteCode (Python script execution)
+    browser/    — BrowserNavigate, BrowserClick, BrowserType, BrowserSelect, BrowserScroll, BrowserBack, BrowserExtract, BrowserScreenshot, BrowserSubmit, BrowserDownload, BrowserWait (Playwright, desktop-only, opt-in)
   code/         — Code execution engine (PythonExecutor, preamble, CodeExecutionResult)
   platform/     — OS abstraction (path handling, shell resolution, encoding) for macOS/Windows
   mcp/          — MCP client: discovery, connection, manifest translation (Phase 2+)
@@ -108,6 +109,17 @@ from tool_runtime import ToolRouter, ExecutionContext, ToolExecutionResult
 | `FetchUrl` | `Network.Http` | Fetch URL, convert HTML→markdown |
 | `WebSearch` | `Search.Web` | Web search via Tavily API |
 | `ExecuteCode` | `Code.Execute` | Execute Python scripts with output capture and matplotlib support |
+| `BrowserNavigate` | `Browser.Navigate` | Navigate headed browser to URL with SSRF prevention |
+| `BrowserClick` | `Browser.Interact` | Click interactive element by index with sensitive detection |
+| `BrowserType` | `Browser.Interact` | Type into input field by index with sensitive field detection |
+| `BrowserSelect` | `Browser.Interact` | Select dropdown option, checkbox, or radio button |
+| `BrowserScroll` | `Browser.Navigate` | Scroll page with lazy-load wait |
+| `BrowserBack` | `Browser.Navigate` | Navigate browser history back |
+| `BrowserExtract` | `Browser.Extract` | Read page content as markdown/text/HTML |
+| `BrowserScreenshot` | `Browser.Extract` | Capture viewport/full-page/element screenshot |
+| `BrowserSubmit` | `Browser.Submit` | Submit form with mandatory approval checkpoint |
+| `BrowserDownload` | `Browser.Download` | Download file to workspace with approval |
+| `BrowserWait` | `Browser.Navigate` | Wait for element, navigation, or network idle |
 
 ## Environment Variables
 

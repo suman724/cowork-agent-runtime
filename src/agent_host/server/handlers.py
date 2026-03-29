@@ -37,6 +37,8 @@ class Handlers:
         dispatcher.register("GetPatchPreview", self.handle_get_patch_preview)
         dispatcher.register("Shutdown", self.handle_shutdown)
         dispatcher.register("GetEvents", self.handle_get_events)
+        dispatcher.register("browser.pause", self.handle_browser_pause)
+        dispatcher.register("browser.resume", self.handle_browser_resume)
 
     async def handle_create_session(self, params: dict[str, Any]) -> dict[str, Any]:
         """CreateSession — initialize session with Session Service."""
@@ -85,3 +87,19 @@ class Handlers:
     async def handle_shutdown(self, params: dict[str, Any]) -> dict[str, Any]:
         """Shutdown — clean session teardown."""
         return await self._session_manager.shutdown()
+
+    async def handle_browser_pause(self, params: dict[str, Any]) -> dict[str, Any]:
+        """browser.pause — pause agent for user takeover of headed browser."""
+        browser_mgr = getattr(self._session_manager._tool_router, "_browser_manager", None)
+        if browser_mgr is None:
+            return {"status": "error", "message": "Browser not available"}
+        browser_mgr.pause()
+        return {"status": "paused"}
+
+    async def handle_browser_resume(self, params: dict[str, Any]) -> dict[str, Any]:
+        """browser.resume — resume agent after user takeover."""
+        browser_mgr = getattr(self._session_manager._tool_router, "_browser_manager", None)
+        if browser_mgr is None:
+            return {"status": "error", "message": "Browser not available"}
+        browser_mgr.resume()
+        return {"status": "resumed"}
