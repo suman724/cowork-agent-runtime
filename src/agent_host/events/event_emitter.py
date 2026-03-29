@@ -207,6 +207,42 @@ class EventEmitter:
             },
         )
 
+    # --- Browser events ---
+
+    def emit_browser_started(self, browser_channel: str = "chromium") -> None:
+        """Emit browser_started event — browser launched, side panel should open."""
+        self.emit("browser_started", payload={"browserChannel": browser_channel})
+
+    def emit_browser_stopped(self, reason: str) -> None:
+        """Emit browser_stopped event — browser closed (idle, closed, crashed)."""
+        self.emit("browser_stopped", payload={"reason": reason})
+
+    def emit_browser_page_state(self, url: str, screenshot_base64: str) -> None:
+        """Emit browser_page_state event — screenshot update for side panel."""
+        self.emit(
+            "browser_page_state",
+            payload={"url": url, "screenshotBase64": screenshot_base64},
+        )
+
+    def emit_browser_auth_required(self, domain: str, signals: list[str]) -> None:
+        """Emit browser_auth_required — user needs to log in."""
+        self.emit(
+            "browser_auth_required",
+            payload={"domain": domain, "signals": signals},
+        )
+
+    def emit_browser_takeover_started(self) -> None:
+        """Emit browser_takeover_started — user took over browser control."""
+        self.emit("browser_takeover_started")
+
+    def emit_browser_takeover_ended(self) -> None:
+        """Emit browser_takeover_ended — user resumed agent control."""
+        self.emit("browser_takeover_ended")
+
+    def emit_browser_domain_approved(self, domain: str) -> None:
+        """Emit browser_domain_approved — user approved a new domain."""
+        self.emit("browser_domain_approved", payload={"domain": domain})
+
     def emit_approval_requested(
         self,
         approval_id: str,
