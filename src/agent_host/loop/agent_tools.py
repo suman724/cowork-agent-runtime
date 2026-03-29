@@ -4,12 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import structlog
+
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from agent_sdk.memory.memory_manager import MemoryManager
     from agent_sdk.memory.working_memory import WorkingMemory
     from agent_sdk.skills.models import SkillDefinition
+
+logger = structlog.get_logger(__name__)
 
 # Agent-internal tool names — these bypass PolicyEnforcer and ToolRouter
 AGENT_TOOL_NAMES = {
@@ -174,7 +178,7 @@ class AgentToolHandler:
                             },
                             "status": {
                                 "type": "string",
-                                "enum": ["in_progress", "completed", "skipped"],
+                                "enum": ["in_progress", "completed", "skipped", "failed"],
                                 "description": "New status for the step.",
                             },
                         },
@@ -190,9 +194,12 @@ class AgentToolHandler:
                 "function": {
                     "name": "EnterPlanMode",
                     "description": (
-                        "Switch to plan mode. In plan mode, only read-only tools "
-                        "are available. Use this to explore and analyze before "
-                        "making changes. Call ExitPlanMode when ready to execute."
+                        "Switch to plan mode. In plan mode, only read-only external "
+                        "tools are available (ReadFile, ListDirectory, FindFiles, "
+                        "GrepFiles, ViewImage, FetchUrl, WebSearch). Agent-internal "
+                        "tools remain available: SpawnAgent, CreatePlan, UpdatePlanStep, "
+                        "SaveMemory, RecallMemory, ListMemories. "
+                        "Call ExitPlanMode when ready to execute."
                     ),
                     "parameters": {"type": "object", "properties": {}},
                 },
@@ -312,7 +319,9 @@ class AgentToolHandler:
                         "name": "SpawnAgent",
                         "description": (
                             "Spawn a focused sub-agent to work on a specific task. "
-                            "The sub-agent has its own context and runs independently."
+                            "The sub-agent has its own context and runs independently. "
+                            "For plan steps, provide planStepIndex to automatically "
+                            "update the plan step status on completion."
                         ),
                         "parameters": {
                             "type": "object",
@@ -324,6 +333,14 @@ class AgentToolHandler:
                                 "context": {
                                     "type": "string",
                                     "description": "Relevant context from the current work.",
+                                },
+                                "planStepIndex": {
+                                    "type": "integer",
+                                    "description": (
+                                        "0-based index of the plan step this sub-agent "
+                                        "implements. Enables plan context injection and "
+                                        "auto-update of step status on completion."
+                                    ),
                                 },
                             },
                             "required": ["task"],
@@ -422,10 +439,10 @@ class AgentToolHandler:
 
         if step_index is None or not isinstance(step_index, int):
             return {"status": "error", "message": "stepIndex is required (integer)"}
-        if status not in ("in_progress", "completed", "skipped"):
+        if status not in ("in_progress", "completed", "skipped", "failed"):
             return {
                 "status": "error",
-                "message": "status must be in_progress, completed, or skipped",
+                "message": "status must be in_progress, completed, skipped, or failed",
             }
         if step_index < 0 or step_index >= len(plan.steps):
             return {
@@ -480,19 +497,81 @@ class AgentToolHandler:
         return {"status": "success", "planMode": False}
 
     async def _handle_spawn_agent(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        """Handle SpawnAgent tool calls."""
+        """Handle SpawnAgent tool calls.
+
+        When planStepIndex is provided:
+        1. Marks the step in_progress before spawning
+        2. Marks completed or failed after sub-agent returns
+        3. Emits plan_updated event at each transition
+        """
         if not self._spawn_sub_agent:
             return {"status": "error", "message": "Sub-agent spawning is not available"}
 
         task = arguments.get("task", "")
         if not task:
             return {"status": "error", "message": "task is required"}
+
         context = arguments.get("context", "")
-        return await self._spawn_sub_agent(
+        plan_step_index = arguments.get("planStepIndex")
+
+        # Validate planStepIndex if provided
+        plan = self._working_memory.plan
+        valid_step = (
+            plan is not None
+            and isinstance(plan_step_index, int)
+            and 0 <= plan_step_index < len(plan.steps)
+        )
+
+        if plan_step_index is not None and not valid_step:
+            logger.warning(
+                "spawn_agent_invalid_step_index",
+                plan_step_index=plan_step_index,
+                plan_exists=plan is not None,
+                plan_step_count=len(plan.steps) if plan else 0,
+            )
+
+        # Pre-spawn: mark step in_progress if currently pending
+        if valid_step and plan is not None:
+            step = plan.steps[plan_step_index]  # type: ignore[index]
+            if step.status == "pending":
+                step.status = "in_progress"
+                self._notify_plan_updated()
+                logger.info(
+                    "plan_step_auto_in_progress",
+                    step_index=plan_step_index,
+                    description=step.description,
+                )
+
+        result = await self._spawn_sub_agent(
             task=task,
             context=context,
             parent_task_id="",
+            plan_step_index=plan_step_index if valid_step else None,
         )
+
+        # Post-spawn: auto-update plan step based on result
+        if valid_step and plan is not None:
+            step = plan.steps[plan_step_index]  # type: ignore[index]
+            result_status = result.get("status", "")
+            if result_status == "completed":
+                step.status = "completed"
+                self._notify_plan_updated()
+                logger.info(
+                    "plan_step_auto_completed",
+                    step_index=plan_step_index,
+                    description=step.description,
+                )
+            elif result_status in ("error", "max_steps"):
+                step.status = "failed"
+                self._notify_plan_updated()
+                logger.info(
+                    "plan_step_auto_failed",
+                    step_index=plan_step_index,
+                    description=step.description,
+                    reason=result_status,
+                )
+
+        return result
 
     async def _handle_save_memory(self, arguments: dict[str, Any]) -> dict[str, Any]:
         """Handle SaveMemory tool calls."""
