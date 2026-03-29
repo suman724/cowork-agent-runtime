@@ -591,6 +591,10 @@ class SessionManager:
         result = None  # LoopResult — set on successful completion
         try:
             # Build execution context with workspace working directory
+            # TODO(Phase B): Extract allowed_domains/blocked_domains from
+            # Browser.Navigate capability scope and pass to ExecutionContext.
+            # Currently domain enforcement is handled by PolicyEnforcer at
+            # tool_executor level + BrowserNavigate's own domain checks.
             exec_context: ExecutionContext | None = None
             if self._workspace_dir:
                 exec_context = ExecutionContext(working_directory=self._workspace_dir)
@@ -1312,6 +1316,14 @@ class SessionManager:
         # Emit session_completed before cleanup
         if self._event_emitter:
             self._event_emitter.emit_session_completed()
+
+        # Close browser manager (if browser tools were registered)
+        browser_mgr = getattr(self._tool_router, "_browser_manager", None)
+        if browser_mgr is not None:
+            try:
+                await browser_mgr.close()
+            except Exception:
+                logger.warning("browser_manager_close_failed", exc_info=True)
 
         # Close LLM client
         if self._llm_client:

@@ -66,25 +66,46 @@ class BrowserSubmitTool(BaseBrowserTool):
         page = await self._get_page()
 
         # 1. Resolve element
-        _element, _snapshot = await self._resolve_element(page, index)
+        element, _snapshot = await self._resolve_element(page, index)
 
-        # 2. Extract form data with redaction
-        form_data = await self._extract_form_data(page)
+        # 2. Check if this is a retry after approval
+        if not arguments.get("_approved"):
+            # First call — extract form data and trigger approval
+            form_data = await self._extract_form_data(page)
+            screenshot_b64 = await self._capture_screenshot_base64(page)
 
-        # 3. Capture screenshot for approval dialog
-        screenshot_b64 = await self._capture_screenshot_base64(page)
+            raise BrowserSubmitApprovalRequiredError(
+                description=description,
+                url=page.url,
+                form_data=form_data,
+                screenshot_base64=screenshot_b64,
+            )
 
-        # 4. Always trigger approval — unconditional Tier 3
-        raise BrowserSubmitApprovalRequiredError(
-            description=description,
-            url=page.url,
-            form_data=form_data,
-            screenshot_base64=screenshot_b64,
-        )
+        # 3. Approved — click the submit element
+        try:
+            locator = page.get_by_role(
+                element.role,  # type: ignore[arg-type]
+                name=element.name,
+            )
+            await locator.first.click()
+        except Exception as exc:
+            from tool_runtime.exceptions import BrowserElementNotInteractableError
 
-        # Note: if approved, ToolExecutor retries the tool call.
-        # The actual click happens on retry after approval.
-        # This is handled in ToolExecutor's browser approval flow.
+            raise BrowserElementNotInteractableError(
+                f'Could not submit [{index}] {element.role} "{element.name}": {exc}'
+            ) from exc
+
+        # 4. Wait for navigation/response
+        try:  # noqa: SIM105
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:  # noqa: S110
+            pass
+
+        # 5. Re-extract page state
+        rendered = await self._extract_and_render(page)
+
+        logger.info("browser_submitted", index=index, description=description)
+        return self._page_state_output(rendered)
 
     async def _extract_form_data(self, page: Any) -> list[dict[str, str]]:
         """Extract visible form field labels and redacted values."""

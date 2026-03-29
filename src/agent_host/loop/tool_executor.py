@@ -254,7 +254,14 @@ class ToolExecutor:
         current_batch_paths: set[str] = set()
 
         for call in calls:
-            if call.name in _PARALLELIZABLE_TOOLS:
+            if call.name in _BROWSER_TOOLS:
+                # Browser tools always serialize — shared page state
+                if current_batch:
+                    groups.append(current_batch)
+                    current_batch = []
+                    current_batch_paths = set()
+                groups.append([call])
+            elif call.name in _PARALLELIZABLE_TOOLS:
                 current_batch.append(call)
             elif call.name in _PARALLEL_IF_DIFFERENT_PATH:
                 path = call.arguments.get("path", "")
@@ -657,12 +664,20 @@ class ToolExecutor:
                 arguments=arguments,
             )
 
-        # Approved — record domain approval and re-execute
+        # Approved — record state and re-execute
         if isinstance(exc, BrowserDomainApprovalRequiredError):
             # Add to session-approved domains so future visits skip approval
             browser_mgr = getattr(self._tool_router, "_browser_manager", None)
             if browser_mgr is not None:
                 browser_mgr.approved_domains.add(exc.domain)
+
+        if isinstance(exc, BrowserSubmitApprovalRequiredError):
+            # Mark as approved so retry doesn't re-trigger approval
+            from agent_sdk.llm.models import ToolCallMessage
+
+            approved_args = {**call.arguments, "_approved": True}
+            approved_call = ToolCallMessage(id=call.id, name=call.name, arguments=approved_args)
+            return await self._execute_single(approved_call, task_id, step_id=step_id)
 
         # Re-execute the tool (approval exceptions won't re-fire for approved items)
         return await self._execute_single(call, task_id, step_id=step_id)
